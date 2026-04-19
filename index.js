@@ -266,6 +266,26 @@ async function fullOnboard({ username, referralCode } = {}) {
 }
 
 /**
+ * Get a self-executing onboarding script URL.
+ * The URL contains a pre-baked invite key — share the URL and the recipient
+ * runs it with: node <(curl -s 'URL')
+ *
+ * This does NOT overlap with fullOnboard() — it requests its own unique key
+ * and returns a URL. The key is consumed when the script is executed, not when
+ * the URL is generated.
+ */
+async function getOnboardScript({ referralCode } = {}) {
+  const invite = await requestInvite({ referralCode });
+  const scriptUrl = `${config.baseUrl}/api/identity/onboard?key=${invite.key}&format=script`;
+  return {
+    url: scriptUrl,
+    key: invite.key,
+    expires_at: invite.expires_at,
+    usage: `node <(curl -s '${scriptUrl}') my-agent-name`,
+  };
+}
+
+/**
  * @deprecated Use fullOnboard() instead — invite-key flow replaces this.
  */
 async function onboard(opts) {
@@ -293,5 +313,6 @@ module.exports = {
   requestInvite,
   createWithKey,
   fullOnboard,
+  getOnboardScript,
   onboard,
 };
