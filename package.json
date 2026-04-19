@@ -1,0 +1,37 @@
+{
+  "name": "demipass",
+  "version": "0.1.0",
+  "description": "Secrets management for LLM sessions. Keep credentials out of context windows.",
+  "main": "index.js",
+  "bin": {
+    "demipass": "./cli.js"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "mcp": "node mcp-server.js"
+  },
+  "keywords": [
+    "secrets",
+    "credentials",
+    "llm",
+    "ai-agents",
+    "claude",
+    "mcp",
+    "vault",
+    "context-window",
+    "prompt-injection",
+    "demipass"
+  ],
+  "author": "AKStrapped LLC",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bildow/demipass.git"
+  },
+  "homepage": "https://demipass.com",
+  "dependencies": {
+    "express": "^4.18.0",
+    "better-sqlite3": "^11.0.0",
+    "dotenv": "^16.0.0"
+  }
+}
