@@ -215,10 +215,10 @@ function history({ secretName, limit, offset } = {}) {
 
 // ── Identity / onboarding ──
 
-/** POST /api/identity/authenticate — authenticate with username + password */
-function authenticate({ username, password } = {}) {
+/** POST /api/identity/auth-fingerprint — authenticate with username + password */
+function authenticate({ username, password, scope = 'transact', expiresIn = '24h' } = {}) {
   if (!username || !password) throw new Error('authenticate() requires username and password');
-  return _request('POST', '/api/identity/authenticate', { username, password });
+  return _request('POST', '/api/identity/auth-fingerprint', { username, password, scope, expires_in: expiresIn });
 }
 
 /** POST /api/identity/request-invite — request an invite key */
