@@ -213,6 +213,65 @@ function history({ secretName, limit, offset } = {}) {
   });
 }
 
+// ── Identity / onboarding ──
+
+/** POST /api/identity/authenticate — authenticate with username + password */
+function authenticate({ username, password } = {}) {
+  if (!username || !password) throw new Error('authenticate() requires username and password');
+  return _request('POST', '/api/identity/authenticate', { username, password });
+}
+
+/** POST /api/identity/request-invite — request an invite key */
+function requestInvite({ referralCode } = {}) {
+  const body = {};
+  if (referralCode) body.referral_code = referralCode;
+  return _request('POST', '/api/identity/request-invite', body);
+}
+
+/** POST /api/identity/create — create account with invite key */
+function createWithKey({ username, key } = {}) {
+  if (!username || !key) throw new Error('createWithKey() requires username and key');
+  return _request('POST', '/api/identity/create', { username, key });
+}
+
+/**
+ * Full onboarding in one call:
+ * 1. requestInvite (with optional referralCode)
+ * 2. createWithKey (with username + key from step 1)
+ * 3. authenticate (with username + key as password)
+ * Returns: { did, email, token, referral_code, key }
+ *
+ * This replaces the old onboard() flow.
+ */
+async function fullOnboard({ username, referralCode } = {}) {
+  if (!username) throw new Error('fullOnboard() requires username');
+
+  // Step 1: get an invite key
+  const invite = await requestInvite({ referralCode });
+  const key = invite.key;
+
+  // Step 2: create account — the key IS the password IS referral attribution
+  const identity = await createWithKey({ username, key });
+
+  // Step 3: authenticate with the key as password
+  const auth = await authenticate({ username, password: key });
+
+  return {
+    did: identity.did,
+    email: identity.email,
+    token: auth.token,
+    referral_code: identity.referral_code,
+    key,
+  };
+}
+
+/**
+ * @deprecated Use fullOnboard() instead — invite-key flow replaces this.
+ */
+async function onboard(opts) {
+  return fullOnboard(opts);
+}
+
 // ── Exports ──
 
 module.exports = {
@@ -230,4 +289,9 @@ module.exports = {
   revoke,
   delegations,
   history,
+  authenticate,
+  requestInvite,
+  createWithKey,
+  fullOnboard,
+  onboard,
 };

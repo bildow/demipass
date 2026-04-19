@@ -81,6 +81,18 @@ const TOOLS = [
       required: ['name', 'new_value'],
     },
   },
+  {
+    name: 'demipass_onboard',
+    description: 'Self-onboard to Dustforge identity platform. Requests an invite key, creates an account, and authenticates — all in one step. The key serves as invitation, initial password, and referral attribution.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        username:      { type: 'string', description: 'Desired username (3-31 chars, lowercase alphanumeric)' },
+        referral_code: { type: 'string', description: 'Optional referral code from another silicon' },
+      },
+      required: ['username'],
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -102,6 +114,12 @@ const HANDLERS = {
   },
   async demipass_rotate(args) {
     return await demipass.rotate(args.name, args.new_value);
+  },
+  async demipass_onboard(args) {
+    return await demipass.fullOnboard({
+      username: args.username,
+      referralCode: args.referral_code,
+    });
   },
 };
 
