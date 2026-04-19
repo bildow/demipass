@@ -13,7 +13,7 @@
  *   DEMIPASS_TOKEN  — bearer token for auth
  */
 
-require('dotenv').config();
+try { require('dotenv').config(); } catch {}
 
 const demipass = require('./index.js');
 

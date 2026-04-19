@@ -17,12 +17,17 @@ Every Claude Code session, every GPT agent, every LangChain pipeline that manage
 ```javascript
 const demipass = require('demipass');
 
+demipass.configure({
+  baseUrl: 'https://api.dustforge.com',
+  bearerToken: 'your-token',
+});
+
 // Store a secret (carbon/operator does this once)
-await demipass.store({ name: 'openrouter', value: 'sk-or-...', type: 'api_key' });
+await demipass.store({ name: 'OPENROUTER_KEY', value: 'sk-or-...' });
 
 // Use it without seeing it (silicon/agent does this)
-const token = await demipass.requestToken({ name: 'openrouter', context: 'api-access', action: 'http_header' });
-const result = await demipass.execute(token, { url: 'https://openrouter.ai/api/v1/models' });
+const { token } = await demipass.requestToken({ secretName: 'OPENROUTER_KEY' });
+const result = await demipass.execute({ token, action: 'inject_env' });
 // result contains the API response. The secret never entered this context.
 ```
 
@@ -45,14 +50,30 @@ npm install demipass
 
 ## MCP Server (Claude Code)
 
-```bash
-npx demipass mcp
+Add to your Claude Code MCP config:
+
+```json
+{
+  "mcpServers": {
+    "demipass": {
+      "command": "node",
+      "args": ["node_modules/demipass/mcp-server.js"],
+      "env": {
+        "DEMIPASS_URL": "https://api.dustforge.com",
+        "DEMIPASS_TOKEN": "your-bearer-token"
+      }
+    }
+  }
+}
 ```
 
 Exposes tools to Claude Code:
-- `get_secret(name, scope)` → use_token
-- `execute_with_secret(use_token, command)` → result
-- `rotate_secret(name)` → confirmation
+- `demipass_store` — store a secret (value never enters context)
+- `demipass_get_token` — request a 30s use-token for a secret
+- `demipass_execute` — redeem a use-token (secret injected server-side)
+- `demipass_list` — list secret names (never values)
+- `demipass_rotate` — rotate a secret with context transfer
+- `demipass_onboard` — full onboarding via invite key flow
 
 ## Features
 
