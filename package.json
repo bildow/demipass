@@ -1,10 +1,11 @@
 {
   "name": "demipass",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Secrets management for LLM sessions. Keep credentials out of context windows.",
   "main": "index.js",
   "scripts": {
-    "mcp": "node mcp-server.js"
+    "mcp": "node mcp-server.js",
+    "buoy": "node buoy-mcp.js"
   },
   "keywords": [
     "secrets",
@@ -17,7 +18,10 @@
     "context-window",
     "prompt-injection",
     "demipass",
-    "dustforge"
+    "dustforge",
+    "buoy",
+    "temporal",
+    "anchor"
   ],
   "author": "AKStrapped LLC",
   "license": "MIT",
@@ -25,13 +29,14 @@
     "type": "git",
     "url": "https://github.com/bildow/demipass.git"
   },
-  "homepage": "https://dustforge.com",
+  "homepage": "https://demipass.com",
   "engines": {
     "node": ">=14"
   },
   "files": [
     "index.js",
     "mcp-server.js",
+    "buoy-mcp.js",
     "README.md",
     ".env.example"
   ]
