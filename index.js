@@ -294,6 +294,53 @@ async function onboard(opts) {
 
 // ── Exports ──
 
+// ── High-level ergonomic operations ──
+
+// Combined use: request token + execute in one call
+async function use({ ref, name, action, owner_did, target_host, target_user, command, params } = {}) {
+  const tokenReq = { ref, name, action, owner_did, target_host };
+  // Clean undefined fields
+  Object.keys(tokenReq).forEach(k => tokenReq[k] === undefined && delete tokenReq[k]);
+  const tokenRes = await _request('POST', '/api/demipass/request-token', tokenReq);
+  if (!tokenRes.use_token) throw new Error(tokenRes.error || 'failed to get use-token');
+
+  const execReq = { use_token: tokenRes.use_token, ...params };
+  if (target_user) execReq.target_user = target_user;
+  if (command) execReq.command = command;
+  return _request('POST', '/api/demipass/use', execReq);
+}
+
+// SSH: one call with ref + host + command → output
+async function ssh({ ref, target_host, target_user = 'root', command } = {}) {
+  if (!ref || !target_host || !command) throw new Error('ref, target_host, and command required');
+  return use({ ref, action: 'ssh_exec', target_host, target_user, command });
+}
+
+// Search secrets by name pattern, type, or provider
+async function search({ query, type, provider } = {}) {
+  const all = await list();
+  const secrets = (all.secrets || []).filter(s => {
+    if (query && !s.name.toLowerCase().includes(query.toLowerCase()) &&
+        !s.description?.toLowerCase().includes(query.toLowerCase()) &&
+        !s.ref_code?.toLowerCase().includes(query.toLowerCase())) return false;
+    if (type && s.secret_type !== type) return false;
+    if (provider && s.provider !== provider) return false;
+    return true;
+  });
+  return { secrets, total: secrets.length };
+}
+
+// List expiring secrets within N days
+async function expiring({ days = 7 } = {}) {
+  return _request('GET', `/api/demipass/expiring?days=${days}`);
+}
+
+// Get own trust gradient + wallet status
+async function whoami() {
+  const identity = await _request('GET', '/api/identity/trust');
+  return identity;
+}
+
 module.exports = {
   configure,
   store,
@@ -315,4 +362,10 @@ module.exports = {
   fullOnboard,
   getOnboardScript,
   onboard,
+  // High-level ergonomic operations
+  use,
+  ssh,
+  search,
+  expiring,
+  whoami,
 };

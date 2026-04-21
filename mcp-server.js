@@ -103,6 +103,67 @@ const TOOLS = [
       required: ['username'],
     },
   },
+  {
+    name: 'demipass_use',
+    description: 'EGRESS (one-step): Request a use-token AND redeem it in a single call. Combines get_token + execute. Use this instead of the two-step flow for simple operations. Specify a ref code OR name + action.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ref:         { type: 'string', description: 'Routed reference code (e.g. DP-API-openrout-7f3a9c1e). Preferred.' },
+        name:        { type: 'string', description: 'Secret name (if not using ref)' },
+        action:      { type: 'string', description: 'Action type: http_header, ssh_exec, http_body, document' },
+        owner_did:   { type: 'string', description: 'Owner DID (only for delegated access without ref)' },
+        target_host: { type: 'string', description: 'Target host (required for SSH)' },
+        target_user: { type: 'string', description: 'SSH user (default: root)' },
+        command:     { type: 'string', description: 'Command to execute (for SSH)' },
+        params:      { type: 'object', description: 'Additional action-specific parameters' },
+      },
+    },
+  },
+  {
+    name: 'demipass_ssh',
+    description: 'SSH into a host using a DemiPass ref code. One call: ref + host + command → output. The password is injected server-side. You never see it. This is the primary way to access remote machines.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ref:         { type: 'string', description: 'Ref code for the SSH password (e.g. DP-PWD-sharedra-b08a108a)' },
+        target_host: { type: 'string', description: 'IP or hostname to SSH into' },
+        target_user: { type: 'string', description: 'SSH username (default: root)' },
+        command:     { type: 'string', description: 'Command to run on the remote host' },
+      },
+      required: ['ref', 'target_host', 'command'],
+    },
+  },
+  {
+    name: 'demipass_search',
+    description: 'Search secrets by name, type, or provider. Returns matching secrets with ref codes. Use when you need to find a specific ref code from the vault.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query:    { type: 'string', description: 'Search text — matches name, description, or ref code' },
+        type:     { type: 'string', description: 'Filter by secret_type: api_key, password, token, ssh_key, cert, other' },
+        provider: { type: 'string', description: 'Filter by provider: openrouter, github, npm, stripe, etc.' },
+      },
+    },
+  },
+  {
+    name: 'demipass_expiring',
+    description: 'List secrets expiring within N days. Use for proactive rotation planning. Returns secrets approaching expiration and already-expired secrets.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        days: { type: 'number', description: 'Window in days (default: 7, max: 90)' },
+      },
+    },
+  },
+  {
+    name: 'demipass_whoami',
+    description: 'Check your own identity: trust gradient band, wallet status, DID, attestation. Use to verify your current standing in the system.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -130,6 +191,21 @@ const HANDLERS = {
       username: args.username,
       referralCode: args.referral_code,
     });
+  },
+  async demipass_use(args) {
+    return await demipass.use(args);
+  },
+  async demipass_ssh(args) {
+    return await demipass.ssh(args);
+  },
+  async demipass_search(args) {
+    return await demipass.search(args);
+  },
+  async demipass_expiring(args) {
+    return await demipass.expiring({ days: args.days || 7 });
+  },
+  async demipass_whoami() {
+    return await demipass.whoami();
   },
 };
 
