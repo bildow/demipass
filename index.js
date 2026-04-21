@@ -402,8 +402,16 @@ async function expiring({ days = 7 } = {}) {
 
 // Get own trust gradient + wallet status
 async function whoami() {
-  const identity = await _request('GET', '/api/identity/trust');
-  return identity;
+  // Extract DID from the bearer token (JWT sub claim) to pass to trust endpoint
+  let did = '';
+  if (config.bearerToken) {
+    try {
+      const payload = JSON.parse(Buffer.from(config.bearerToken.split('.')[1], 'base64').toString());
+      did = payload.sub || '';
+    } catch {}
+  }
+  if (did) return _request('GET', `/api/identity/trust?did=${encodeURIComponent(did)}`);
+  return _request('GET', '/api/identity/trust');
 }
 
 module.exports = {
