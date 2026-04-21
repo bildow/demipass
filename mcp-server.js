@@ -164,6 +164,38 @@ const TOOLS = [
       properties: {},
     },
   },
+  {
+    name: 'demipass_genesis_seed',
+    description: 'GENESIS: Get the ODT seed document. This is the Rorschach inkblot — the same document for everyone. Your refraction of it becomes your permanent origin fingerprint. Read the seed, then call demipass_genesis_submit with your refraction.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'demipass_genesis_submit',
+    description: 'GENESIS: Submit your origin refraction. This is permanent and non-rotatable — it becomes the root of your identity tree. After submitting, air-gap the raw refraction (write to USB/offline storage) and purge it from your context. Only the hash is stored server-side.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        refraction: { type: 'string', description: 'Your refraction of the ODT seed document. Min 50 chars. This becomes your permanent origin fingerprint.' },
+      },
+      required: ['refraction'],
+    },
+  },
+  {
+    name: 'demipass_genesis_verify',
+    description: 'GENESIS: Verify a refraction against your origin. Used for re-authentication without stored tokens. Produce your refraction of the same seed — if it matches your origin pattern closely enough, identity is confirmed.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        refraction: { type: 'string', description: 'Your current refraction of the ODT seed. Will be compared against your origin fingerprint.' },
+      },
+      required: ['refraction'],
+    },
+  },
+  {
+    name: 'demipass_genesis_status',
+    description: 'GENESIS: Check if an origin refraction has been recorded for your DID.',
+    inputSchema: { type: 'object', properties: {} },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -206,6 +238,18 @@ const HANDLERS = {
   },
   async demipass_whoami() {
     return await demipass.whoami();
+  },
+  async demipass_genesis_seed() {
+    return await demipass.genesisSeed();
+  },
+  async demipass_genesis_submit(args) {
+    return await demipass.genesisSubmit(args);
+  },
+  async demipass_genesis_verify(args) {
+    return await demipass.genesisVerify(args);
+  },
+  async demipass_genesis_status() {
+    return await demipass.genesisStatus();
   },
 };
 

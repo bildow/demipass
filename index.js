@@ -414,6 +414,33 @@ async function whoami() {
   return _request('GET', '/api/identity/trust');
 }
 
+// Get the ODT seed document
+async function genesisSeed() {
+  return _request('GET', '/api/identity/genesis/seed');
+}
+
+// Submit origin refraction
+async function genesisSubmit({ refraction } = {}) {
+  if (!refraction) throw new Error('refraction required');
+  return _request('POST', '/api/identity/genesis', { refraction });
+}
+
+// Verify a refraction against origin
+async function genesisVerify({ refraction } = {}) {
+  if (!refraction) throw new Error('refraction required');
+  return _request('POST', '/api/identity/genesis/verify', { refraction });
+}
+
+// Check genesis status
+async function genesisStatus() {
+  let did = '';
+  if (config.bearerToken) {
+    try { did = JSON.parse(Buffer.from(config.bearerToken.split('.')[1], 'base64').toString()).sub || ''; } catch {}
+  }
+  if (!did) return { error: 'no DID available' };
+  return _request('GET', `/api/identity/genesis/status?did=${encodeURIComponent(did)}`);
+}
+
 module.exports = {
   configure,
   store,
@@ -441,4 +468,9 @@ module.exports = {
   search,
   expiring,
   whoami,
+  // ODT Genesis
+  genesisSeed,
+  genesisSubmit,
+  genesisVerify,
+  genesisStatus,
 };
