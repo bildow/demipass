@@ -349,16 +349,20 @@ async function _healContext({ ref, name, action, target_host } = {}) {
   // Determine action type
   const actionType = action || 'ssh_exec';
 
+  // Least-privilege: refuse to create wildcard contexts automatically.
+  // Auto-healed contexts must be scoped to a specific target.
+  if (!target_host) {
+    return { ok: false, error: 'cannot auto-create context without a specific target_host (least-privilege)' };
+  }
+
   // Generate a context name from the action + target
-  const ctxName = target_host
-    ? `${actionType}-${target_host.replace(/[^a-zA-Z0-9.-]/g, '')}`
-    : `${actionType}-default`;
+  const ctxName = `${actionType}-${target_host.replace(/[^a-zA-Z0-9.-]/g, '')}`;
 
   try {
     const result = await _request('POST', '/api/demipass/context/add', {
       secret_name: secretName,
       action_type: actionType,
-      target_host: target_host || '*',
+      target_host: target_host,
       context_name: ctxName,
     });
     if (result.ok || result.context) {
