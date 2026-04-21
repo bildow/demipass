@@ -17,6 +17,13 @@ try { require('dotenv').config(); } catch {}
 
 const demipass = require('./index.js');
 
+// Configure SDK with env vars
+demipass.configure({
+  baseUrl: process.env.DEMIPASS_URL || 'https://api.dustforge.com',
+  bearerToken: process.env.DEMIPASS_TOKEN || '',
+  adminKey: process.env.DEMIPASS_ADMIN_KEY || '',
+});
+
 // ---------------------------------------------------------------------------
 // Tool definitions — each entry becomes a tool Claude Code can invoke
 // ---------------------------------------------------------------------------
