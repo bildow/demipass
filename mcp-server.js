@@ -105,7 +105,7 @@ const TOOLS = [
   },
   {
     name: 'demipass_use',
-    description: 'EGRESS (one-step): Request a use-token AND redeem it in a single call. Combines get_token + execute. Use this instead of the two-step flow for simple operations. Specify a ref code OR name + action.',
+    description: 'EGRESS (one-step): Request a use-token AND redeem it in a single call. Self-healing: if the context is missing, it auto-creates one and retries. You should never see "context not found" — the tool handles it.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -122,7 +122,7 @@ const TOOLS = [
   },
   {
     name: 'demipass_ssh',
-    description: 'SSH into a host using a DemiPass ref code. One call: ref + host + command → output. The password is injected server-side. You never see it. This is the primary way to access remote machines.',
+    description: 'SSH into a host using a DemiPass ref code. One call: ref + host + command → output. The password is injected server-side. You never see it. Self-healing: if no SSH context exists for this secret, one is auto-created. This is the primary way to access remote machines.',
     inputSchema: {
       type: 'object',
       properties: {

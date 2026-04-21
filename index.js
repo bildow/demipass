@@ -296,13 +296,36 @@ async function onboard(opts) {
 
 // ── High-level ergonomic operations ──
 
-// Combined use: request token + execute in one call
-async function use({ ref, name, action, owner_did, target_host, target_user, command, params } = {}) {
+// Combined use: request token + execute in one call, with self-healing context recovery
+async function use({ ref, name, action, owner_did, target_host, target_user, command, params, _retried } = {}) {
   const tokenReq = { ref, name, action, owner_did, target_host };
-  // Clean undefined fields
   Object.keys(tokenReq).forEach(k => tokenReq[k] === undefined && delete tokenReq[k]);
-  const tokenRes = await _request('POST', '/api/demipass/request-token', tokenReq);
-  if (!tokenRes.use_token) throw new Error(tokenRes.error || 'failed to get use-token');
+
+  let tokenRes;
+  try {
+    tokenRes = await _request('POST', '/api/demipass/request-token', tokenReq);
+  } catch (err) {
+    // Self-healing: if context not found, try to create one and retry
+    if (!_retried && err.message && err.message.includes('context') && err.message.includes('not found')) {
+      const healed = await _healContext({ ref, name, action, target_host });
+      if (healed.ok) {
+        return use({ ref, name, action, owner_did, target_host, target_user, command, params, _retried: true });
+      }
+      throw new Error(`${err.message}. Auto-heal attempted: ${healed.error || 'created context but retry needed'}`);
+    }
+    throw err;
+  }
+
+  if (!tokenRes.use_token) {
+    // Same self-healing check for non-throwing error responses
+    if (!_retried && tokenRes.error && tokenRes.error.includes('context') && tokenRes.error.includes('not found')) {
+      const healed = await _healContext({ ref, name, action, target_host });
+      if (healed.ok) {
+        return use({ ref, name, action, owner_did, target_host, target_user, command, params, _retried: true });
+      }
+    }
+    throw new Error(tokenRes.error || 'failed to get use-token');
+  }
 
   const execReq = { use_token: tokenRes.use_token, ...params };
   if (target_user) execReq.target_user = target_user;
@@ -310,7 +333,44 @@ async function use({ ref, name, action, owner_did, target_host, target_user, com
   return _request('POST', '/api/demipass/use', execReq);
 }
 
-// SSH: one call with ref + host + command → output
+// Self-healing: auto-create a context when one is missing
+async function _healContext({ ref, name, action, target_host } = {}) {
+  // Determine secret name from ref if needed
+  let secretName = name;
+  if (!secretName && ref) {
+    try {
+      const allSecrets = await list();
+      const match = (allSecrets.secrets || []).find(s => s.ref_code === ref);
+      if (match) secretName = match.name;
+    } catch {}
+  }
+  if (!secretName) return { ok: false, error: 'cannot determine secret name for context creation' };
+
+  // Determine action type
+  const actionType = action || 'ssh_exec';
+
+  // Generate a context name from the action + target
+  const ctxName = target_host
+    ? `${actionType}-${target_host.replace(/[^a-zA-Z0-9.-]/g, '')}`
+    : `${actionType}-default`;
+
+  try {
+    const result = await _request('POST', '/api/demipass/context/add', {
+      secret_name: secretName,
+      action_type: actionType,
+      target_host: target_host || '*',
+      context_name: ctxName,
+    });
+    if (result.ok || result.context) {
+      return { ok: true, context_name: ctxName, note: `Auto-created context "${ctxName}" for ${secretName}` };
+    }
+    return { ok: false, error: result.error || 'context creation failed' };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+// SSH: one call with ref + host + command → output (self-healing)
 async function ssh({ ref, target_host, target_user = 'root', command } = {}) {
   if (!ref || !target_host || !command) throw new Error('ref, target_host, and command required');
   return use({ ref, action: 'ssh_exec', target_host, target_user, command });
