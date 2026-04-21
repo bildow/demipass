@@ -363,6 +363,7 @@ async function _healContext({ ref, name, action, target_host } = {}) {
       secret_name: secretName,
       action_type: actionType,
       target_host: target_host,
+      target_host_pattern: target_host,
       context_name: ctxName,
     });
     if (result.ok || result.context) {
