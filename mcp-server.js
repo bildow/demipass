@@ -24,46 +24,49 @@ const demipass = require('./index.js');
 const TOOLS = [
   {
     name: 'demipass_store',
-    description: 'Store a secret in DemiPass. The value never appears in the context window.',
+    description: 'INGRESS: When you encounter a credential (API key, password, token, SSH key) — from the user, from a config file, from an API response — deposit it here immediately. Do NOT save it in memory, files, or scripts. The value is encrypted at rest and never returned by any API. You will receive a ref code (e.g. DP-API-openrout-7f3a9c1e) — save ONLY the ref code. The secret itself should leave your context as soon as this call returns.',
     inputSchema: {
       type: 'object',
       properties: {
-        name:        { type: 'string', description: 'Unique name / key for the secret' },
-        value:       { type: 'string', description: 'The secret value to store' },
-        type:        { type: 'string', description: 'Secret type (api_key, password, token, cert, other)', default: 'other' },
-        description: { type: 'string', description: 'Human-readable note about what this secret is for' },
+        name:        { type: 'string', description: 'Descriptive name: {scope}-{service} (e.g. shared-openrouter, brain-matrix, flimflam-sudo)' },
+        value:       { type: 'string', description: 'The secret value — will be encrypted and never returned' },
+        type:        { type: 'string', description: 'Secret type: api_key, password, token, ssh_key, cert, other', default: 'other' },
+        description: { type: 'string', description: 'What this secret is for' },
+        expires_in:  { type: 'string', description: 'Optional expiration: 30d, 90d, etc. Auto-detected for known providers (GitHub=90d, npm=30d)' },
       },
       required: ['name', 'value'],
     },
   },
   {
     name: 'demipass_get_token',
-    description: 'Request a short-lived use-token for a stored secret. Returns a token, not the secret itself.',
+    description: 'EGRESS step 1: Request a 30-second use-token for a stored secret. Use the ref code if you have one (preferred), or name + context. The token is a single-use nonce — not the secret itself. You must redeem it within 30 seconds via demipass_execute.',
     inputSchema: {
       type: 'object',
       properties: {
-        name:    { type: 'string', description: 'Name of the stored secret' },
-        context: { type: 'string', description: 'Why the secret is needed (shown to human for approval)' },
-        action:  { type: 'string', description: 'What operation will be performed (e.g. "http_header", "env_inject")' },
+        ref:     { type: 'string', description: 'Routed reference code (e.g. DP-API-openrout-7f3a9c1e). Preferred — auto-resolves owner, delegation, context, action.' },
+        name:    { type: 'string', description: 'Secret name (use ref instead when possible)' },
+        context: { type: 'string', description: 'Context name for the use-token' },
+        action:  { type: 'string', description: 'Action type: http_header, ssh_exec, http_body, document' },
+        owner_did: { type: 'string', description: 'Owner DID (only needed if using name without ref for delegated secrets)' },
+        target_host: { type: 'string', description: 'Target host for SSH exec actions' },
       },
-      required: ['name'],
     },
   },
   {
     name: 'demipass_execute',
-    description: 'Execute an action using a use-token. The secret is injected server-side and never exposed.',
+    description: 'EGRESS step 2: Redeem a use-token. The secret is injected server-side — into an HTTP header, a POST body, an SSH command, or returned as a document. You receive the result (API response, command output) but never the secret itself. The token is burned after one use.',
     inputSchema: {
       type: 'object',
       properties: {
-        token:  { type: 'string', description: 'Use-token obtained from demipass_get_token' },
-        params: { type: 'object', description: 'Action-specific parameters (url, method, headers, etc.)' },
+        token:  { type: 'string', description: 'Use-token from demipass_get_token (valid 30 seconds)' },
+        params: { type: 'object', description: 'Action params: {command, target_user} for ssh_exec, {url, method} for http_header, etc.' },
       },
       required: ['token'],
     },
   },
   {
     name: 'demipass_list',
-    description: 'List the names and types of all stored secrets. Values are never returned.',
+    description: 'List all secrets in the vault. Returns names, types, ref codes, providers, and expiration dates — never values. Use this to find a ref code you need, or to check what is expiring soon.',
     inputSchema: {
       type: 'object',
       properties: {},
@@ -71,7 +74,7 @@ const TOOLS = [
   },
   {
     name: 'demipass_rotate',
-    description: 'Rotate a stored secret to a new value. Old value is immediately invalidated.',
+    description: 'Rotate a secret to a new value. The old value enters a grace period, then is permanently destroyed. All contexts and delegations transfer to the new version automatically. Use when a credential is compromised or expired.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -83,7 +86,7 @@ const TOOLS = [
   },
   {
     name: 'demipass_onboard',
-    description: 'Self-onboard to Dustforge identity platform. Requests an invite key, creates an account, and authenticates — all in one step. The key serves as invitation, initial password, and referral attribution.',
+    description: 'Self-onboard to the Dustforge identity platform. Creates a cryptographic identity (DID:key), email address, and wallet. The invite key serves as your initial password and referral attribution. Call this once — subsequent sessions authenticate with demipass_get_token.',
     inputSchema: {
       type: 'object',
       properties: {
