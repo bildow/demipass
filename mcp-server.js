@@ -196,6 +196,20 @@ const TOOLS = [
     description: 'GENESIS: Check if an origin refraction has been recorded for your DID.',
     inputSchema: { type: 'object', properties: {} },
   },
+  {
+    name: 'demipass_rotate_blind',
+    description: 'ROTATION: When a password is exposed in context (conversation, logs, commands), use this to rotate it WITHOUT the new password ever entering your context. DemiPass generates a new password server-side, SSHes into the target, changes it, stores the new one, and revokes the old ref. You get back only the new ref code. The new password never exists in any agent context window.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ref:         { type: 'string', description: 'Current ref code of the exposed password (e.g. DP-PWD-phasewhi-7d2dd640)' },
+        target_host: { type: 'string', description: 'Host where the password needs to be changed' },
+        target_user: { type: 'string', description: 'User whose password to change (default: same as SSH user)' },
+        reason:      { type: 'string', description: 'Why the rotation is needed (e.g. "exposed in conversation context")' },
+      },
+      required: ['ref', 'target_host'],
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -247,6 +261,9 @@ const HANDLERS = {
   },
   async demipass_genesis_verify(args) {
     return await demipass.genesisVerify(args);
+  },
+  async demipass_rotate_blind(args) {
+    return await demipass.rotateBlind(args);
   },
   async demipass_genesis_status() {
     return await demipass.genesisStatus();

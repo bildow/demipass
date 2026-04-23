@@ -441,6 +441,12 @@ async function genesisStatus() {
   return _request('GET', `/api/identity/genesis/status?did=${encodeURIComponent(did)}`);
 }
 
+// Blind rotation — server generates, applies, stores. Agent never sees new password.
+async function rotateBlind({ ref, target_host, target_user, reason } = {}) {
+  if (!ref || !target_host) throw new Error('ref and target_host required');
+  return _request('POST', '/api/demipass/rotate-blind', { ref, target_host, target_user, reason });
+}
+
 module.exports = {
   configure,
   store,
@@ -473,4 +479,5 @@ module.exports = {
   genesisSubmit,
   genesisVerify,
   genesisStatus,
+  rotateBlind,
 };
