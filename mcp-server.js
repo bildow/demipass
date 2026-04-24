@@ -40,6 +40,8 @@ const TOOLS = [
         type:        { type: 'string', description: 'Secret type: api_key, password, token, ssh_key, cert, other', default: 'other' },
         description: { type: 'string', description: 'What this secret is for' },
         expires_in:  { type: 'string', description: 'Optional expiration: 30d, 90d, etc. Auto-detected for known providers (GitHub=90d, npm=30d)' },
+        ownership:   { type: 'string', description: 'Ownership model: "sole" (you own the target, rotation OK), "shared" (shared credential, rotation blocked unless all parties agree), "delegated" (delegated to you, cannot rotate source). Default: sole' },
+        rotatable:   { type: 'boolean', description: 'Whether blind rotation is allowed for this secret. Default: true. Set false for shared credentials.' },
       },
       required: ['name', 'value'],
     },
