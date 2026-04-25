@@ -337,7 +337,7 @@ async function handleMessage(msg) {
     return jsonrpcResponse(id, {
       protocolVersion: '2024-11-05',
       capabilities: { tools: {} },
-      serverInfo: { name: 'demipass', version: '0.1.0' },
+      serverInfo: { name: 'demipass', version: require('./package.json').version },
     });
   }
 

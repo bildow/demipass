@@ -170,7 +170,7 @@ async function handleMessage(line) {
       result: {
         protocolVersion: '2024-11-05',
         capabilities: { tools: {} },
-        serverInfo: { name: 'buoy', version: '1.0.0' },
+        serverInfo: { name: 'buoy', version: require('./package.json').version },
       },
     });
   } else if (msg.method === 'notifications/initialized') {
