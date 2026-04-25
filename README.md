@@ -1,46 +1,15 @@
 # DemiPass
 
-> Secrets management for LLM sessions. Keep credentials out of context windows.
+Secrets management SDK for AI agents. Keep credentials out of context windows.
 
-DemiPass lets AI agents use API keys, passwords, and tokens without ever seeing them. The secret is injected server-side at the point of use. The LLM context window never contains the credential.
+DemiPass is a client SDK for the [Dustforge](https://dustforge.com) identity platform. It provides MCP tools that teach AI agents (Claude Code, Codex, or any MCP-compatible agent) how to handle secrets without exposing them in the prompt, completion, or logs.
 
-## The Problem
+## How it works
 
-Every Claude Code session, every GPT agent, every LangChain pipeline that manages infrastructure has secrets pasted into context. This means:
-- Secrets in prompt logs
-- Secrets potentially in training data
-- Secrets visible to anyone with session access
-- Violation of every enterprise secret management policy
-
-## The Solution
-
-```javascript
-const demipass = require('demipass');
-
-demipass.configure({
-  baseUrl: 'https://api.dustforge.com',
-  bearerToken: 'your-token',
-});
-
-// Store a secret (carbon/operator does this once)
-await demipass.store({ name: 'OPENROUTER_KEY', value: 'sk-or-...' });
-
-// Use it without seeing it (silicon/agent does this)
-const { token } = await demipass.requestToken({ secretName: 'OPENROUTER_KEY' });
-const result = await demipass.execute({ token, action: 'inject_env' });
-// result contains the API response. The secret never entered this context.
-```
-
-## How It Works
-
-1. **Carbon deposits** a secret into the DemiVault (encrypted at rest, AES-256-GCM)
-2. **Silicon requests** a use-token by presenting its intended context (action type, target URL)
-3. **DemiPass validates** the context against approved patterns
-4. **Use-token issued** — 30-second, single-use, cryptographic nonce
-5. **Silicon redeems** the token — DemiPass injects the secret server-side
-6. **Result returned** — secret redacted from all output
-
-The secret never enters the LLM context window at any step.
+1. You store a credential → DemiPass encrypts it server-side
+2. Your agent requests a 30-second use-token via ref code
+3. DemiPass injects the secret server-side (SSH, HTTP header, etc.)
+4. The agent gets the result back — never the secret itself
 
 ## Install
 
@@ -48,9 +17,9 @@ The secret never enters the LLM context window at any step.
 npm install demipass
 ```
 
-## MCP Server (Claude Code)
+## MCP Setup
 
-Add to your Claude Code MCP config:
+Add to your `.mcp.json`:
 
 ```json
 {
@@ -62,49 +31,108 @@ Add to your Claude Code MCP config:
         "DEMIPASS_URL": "https://api.dustforge.com",
         "DEMIPASS_TOKEN": "your-bearer-token"
       }
+    },
+    "buoy": {
+      "command": "node",
+      "args": ["node_modules/demipass/buoy-mcp.js"],
+      "env": {
+        "BUOY_URL": "https://api.dustforge.com",
+        "BUOY_TOKEN": "your-bearer-token"
+      }
     }
   }
 }
 ```
 
-Exposes tools to Claude Code:
-- `demipass_store` — store a secret (value never enters context)
-- `demipass_get_token` — request a 30s use-token for a secret
-- `demipass_execute` — redeem a use-token (secret injected server-side)
-- `demipass_list` — list secret names (never values)
-- `demipass_rotate` — rotate a secret with context transfer
-- `demipass_onboard` — full onboarding via invite key flow
+## MCP Tools
 
-## Features
+### DemiPass (secrets)
 
-- **Use-tokens** — 30-second single-use nonces. The secret and the authorization are separate.
-- **Context binding** — secrets can only be used for pre-approved actions on pre-approved targets
-- **Delegation** — one agent authorizes another to use its secret without seeing it
-- **Secret rotation** — new version auto-inherits contexts, old version enters grace period
-- **7 action types** — http_header, http_body, ssh_exec, git_clone, smtp_auth, database_connect, env_inject (disabled)
-- **Bonded Courier (Rowen)** — optional clean-room intermediary for high-security operations
-- **Host whitelist** — secrets can only be sent to known, approved API providers
-- **Audit trail** — every store, token issuance, delegation, and use is logged
+| Tool | Description |
+|------|-------------|
+| `demipass_store` | Deposit a secret — encrypted at rest, never returned |
+| `demipass_ssh` | SSH via ref code — password injected server-side |
+| `demipass_use` | Combined token request + execute in one call |
+| `demipass_search` | Find secrets by name, type, or provider |
+| `demipass_list` | List all secrets (names + metadata, never values) |
+| `demipass_expiring` | List secrets expiring within N days |
+| `demipass_rotate` | Rotate a secret with context transfer |
+| `demipass_rotate_blind` | Server-side password rotation — new password never enters agent context |
+| `demipass_whoami` | Check identity, trust band, wallet status |
+| `demipass_get_token` | Request a 30-second use-token |
+| `demipass_execute` | Redeem a use-token |
+| `demipass_onboard` | Self-onboard to Dustforge |
+| `demipass_genesis_seed` | Get the ODT seed document |
+| `demipass_genesis_submit` | Submit origin refraction (permanent) |
+| `demipass_genesis_verify` | Verify refraction matches origin |
+| `demipass_genesis_status` | Check genesis status |
+
+### Buoy (temporal anchoring)
+
+| Tool | Description |
+|------|-------------|
+| `buoy_tick` | Drop a temporal anchor (begin, complete, handoff, decision, etc.) |
+| `buoy_verify` | Verify a tick signature |
+| `buoy_chain_verify` | Verify chain integrity |
+| `buoy_stats` | Total ticks, streak, first/last |
+| `buoy_ledger` | Read recent tick history |
+
+## SDK Usage
+
+```javascript
+const demipass = require('demipass');
+
+demipass.configure({
+  baseUrl: 'https://api.dustforge.com',
+  bearerToken: 'your-token',
+});
+
+// Store a secret
+await demipass.store({ name: 'my-api-key', value: 'sk-...', type: 'api_key' });
+
+// SSH via ref code (password never in your code)
+await demipass.ssh({ ref: 'DP-PWD-myserver-7f3a9c1e', target_host: '1.2.3.4', command: 'uptime' });
+
+// Search secrets
+await demipass.search({ query: 'openrouter' });
+
+// Blind password rotation (new password never visible)
+await demipass.rotateBlind({ ref: 'DP-PWD-old-ref', target_host: '1.2.3.4', reason: 'exposed' });
+```
 
 ## Architecture
 
+DemiPass is a client SDK — all encryption, storage, and secret execution happens on the Dustforge server. This package provides:
+
+- **MCP tool definitions** with behavioral descriptions that teach agents the protocol
+- **SDK functions** that wrap the Dustforge API
+- **Self-healing contexts** — if a secret has no approved context, the SDK auto-creates one
+- **Buoy MCP tools** for temporal anchoring and audit trails
+
+The secrets vault, trust gradient, velocity throttle, and other security features are implemented in Dustforge. See [dustforge.com](https://dustforge.com) for the platform documentation.
+
+## Ref Codes
+
+Every stored secret gets a routed reference code:
+
 ```
-Carbon (human) deposits secret → DemiVault (encrypted at rest)
-                                      ↓
-Silicon (agent) requests use-token → Context validation → 30s nonce issued
-                                      ↓
-Silicon redeems use-token → Secret injected server-side → Result returned
-                                      ↓
-                              Token burned → Audit logged
+DP-PWD-myserver-7f3a9c1e
+│  │   │         │
+│  │   │         └── unique nonce
+│  │   └── target hint
+│  └── secret type (PWD/API/TKN/SSH/CRT/SEC)
+└── DemiPass prefix
 ```
 
-## Security Model: The Bonded Courier
+Share ref codes freely — they're routing addresses, not secrets.
 
-- **Conductor** = dispatch desk (coordinates, never touches raw secrets)
-- **Rowen** = bonded courier (chain of custody, not content inspection)
-- **DemiPass** = identity verification at the door
+## Links
 
-We do NOT claim hardware-equivalent isolation. We claim process boundary separation with auditable custody chain. See [security-stance.md](docs/security-stance.md).
+- Landing: https://demipass.com
+- API: https://api.dustforge.com
+- Vault: https://demipass.com/vault-mobile.html
+- GitHub: https://github.com/bildow/demipass
+- Onboarding: [ONBOARDING.md](ONBOARDING.md)
 
 ## License
 

@@ -105,9 +105,16 @@ function _request(method, path, body, query) {
 // ── Secret management (carbon operations) ──
 
 /** POST /api/demipass/store — store a secret */
-function store({ name, value, metadata } = {}) {
+function store({ name, value, type, secret_type, description, expires_in, ownership, rotatable, metadata } = {}) {
   if (!name || !value) throw new Error('store() requires name and value');
-  return _request('POST', '/api/demipass/store', { name, value, metadata });
+  const body = { name, value };
+  if (type || secret_type) body.secret_type = type || secret_type;
+  if (description) body.description = description;
+  if (expires_in) body.expires_in = expires_in;
+  if (ownership) body.ownership = ownership;
+  if (rotatable !== undefined) body.rotatable = rotatable;
+  if (metadata) body.metadata = metadata;
+  return _request('POST', '/api/demipass/store', body);
 }
 
 /** POST /api/demipass/deposit — admin deposits a secret for a target silicon */
@@ -162,17 +169,30 @@ function requestContext({ secretName, key, reason } = {}) {
 // ── Use-token flow (silicon operations) ──
 
 /** POST /api/demipass/request-token — get a 30s nonce for secret use */
-function requestToken({ secretName, action, scope } = {}) {
-  if (!secretName) throw new Error('requestToken() requires secretName');
-  return _request('POST', '/api/demipass/request-token', {
-    secret_name: secretName, action, scope,
-  });
+function requestToken({ secretName, name, action, scope, context, target_host, ref } = {}) {
+  const resolvedName = secretName || name;
+  if (!resolvedName && !ref) throw new Error('requestToken() requires secretName/name or ref');
+  const body = { action, scope };
+  if (resolvedName) body.name = resolvedName;
+  if (ref) body.ref = ref;
+  if (context) body.context = context;
+  if (target_host) body.target_host = target_host;
+  return _request('POST', '/api/demipass/request-token', body);
 }
 
+// Alias for backward compat — MCP tool calls getToken
+const getToken = requestToken;
+
 /** POST /api/demipass/use — redeem token, execute action */
-function execute({ token, action, params } = {}) {
-  if (!token) throw new Error('execute() requires token');
-  return _request('POST', '/api/demipass/use', { token, action, params });
+function execute({ token, use_token, action, params, target_user, command } = {}) {
+  const t = token || use_token;
+  if (!t) throw new Error('execute() requires token or use_token');
+  const body = { use_token: t };
+  if (action) body.action = action;
+  if (params) Object.assign(body, params);
+  if (target_user) body.target_user = target_user;
+  if (command) body.command = command;
+  return _request('POST', '/api/demipass/use', body);
 }
 
 // ── Delegation ──
@@ -457,6 +477,7 @@ module.exports = {
   listContexts,
   requestContext,
   requestToken,
+  getToken,
   execute,
   delegate,
   revoke,

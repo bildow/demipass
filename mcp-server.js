@@ -220,19 +220,29 @@ const TOOLS = [
 
 const HANDLERS = {
   async demipass_store(args) {
-    return await demipass.store(args.name, args.value, args.type, args.description);
+    return await demipass.store({
+      name: args.name, value: args.value, type: args.type,
+      description: args.description, expires_in: args.expires_in,
+      ownership: args.ownership, rotatable: args.rotatable,
+    });
   },
   async demipass_get_token(args) {
-    return await demipass.getToken(args.name, args.context, args.action);
+    return await demipass.getToken({
+      name: args.name, context: args.context, action: args.action,
+      target_host: args.target_host, ref: args.ref,
+    });
   },
   async demipass_execute(args) {
-    return await demipass.execute(args.token, args.params);
+    return await demipass.execute({
+      use_token: args.token || args.use_token, action: args.action,
+      target_user: args.target_user, command: args.command, params: args.params,
+    });
   },
   async demipass_list() {
     return await demipass.list();
   },
   async demipass_rotate(args) {
-    return await demipass.rotate(args.name, args.new_value);
+    return await demipass.rotate({ name: args.name, newValue: args.new_value, reason: args.reason });
   },
   async demipass_onboard(args) {
     return await demipass.fullOnboard({
