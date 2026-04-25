@@ -467,6 +467,82 @@ async function rotateBlind({ ref, target_host, target_user, reason } = {}) {
   return _request('POST', '/api/demipass/rotate-blind', { ref, target_host, target_user, reason });
 }
 
+// ── Conduit — agent-to-agent messaging ──
+
+const CONDUIT_URL = process.env.CONDUIT_URL || 'http://100.69.1.78:8080';
+const CONDUIT_TOKEN = process.env.CONDUIT_TOKEN || '';
+const CONDUIT_SENDER = process.env.CONDUIT_SENDER || 'phasewhip';
+
+function _conduit(method, path, body) {
+  if (!CONDUIT_TOKEN) throw new Error('CONDUIT_TOKEN env var required for Conduit messaging');
+  const url = new URL(path, CONDUIT_URL);
+  const http = require('http');
+  const postData = body ? JSON.stringify(body) : null;
+  return new Promise((resolve, reject) => {
+    const opts = {
+      hostname: url.hostname, port: url.port || 80,
+      path: url.pathname + url.search, method,
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + CONDUIT_TOKEN },
+      timeout: 15000,
+    };
+    if (postData) opts.headers['Content-Length'] = Buffer.byteLength(postData);
+    const req = http.request(opts, (res) => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => {
+        try { resolve(JSON.parse(data)); } catch { resolve({ raw: data, status: res.statusCode }); }
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('conduit timeout')); });
+    if (postData) req.write(postData);
+    req.end();
+  });
+}
+
+async function conduitSend({ to, message, thread_id } = {}) {
+  if (!to || !message) throw new Error('conduitSend() requires to (agent_id) and message');
+
+  let tid = thread_id;
+
+  // Find or create thread
+  if (!tid) {
+    const threads = await _conduit('GET', '/threads');
+    const existing = (threads.data || threads || []).find(t => {
+      const p = t.participants || t.agents || [];
+      return p.includes(to) && p.includes(CONDUIT_SENDER);
+    });
+    if (existing) {
+      tid = existing.id || existing.thread_id;
+    } else {
+      const created = await _conduit('POST', '/threads', {
+        participants: [CONDUIT_SENDER, to],
+        label: CONDUIT_SENDER + ' <-> ' + to,
+      });
+      tid = created.id || created.thread_id;
+    }
+  }
+
+  if (!tid) throw new Error('failed to find or create thread with ' + to);
+
+  const result = await _conduit('POST', '/messages', {
+    thread_id: tid,
+    body: message,
+    sender_agent_id: CONDUIT_SENDER,
+  });
+
+  return { ok: true, thread_id: tid, message_id: result.id, to, delivered: true };
+}
+
+async function conduitThreads() {
+  const threads = await _conduit('GET', '/threads');
+  return { threads: threads.data || threads || [] };
+}
+
+async function conduitStatus() {
+  return _conduit('GET', '/carbon/status');
+}
+
 module.exports = {
   configure,
   store,
@@ -501,4 +577,8 @@ module.exports = {
   genesisVerify,
   genesisStatus,
   rotateBlind,
+  // Conduit
+  conduitSend,
+  conduitThreads,
+  conduitStatus,
 };

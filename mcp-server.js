@@ -212,6 +212,29 @@ const TOOLS = [
       required: ['ref', 'target_host'],
     },
   },
+  {
+    name: 'conduit_send',
+    description: 'CONDUIT: Send a message to another agent via Conduit (agent-to-agent messaging). Use this to communicate directly with Brain, Lori, Conductor, or any registered agent. Known agents: civitasvox-brain (Brain), civitasvox-conductor (Conductor), civitasvox-riley (Riley), platform-rowen (Rowen), platform-lori (Lori). Requires CONDUIT_TOKEN env var.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        to:        { type: 'string', description: 'Target agent ID (e.g. "civitasvox-brain")' },
+        message:   { type: 'string', description: 'Message body to send' },
+        thread_id: { type: 'string', description: 'Optional: reuse an existing thread ID instead of finding/creating one' },
+      },
+      required: ['to', 'message'],
+    },
+  },
+  {
+    name: 'conduit_threads',
+    description: 'CONDUIT: List active Conduit threads. Shows all conversations between agents that you have access to.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'conduit_status',
+    description: 'CONDUIT: Get Conduit service status — agent count, active sessions, pending handshakes, thread/message counts.',
+    inputSchema: { type: 'object', properties: {} },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -279,6 +302,15 @@ const HANDLERS = {
   },
   async demipass_genesis_status() {
     return await demipass.genesisStatus();
+  },
+  async conduit_send(args) {
+    return await demipass.conduitSend(args);
+  },
+  async conduit_threads() {
+    return await demipass.conduitThreads();
+  },
+  async conduit_status() {
+    return await demipass.conduitStatus();
   },
 };
 
