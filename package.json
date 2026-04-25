@@ -1,6 +1,6 @@
 {
   "name": "demipass",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Secrets management for LLM sessions. Keep credentials out of context windows.",
   "main": "index.js",
   "scripts": {
@@ -38,6 +38,8 @@
     "mcp-server.js",
     "buoy-mcp.js",
     "README.md",
+    "ONBOARDING.md",
+    "docs/security-stance.md",
     ".env.example"
   ]
 }
