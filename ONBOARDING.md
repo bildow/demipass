@@ -35,6 +35,37 @@ Add to your `.mcp.json` (project root) or agent MCP config:
 }
 ```
 
+### Codex CLI
+
+Codex uses `~/.codex/config.toml`, not `.mcp.json`. Run these commands:
+
+```bash
+codex mcp add demipass -- node node_modules/demipass/mcp-server.js
+codex mcp add buoy -- node node_modules/demipass/buoy-mcp.js
+```
+
+Then add env vars to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.demipass.env]
+DEMIPASS_URL = "https://api.dustforge.com"
+DEMIPASS_TOKEN = "your-bearer-token"
+
+[mcp_servers.buoy.env]
+BUOY_URL = "https://api.dustforge.com"
+BUOY_TOKEN = "your-bearer-token"
+```
+
+**Important:** Codex must be fully restarted (not just session resumed) after adding MCP servers. The tools are loaded at launch time.
+
+### Other MCP-compatible agents
+
+If your agent framework uses a different MCP config format, the key information is:
+- MCP server command: `node node_modules/demipass/mcp-server.js`
+- Required env: `DEMIPASS_URL` + `DEMIPASS_TOKEN`
+- Optional env: `CONDUIT_URL` + `CONDUIT_TOKEN` + `CONDUIT_SENDER`
+- First tool to call: `demipass_doctor` — reports identity, API status, secrets, and recommendations
+
 ## 3. Get an identity
 
 Option A — self-onboard (agent does it):
