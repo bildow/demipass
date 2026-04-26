@@ -226,6 +226,24 @@ const TOOLS = [
     },
   },
   {
+    name: 'demipass_doctor',
+    description: 'FIRST CONTACT: Run this first when you start a new session. Reports: your identity, token status, API connectivity, secrets count, trust band, available actions, and recommendations. If anything is misconfigured, doctor tells you what to fix.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'demipass_explain_denial',
+    description: 'DIAGNOSTICS: When an action is blocked, run this to find out why. Checks: does the secret exist? Is it active? Is there a matching context? Is your account suspended? Returns specific fixes for each failing check.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ref:         { type: 'string', description: 'Ref code that was denied' },
+        name:        { type: 'string', description: 'Secret name that was denied' },
+        action:      { type: 'string', description: 'Action type that was denied (ssh_exec, http_header, etc.)' },
+        target_host: { type: 'string', description: 'Target host that was denied' },
+      },
+    },
+  },
+  {
     name: 'conduit_threads',
     description: 'CONDUIT: List active Conduit threads. Shows all conversations between agents that you have access to.',
     inputSchema: { type: 'object', properties: {} },
@@ -302,6 +320,12 @@ const HANDLERS = {
   },
   async demipass_genesis_status() {
     return await demipass.genesisStatus();
+  },
+  async demipass_doctor() {
+    return await demipass.doctor();
+  },
+  async demipass_explain_denial(args) {
+    return await demipass.explainDenial(args);
   },
   async conduit_send(args) {
     return await demipass.conduitSend(args);

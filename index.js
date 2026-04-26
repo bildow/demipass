@@ -462,6 +462,127 @@ async function genesisStatus() {
   return _request('GET', `/api/identity/genesis/status?did=${encodeURIComponent(did)}`);
 }
 
+// ── Doctor — agent first-contact diagnostics ──
+
+async function doctor() {
+  const report = {
+    sdk_version: require('./package.json').version,
+    configured: !!config.baseUrl && !!config.bearerToken,
+    base_url: config.baseUrl || 'NOT SET',
+    token_present: !!config.bearerToken,
+    conduit_configured: !!process.env.CONDUIT_TOKEN,
+  };
+
+  // Identity
+  if (config.bearerToken) {
+    try {
+      const payload = JSON.parse(Buffer.from(config.bearerToken.split('.')[1], 'base64').toString());
+      report.identity = {
+        did: payload.sub || '',
+        username: payload.username || '',
+        email: payload.email || '',
+        scope: payload.scope || '',
+        expires: payload.exp ? new Date(payload.exp * 1000).toISOString() : 'unknown',
+        expired: payload.exp ? Date.now() > payload.exp * 1000 : false,
+        auth_method: payload.auth_method || '',
+      };
+    } catch { report.identity = { error: 'could not parse token' }; }
+  } else {
+    report.identity = { error: 'no bearer token configured' };
+  }
+
+  // Test API connectivity
+  try {
+    const health = await _request('GET', '/api/health');
+    report.api = { reachable: true, service: health.service, uptime: health.uptime };
+  } catch (e) {
+    report.api = { reachable: false, error: e.message };
+  }
+
+  // Secrets summary
+  if (report.configured && !report.identity?.expired) {
+    try {
+      const secrets = await list();
+      report.secrets = {
+        total: secrets.total || (secrets.secrets || []).length,
+        types: {},
+      };
+      for (const s of (secrets.secrets || [])) {
+        report.secrets.types[s.secret_type] = (report.secrets.types[s.secret_type] || 0) + 1;
+      }
+    } catch (e) { report.secrets = { error: e.message }; }
+
+    // Available contexts
+    try {
+      const trust = await whoami();
+      report.trust = {
+        band: trust.band || trust.trust_band || 'unknown',
+        score: trust.score || trust.trust_score || 0,
+        recovery_email: trust.recovery_email ? 'set' : 'NOT SET',
+      };
+    } catch (e) { report.trust = { error: e.message }; }
+  }
+
+  // Action types
+  report.available_actions = ['ssh_exec', 'http_header', 'http_body', 'document', 'env_inject', 'git_clone', 'smtp_auth', 'database_connect'];
+
+  // Recommendations
+  report.recommendations = [];
+  if (!report.configured) report.recommendations.push('Run demipass.configure({ baseUrl, bearerToken }) or set DEMIPASS_URL + DEMIPASS_TOKEN env vars');
+  if (report.identity?.expired) report.recommendations.push('Bearer token expired — re-authenticate via POST /api/identity/auth-fingerprint');
+  if (report.trust?.recovery_email === 'NOT SET') report.recommendations.push('Set a recovery email in Settings — required for password recovery');
+  if (!report.conduit_configured) report.recommendations.push('Set CONDUIT_TOKEN env var to enable agent-to-agent messaging');
+  if (report.secrets?.total === 0) report.recommendations.push('No secrets stored — use demipass_store to deposit your first credential');
+
+  return report;
+}
+
+// ── Explain denial — why was an action blocked? ──
+
+async function explainDenial({ ref, name, action, target_host } = {}) {
+  const report = { ref, name, action, target_host, checks: [] };
+
+  // Check if secret exists
+  if (ref) {
+    try {
+      const secrets = await list();
+      const match = (secrets.secrets || []).find(s => s.ref_code === ref);
+      if (match) {
+        report.secret_found = true;
+        report.secret_status = match.status;
+        report.checks.push({ check: 'secret exists', passed: true });
+        if (match.status !== 'active') report.checks.push({ check: 'secret active', passed: false, reason: `status is ${match.status}` });
+      } else {
+        report.secret_found = false;
+        report.checks.push({ check: 'secret exists', passed: false, reason: 'ref code not found — may be revoked or wrong DID' });
+      }
+    } catch (e) { report.checks.push({ check: 'secret lookup', passed: false, reason: e.message }); }
+  }
+
+  // Try to request a token and capture the error
+  try {
+    const body = {};
+    if (ref) body.ref = ref;
+    if (name) body.name = name;
+    if (action) body.action = action;
+    if (target_host) body.target_host = target_host;
+    const result = await _request('POST', '/api/demipass/request-token', body);
+    if (result.use_token) {
+      report.would_succeed = true;
+      report.checks.push({ check: 'token issuance', passed: true, note: 'action would succeed — token issued (not consumed)' });
+    }
+  } catch (e) {
+    report.would_succeed = false;
+    const msg = e.message || '';
+    if (msg.includes('context')) report.checks.push({ check: 'context', passed: false, reason: msg, fix: 'Create a context: POST /api/demipass/context/add with secret_name, action_type, target_host' });
+    else if (msg.includes('suspended')) report.checks.push({ check: 'suspension', passed: false, reason: msg, fix: 'Account is suspended — contact admin' });
+    else if (msg.includes('concurrent')) report.checks.push({ check: 'concurrent limit', passed: false, reason: msg, fix: 'Wait 30 seconds for existing token to expire' });
+    else report.checks.push({ check: 'token request', passed: false, reason: msg });
+  }
+
+  return report;
+}
+
 // Blind rotation — server generates, applies, stores. Agent never sees new password.
 async function rotateBlind({ ref, target_host, target_user, reason } = {}) {
   if (!ref || !target_host) throw new Error('ref and target_host required');
@@ -583,6 +704,9 @@ module.exports = {
   genesisVerify,
   genesisStatus,
   rotateBlind,
+  // Diagnostics
+  doctor,
+  explainDenial,
   // Conduit
   conduitSend,
   conduitThreads,
