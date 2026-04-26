@@ -169,7 +169,7 @@ function requestContext({ secretName, key, reason } = {}) {
 // ── Use-token flow (silicon operations) ──
 
 /** POST /api/demipass/request-token — get a 30s nonce for secret use */
-function requestToken({ secretName, name, action, scope, context, target_host, ref } = {}) {
+function requestToken({ secretName, name, action, scope, context, target_host, ref, owner_did } = {}) {
   const resolvedName = secretName || name;
   if (!resolvedName && !ref) throw new Error('requestToken() requires secretName/name or ref');
   const body = { action, scope };
@@ -177,6 +177,7 @@ function requestToken({ secretName, name, action, scope, context, target_host, r
   if (ref) body.ref = ref;
   if (context) body.context = context;
   if (target_host) body.target_host = target_host;
+  if (owner_did) body.owner_did = owner_did;
   return _request('POST', '/api/demipass/request-token', body);
 }
 
@@ -476,20 +477,25 @@ const CONDUIT_SENDER = process.env.CONDUIT_SENDER || 'phasewhip';
 function _conduit(method, path, body) {
   if (!CONDUIT_TOKEN) throw new Error('CONDUIT_TOKEN env var required for Conduit messaging');
   const url = new URL(path, CONDUIT_URL);
-  const http = require('http');
+  const proto = url.protocol === 'https:' ? require('https') : require('http');
   const postData = body ? JSON.stringify(body) : null;
   return new Promise((resolve, reject) => {
     const opts = {
-      hostname: url.hostname, port: url.port || 80,
+      hostname: url.hostname, port: url.port || (url.protocol === 'https:' ? 443 : 80),
       path: url.pathname + url.search, method,
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + CONDUIT_TOKEN },
       timeout: 15000,
     };
     if (postData) opts.headers['Content-Length'] = Buffer.byteLength(postData);
-    const req = http.request(opts, (res) => {
+    const req = proto.request(opts, (res) => {
       let data = '';
       res.on('data', c => data += c);
       res.on('end', () => {
+        if (res.statusCode >= 400) {
+          try { reject(new Error(JSON.parse(data).detail || JSON.parse(data).error || `Conduit HTTP ${res.statusCode}`)); }
+          catch { reject(new Error(`Conduit HTTP ${res.statusCode}: ${data.slice(0, 100)}`)); }
+          return;
+        }
         try { resolve(JSON.parse(data)); } catch { resolve({ raw: data, status: res.statusCode }); }
       });
     });
