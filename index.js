@@ -533,6 +533,9 @@ async function doctor() {
   if (report.trust?.recovery_email === 'NOT SET') report.recommendations.push('Set a recovery email in Settings — required for password recovery');
   if (!report.conduit_configured) report.recommendations.push('Set CONDUIT_TOKEN env var to enable agent-to-agent messaging');
   if (report.secrets?.total === 0) report.recommendations.push('No secrets stored — use demipass_store to deposit your first credential');
+  // This flag gets set to true when called via MCP handler
+  report.called_via_mcp = false;
+  if (!report.called_via_mcp) report.recommendations.push('You are calling doctor via SDK, not MCP. If your agent session does not have demipass_* tools available, restart your session/agent with the MCP server configured in .mcp.json. MCP tools are only available when the agent is LAUNCHED with the MCP config — discovering .mcp.json after launch does not attach them.');
 
   return report;
 }

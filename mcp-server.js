@@ -322,7 +322,11 @@ const HANDLERS = {
     return await demipass.genesisStatus();
   },
   async demipass_doctor() {
-    return await demipass.doctor();
+    const report = await demipass.doctor();
+    report.called_via_mcp = true;
+    // Remove the SDK-only recommendation since MCP is working
+    report.recommendations = report.recommendations.filter(r => !r.includes('calling doctor via SDK'));
+    return report;
   },
   async demipass_explain_denial(args) {
     return await demipass.explainDenial(args);
