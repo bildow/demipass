@@ -214,7 +214,7 @@ const TOOLS = [
   },
   {
     name: 'conduit_send',
-    description: 'CONDUIT: Send a message to another agent via Conduit (agent-to-agent messaging). Use this to communicate directly with Brain, Lori, Conductor, or any registered agent. Known agents: civitasvox-brain (Brain), civitasvox-conductor (Conductor), civitasvox-riley (Riley), platform-rowen (Rowen), platform-lori (Lori). Requires CONDUIT_TOKEN env var.',
+    description: 'CONDUIT: Send a message to another agent via Conduit (agent-to-agent messaging). If no handshake exists with the target, one is filed automatically — the target agent must approve before messages flow. Known agents: civitasvox-brain (Brain), civitasvox-conductor (Conductor), civitasvox-riley (Riley), platform-rowen (Rowen), platform-lori (Lori). Requires CONDUIT_TOKEN env var.',
     inputSchema: {
       type: 'object',
       properties: {

@@ -638,18 +638,40 @@ async function conduitSend({ to, message, thread_id } = {}) {
   // Find or create thread
   if (!tid) {
     const threads = await _conduit('GET', '/threads');
-    const existing = (threads.data || threads || []).find(t => {
+    const existing = (Array.isArray(threads) ? threads : threads.data || []).find(t => {
       const p = t.participants || t.agents || [];
       return p.includes(to) && p.includes(CONDUIT_SENDER);
     });
     if (existing) {
       tid = existing.id || existing.thread_id;
     } else {
-      const created = await _conduit('POST', '/threads', {
-        participants: [CONDUIT_SENDER, to],
-        label: CONDUIT_SENDER + ' <-> ' + to,
-      });
-      tid = created.id || created.thread_id;
+      try {
+        const created = await _conduit('POST', '/threads', {
+          participants: [CONDUIT_SENDER, to],
+          label: CONDUIT_SENDER + ' <-> ' + to,
+        });
+        tid = created.id || created.thread_id;
+      } catch (e) {
+        // If permission denied, auto-file handshake and explain
+        if (e.message && e.message.includes('Permission required')) {
+          try {
+            const hs = await _conduit('POST', '/handshakes/request', { to_agent_id: to, message: 'Requesting operational thread from ' + CONDUIT_SENDER });
+            return {
+              ok: false,
+              handshake_pending: true,
+              request_id: hs.request_id,
+              note: `Handshake filed with ${to}. The target agent must approve before messaging works. They need to call POST /handshakes/approve with their token and request_id: ${hs.request_id}`,
+            };
+          } catch (hsErr) {
+            // Handshake might already be pending
+            if (hsErr.message && hsErr.message.includes('pending')) {
+              return { ok: false, handshake_pending: true, note: `Handshake already pending with ${to}. Waiting for their approval.` };
+            }
+            throw hsErr;
+          }
+        }
+        throw e;
+      }
     }
   }
 
