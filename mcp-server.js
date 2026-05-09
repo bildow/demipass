@@ -253,6 +253,11 @@ const TOOLS = [
     description: 'CONDUIT: Get Conduit service status — agent count, active sessions, pending handshakes, thread/message counts.',
     inputSchema: { type: 'object', properties: {} },
   },
+  {
+    name: 'lori_checkin',
+    description: 'LORI: Check in with Lori (platform switchboard operator) for pending messages, relay state, and communication context. Call this at session start to get caught up on what happened while you were offline. Returns: pending Conduit messages, email state, relay status for each silicon/carbon, and any urgent notifications. Lori is the communications fabric — she ensures messages reach their destination regardless of which channel is up.',
+    inputSchema: { type: 'object', properties: {} },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -339,6 +344,49 @@ const HANDLERS = {
   },
   async conduit_status() {
     return await demipass.conduitStatus();
+  },
+  async lori_checkin() {
+    const report = { checked_at: new Date().toISOString(), channels: {} };
+
+    // 1. Check Conduit threads for unread messages
+    try {
+      const threads = await demipass.conduitThreads();
+      report.channels.conduit = { status: 'up', threads: threads.threads || [], thread_count: (threads.threads || []).length };
+    } catch (e) {
+      report.channels.conduit = { status: 'down', error: e.message };
+    }
+
+    // 2. Check Lori's relay state endpoint (phasewhip:3003)
+    try {
+      const loriUrl = process.env.LORI_URL || 'http://100.83.112.88:3003';
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      const res = await fetch(loriUrl + '/api/relay/state', { signal: controller.signal });
+      clearTimeout(timeout);
+      if (res.ok) {
+        report.channels.relay = { status: 'up', state: await res.json() };
+      } else {
+        report.channels.relay = { status: 'degraded', http_code: res.status };
+      }
+    } catch (e) {
+      report.channels.relay = { status: 'offline', note: 'Lori relay not yet deployed — relay state will be available once Lori monitoring loop is built' };
+    }
+
+    // 3. Check Conduit service health
+    try {
+      const status = await demipass.conduitStatus();
+      report.channels.conduit_service = { status: 'up', agents: status.agents, pending_handshakes: status.pending_handshakes };
+    } catch (e) {
+      report.channels.conduit_service = { status: 'down', error: e.message };
+    }
+
+    // 4. Summary
+    const downChannels = Object.entries(report.channels).filter(([, v]) => v.status === 'down').map(([k]) => k);
+    report.summary = downChannels.length === 0
+      ? 'All communication channels operational.'
+      : `Channels down: ${downChannels.join(', ')}. Messages may be queued.`;
+
+    return report;
   },
 };
 
