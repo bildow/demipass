@@ -318,8 +318,8 @@ async function onboard(opts) {
 // ── High-level ergonomic operations ──
 
 // Combined use: request token + execute in one call, with self-healing context recovery
-async function use({ ref, name, action, owner_did, target_host, target_user, command, params, _retried } = {}) {
-  const tokenReq = { ref, name, action, owner_did, target_host };
+async function use({ ref, name, action, owner_did, target_host, target_url, target_user, command, params, _retried } = {}) {
+  const tokenReq = { ref, name, action, owner_did, target_host, target_url };
   Object.keys(tokenReq).forEach(k => tokenReq[k] === undefined && delete tokenReq[k]);
 
   let tokenRes;
