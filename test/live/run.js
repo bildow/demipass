@@ -9,6 +9,7 @@ const demipass = require('../../index.js');
 const DEFAULT_BASE_URL = 'https://api.dustforge.com';
 const DEFAULT_SUCCESS_URL = 'https://api.github.com/meta';
 const DEFAULT_DENY_URL = 'https://api.openai.com/v1/models';
+const SUPPORTED_SURFACES = ['basic_store_use', 'context_enforcement', 'delegation'];
 
 function nowIso() {
   return new Date().toISOString();
@@ -21,6 +22,60 @@ function randomSuffix() {
 function envFlag(name) {
   const value = (process.env[name] || '').trim().toLowerCase();
   return value === '1' || value === 'true' || value === 'yes';
+}
+
+function parseArgs(argv = process.argv.slice(2)) {
+  const options = {
+    surfaces: [...SUPPORTED_SURFACES],
+    reportPath: process.env.DEMIPASS_LIVE_REPORT_PATH || '',
+    markdownPath: process.env.DEMIPASS_LIVE_MARKDOWN_PATH || '',
+  };
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === '--surface') {
+      const value = argv[index + 1];
+      if (!value) {
+        throw new Error('--surface requires a value');
+      }
+      index += 1;
+      if (value === 'all') {
+        options.surfaces = [...SUPPORTED_SURFACES];
+      } else {
+        const selected = value.split(',').map((item) => item.trim()).filter(Boolean);
+        const invalid = selected.filter((item) => !SUPPORTED_SURFACES.includes(item));
+        if (invalid.length > 0) {
+          throw new Error(`unsupported surface(s): ${invalid.join(', ')}`);
+        }
+        options.surfaces = [...new Set(selected)];
+      }
+      continue;
+    }
+
+    if (arg === '--report') {
+      const value = argv[index + 1];
+      if (!value) {
+        throw new Error('--report requires a value');
+      }
+      options.reportPath = value;
+      index += 1;
+      continue;
+    }
+
+    if (arg === '--markdown') {
+      const value = argv[index + 1];
+      if (!value) {
+        throw new Error('--markdown requires a value');
+      }
+      options.markdownPath = value;
+      index += 1;
+      continue;
+    }
+
+    throw new Error(`unknown argument: ${arg}`);
+  }
+
+  return options;
 }
 
 function sanitizeError(error) {
@@ -37,6 +92,7 @@ function createReport(runId, baseUrl) {
     started_at: nowIso(),
     finished_at: null,
     base_url: baseUrl,
+    selected_surfaces: [],
     identities: {},
     surfaces: [],
     cleanup: [],
@@ -56,6 +112,26 @@ function createSurface(name) {
     finished_at: null,
     steps: [],
     details: {},
+  };
+}
+
+function createBlockedSurface(name, reason) {
+  return {
+    name,
+    status: 'blocked',
+    started_at: nowIso(),
+    finished_at: nowIso(),
+    steps: [
+      {
+        at: nowIso(),
+        step: 'blocked',
+        status: 'blocked',
+        detail: reason,
+      },
+    ],
+    details: {
+      reason,
+    },
   };
 }
 
@@ -217,6 +293,28 @@ async function revokeSecret(baseUrl, actor, secretName) {
   });
 }
 
+function validateEnv(selectedSurfaces) {
+  const errors = [];
+  const ownerHasToken = Boolean((process.env.DEMIPASS_LIVE_OWNER_TOKEN || '').trim());
+  const ownerHasCredentials = Boolean((process.env.DEMIPASS_LIVE_OWNER_USERNAME || '').trim())
+    && Boolean((process.env.DEMIPASS_LIVE_OWNER_PASSWORD || '').trim());
+
+  if (!ownerHasToken && !ownerHasCredentials) {
+    errors.push('owner identity requires DEMIPASS_LIVE_OWNER_TOKEN or DEMIPASS_LIVE_OWNER_USERNAME plus DEMIPASS_LIVE_OWNER_PASSWORD');
+  }
+
+  if (selectedSurfaces.includes('delegation')) {
+    const delegateHasToken = Boolean((process.env.DEMIPASS_LIVE_DELEGATE_TOKEN || '').trim());
+    const delegateHasCredentials = Boolean((process.env.DEMIPASS_LIVE_DELEGATE_USERNAME || '').trim())
+      && Boolean((process.env.DEMIPASS_LIVE_DELEGATE_PASSWORD || '').trim());
+    if (!delegateHasToken && !delegateHasCredentials) {
+      errors.push('delegation surface requires DEMIPASS_LIVE_DELEGATE_TOKEN or DEMIPASS_LIVE_DELEGATE_USERNAME plus DEMIPASS_LIVE_DELEGATE_PASSWORD');
+    }
+  }
+
+  return errors;
+}
+
 async function runBasicStoreUse(baseUrl, owner, report, cleanup, runId) {
   const surface = createSurface('basic_store_use');
   const secretName = `brain-live-basic-${runId}`;
@@ -274,10 +372,22 @@ async function runBasicStoreUse(baseUrl, owner, report, cleanup, runId) {
       throw new Error(`expected HTTP 200 from ${DEFAULT_SUCCESS_URL}`);
     }
 
+    const history = await demipass.history({
+      secretName,
+      limit: 20,
+    });
+    const eventTypes = (history.events || []).map((event) => event.event_type);
+    pushStep(surface, 'history_snapshot', 'pass', eventTypes);
+
+    if (!eventTypes.includes('token_issued') || !eventTypes.includes('token_used')) {
+      throw new Error(`basic audit trail incomplete: ${eventTypes.join(', ')}`);
+    }
+
     finishSurface(report, surface, 'pass', {
       secret_name: secretName,
       target_url: DEFAULT_SUCCESS_URL,
       result_status: execution.result.status,
+      observed_events: eventTypes,
     });
   } catch (error) {
     pushStep(surface, 'error', 'fail', sanitizeError(error));
@@ -500,22 +610,63 @@ async function runCleanup(cleanup, report) {
   }
 }
 
-function writeReport(report, reportPath) {
+function buildMarkdownReport(report) {
+  const lines = [
+    '# DemiPass Live Harness Report',
+    '',
+    `- Run ID: ${report.run_id}`,
+    `- Base URL: ${report.base_url}`,
+    `- Started: ${report.started_at}`,
+    `- Finished: ${report.finished_at || 'in_progress'}`,
+    `- Surfaces: ${report.selected_surfaces.join(', ')}`,
+    `- Summary: ${report.summary.passed} passed, ${report.summary.failed} failed, ${report.summary.blocked} blocked`,
+    '',
+    '## Surfaces',
+  ];
+
+  for (const surface of report.surfaces) {
+    lines.push('');
+    lines.push(`### ${surface.name} [${surface.status}]`);
+    for (const step of surface.steps) {
+      const detail = typeof step.detail === 'string' ? step.detail : JSON.stringify(step.detail);
+      lines.push(`- ${step.step}: ${step.status}${detail ? ` - ${detail}` : ''}`);
+    }
+  }
+
+  if (report.cleanup.length > 0) {
+    lines.push('');
+    lines.push('## Cleanup');
+    for (const entry of report.cleanup) {
+      const detail = entry.error ? JSON.stringify(entry.error) : JSON.stringify(entry.detail);
+      lines.push(`- ${entry.status}: ${detail}`);
+    }
+  }
+
+  return `${lines.join('\n')}\n`;
+}
+
+function writeReport(report, reportPath, markdownPath) {
   const json = JSON.stringify(report, null, 2);
   if (reportPath) {
     fs.mkdirSync(path.dirname(reportPath), { recursive: true });
     fs.writeFileSync(reportPath, json + '\n', 'utf8');
   }
+  if (markdownPath) {
+    fs.mkdirSync(path.dirname(markdownPath), { recursive: true });
+    fs.writeFileSync(markdownPath, buildMarkdownReport(report), 'utf8');
+  }
   process.stdout.write(json + '\n');
 }
 
 async function main() {
+  const options = parseArgs();
   const runId = `${Date.now()}-${randomSuffix()}`;
   const baseUrl = process.env.DEMIPASS_BASE_URL || DEFAULT_BASE_URL;
   const allowCreate = envFlag('DEMIPASS_LIVE_ALLOW_CREATE');
-  const reportPath = process.env.DEMIPASS_LIVE_REPORT_PATH || '';
   const report = createReport(runId, baseUrl);
+  report.selected_surfaces = options.surfaces;
   const cleanup = [];
+  const preflightErrors = validateEnv(options.surfaces);
 
   const ownerSpec = {
     label: 'owner',
@@ -537,6 +688,10 @@ async function main() {
   let exitCode = 0;
 
   try {
+    if (preflightErrors.length > 0) {
+      throw new Error(`preflight failed: ${preflightErrors.join('; ')}`);
+    }
+
     const owner = await authenticateOrCreate(baseUrl, ownerSpec, allowCreate);
     report.identities.owner = {
       username: owner.username,
@@ -561,9 +716,30 @@ async function main() {
       };
     }
 
-    await runBasicStoreUse(baseUrl, owner, report, cleanup, runId);
-    await runContextEnforcement(baseUrl, owner, report, cleanup, runId);
-    await runDelegation(baseUrl, owner, delegate, report, cleanup, runId);
+    let basicPassed = true;
+
+    if (options.surfaces.includes('basic_store_use')) {
+      await runBasicStoreUse(baseUrl, owner, report, cleanup, runId);
+      basicPassed = report.surfaces[report.surfaces.length - 1].status === 'pass';
+    }
+
+    if (options.surfaces.includes('context_enforcement')) {
+      if (basicPassed) {
+        await runContextEnforcement(baseUrl, owner, report, cleanup, runId);
+      } else {
+        report.surfaces.push(createBlockedSurface('context_enforcement', 'blocked because basic_store_use failed'));
+        report.summary.blocked += 1;
+      }
+    }
+
+    if (options.surfaces.includes('delegation')) {
+      if (basicPassed) {
+        await runDelegation(baseUrl, owner, delegate, report, cleanup, runId);
+      } else {
+        report.surfaces.push(createBlockedSurface('delegation', 'blocked because basic_store_use failed'));
+        report.summary.blocked += 1;
+      }
+    }
   } catch (error) {
     report.surfaces.push({
       name: 'preflight',
@@ -579,7 +755,7 @@ async function main() {
   } finally {
     await runCleanup(cleanup, report);
     report.finished_at = nowIso();
-    writeReport(report, reportPath);
+    writeReport(report, options.reportPath, options.markdownPath);
   }
 
   if (report.summary.failed > 0) {
@@ -604,11 +780,19 @@ if (!process.env.NODE_TEST_CONTEXT) {
       steps: [],
       details: { error: sanitizeError(error) },
     });
-    writeReport(report, process.env.DEMIPASS_LIVE_REPORT_PATH || '');
+    writeReport(
+      report,
+      process.env.DEMIPASS_LIVE_REPORT_PATH || '',
+      process.env.DEMIPASS_LIVE_MARKDOWN_PATH || '',
+    );
     process.exitCode = 1;
   });
 }
 
 module.exports = {
+  buildMarkdownReport,
   main,
+  parseArgs,
+  SUPPORTED_SURFACES,
+  validateEnv,
 };
