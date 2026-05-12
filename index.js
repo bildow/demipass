@@ -143,11 +143,18 @@ function list({ owner, tag } = {}) {
 // ── Context management ──
 
 /** POST /api/demipass/context/add — add context to a secret */
-function addContext({ secretName, key, value } = {}) {
-  if (!secretName || !key) throw new Error('addContext() requires secretName and key');
-  return _request('POST', '/api/demipass/context/add', {
-    secret_name: secretName, key, value,
-  });
+function addContext({ secretName, contextName, actionType, targetHostPattern, targetUrlPattern, targetHost, targetUrl, maxUses, key, value } = {}) {
+  if (!secretName) throw new Error('addContext() requires secretName');
+  const body = { secret_name: secretName };
+  // Support both new API shape (contextName, actionType) and legacy (key, value)
+  body.context_name = contextName || key;
+  body.action_type = actionType || 'http_header';
+  if (!body.context_name) throw new Error('addContext() requires contextName');
+  if (targetHostPattern || targetHost) body.target_host_pattern = targetHostPattern || targetHost;
+  if (targetUrlPattern || targetUrl) body.target_url_pattern = targetUrlPattern || targetUrl;
+  if (maxUses) body.max_uses = maxUses;
+  if (value !== undefined) body.value = value;
+  return _request('POST', '/api/demipass/context/add', body);
 }
 
 /** GET /api/demipass/contexts — list contexts for a secret */
@@ -169,15 +176,16 @@ function requestContext({ secretName, key, reason } = {}) {
 // ── Use-token flow (silicon operations) ──
 
 /** POST /api/demipass/request-token — get a 30s nonce for secret use */
-function requestToken({ secretName, name, action, scope, context, target_host, ref, owner_did } = {}) {
+function requestToken({ secretName, name, action, scope, context, target_host, targetHost, target_url, targetUrl, ref, owner_did, ownerDid } = {}) {
   const resolvedName = secretName || name;
   if (!resolvedName && !ref) throw new Error('requestToken() requires secretName/name or ref');
   const body = { action, scope };
   if (resolvedName) body.name = resolvedName;
   if (ref) body.ref = ref;
   if (context) body.context = context;
-  if (target_host) body.target_host = target_host;
-  if (owner_did) body.owner_did = owner_did;
+  if (target_host || targetHost) body.target_host = target_host || targetHost;
+  if (target_url || targetUrl) body.target_url = target_url || targetUrl;
+  if (owner_did || ownerDid) body.owner_did = owner_did || ownerDid;
   return _request('POST', '/api/demipass/request-token', body);
 }
 
