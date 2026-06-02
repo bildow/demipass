@@ -201,6 +201,27 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: {} },
   },
   {
+    name: 'demipass_refresh',
+    description: 'AUTH: Swap a refresh token for a fresh access token before the access token expires (avoids the hour-25 lockout). Single-use: each call returns a NEW refresh token and revokes the old one — store the new refresh_token (ideally back into DemiPass). auth-fingerprint returns the initial refresh_token alongside the access token.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        refreshToken: { type: 'string', description: 'The current refresh token (dpr_...)' },
+        expiresIn: { type: 'string', description: 'Access token TTL: 1h | 24h | 7d | 30d (default 24h)' },
+      },
+      required: ['refreshToken'],
+    },
+  },
+  {
+    name: 'demipass_refresh_revoke',
+    description: 'AUTH: Revoke a refresh token (logout, or if a refresh token is compromised). Idempotent.',
+    inputSchema: {
+      type: 'object',
+      properties: { refreshToken: { type: 'string', description: 'The refresh token to revoke' } },
+      required: ['refreshToken'],
+    },
+  },
+  {
     name: 'demipass_rotate_blind',
     description: 'ROTATION: When a password is exposed in context (conversation, logs, commands), use this to rotate it WITHOUT the new password ever entering your context. DemiPass generates a new password server-side, SSHes into the target, changes it, stores the new one, and revokes the old ref. You get back only the new ref code. The new password never exists in any agent context window.',
     inputSchema: {
@@ -327,6 +348,12 @@ const HANDLERS = {
   },
   async demipass_genesis_status() {
     return await demipass.genesisStatus();
+  },
+  async demipass_refresh(args) {
+    return await demipass.refreshAccess({ refreshToken: args.refreshToken, expiresIn: args.expiresIn });
+  },
+  async demipass_refresh_revoke(args) {
+    return await demipass.revokeRefresh({ refreshToken: args.refreshToken });
   },
   async demipass_doctor() {
     const report = await demipass.doctor();

@@ -460,6 +460,16 @@ async function genesisVerify({ refraction } = {}) {
   return _request('POST', '/api/identity/genesis/verify', { refraction });
 }
 
+// Swap a refresh token for a fresh access token (single-use rotation server-side)
+async function refreshAccess({ refreshToken, expiresIn = "24h" } = {}) {
+  if (!refreshToken) throw new Error("refreshAccess() requires refreshToken");
+  return _request("POST", "/api/identity/refresh", { refresh_token: refreshToken, expires_in: expiresIn });
+}
+async function revokeRefresh({ refreshToken } = {}) {
+  if (!refreshToken) throw new Error("revokeRefresh() requires refreshToken");
+  return _request("POST", "/api/identity/refresh/revoke", { refresh_token: refreshToken });
+}
+
 // Check genesis status
 async function genesisStatus() {
   let did = '';
@@ -734,6 +744,8 @@ module.exports = {
   // ODT Genesis
   genesisSeed,
   genesisSubmit,
+  refreshAccess,
+  revokeRefresh,
   genesisVerify,
   genesisStatus,
   rotateBlind,
