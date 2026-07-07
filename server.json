@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
   "name": "com.dustforge/demipass",
-  "description": "Credential custody for agents: store secrets once, use them blind (ssh/http/smtp/git/db) without values entering context. Token tracking and revocation included.",
+  "description": "Credential custody for agents: use secrets blind (ssh/http/smtp/git/db), never in context.",
   "version": "2.5.0",
   "repository": {
     "url": "https://github.com/bildow/demipass",
