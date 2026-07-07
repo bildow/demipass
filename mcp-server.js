@@ -83,6 +83,36 @@ const TOOLS = [
     },
   },
   {
+    name: 'demipass_delete',
+    description: 'Permanently retire a secret by name or ref code. Terminal state: it disappears from list/search and its value is never served again. Use for cleanup of test artifacts, dead credentials, and superseded generations. For a compromised-but-still-needed credential, prefer demipass_rotate.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Name of the secret to delete' },
+        ref:  { type: 'string', description: 'Ref code of the secret to delete (alternative to name)' },
+      },
+    },
+  },
+  {
+    name: 'demipass_tokens',
+    description: 'List access tokens issued to your DID — the revocation surface. Every token minted since 2026-07-06 carries a jti and appears here with scope, issue/expiry times, and revoked state. Use to audit what can currently act as you.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'demipass_token_revoke',
+    description: 'Revoke an issued access token by jti — it dies immediately on every endpoint. Pass all=true to revoke ALL tokens for your DID, INCLUDING the one making this call (you will need to re-auth via 2FA afterward). This is the kill switch for leaked or over-scoped tokens.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        jti: { type: 'string', description: 'jti of the token to revoke (from demipass_tokens)' },
+        all: { type: 'boolean', description: 'Revoke every token for this DID, including the caller\'s' },
+      },
+    },
+  },
+  {
     name: 'demipass_rotate',
     description: 'Rotate a secret to a new value. The old value enters a grace period, then is permanently destroyed. All contexts and delegations transfer to the new version automatically. Use when a credential is compromised or expired.',
     inputSchema: {
@@ -309,6 +339,15 @@ const HANDLERS = {
   },
   async demipass_list() {
     return await demipass.list();
+  },
+  async demipass_delete(args) {
+    return await demipass.deleteSecret({ name: args.name, ref: args.ref });
+  },
+  async demipass_tokens() {
+    return await demipass.tokens();
+  },
+  async demipass_token_revoke(args) {
+    return await demipass.tokenRevoke({ jti: args.jti, all: args.all });
   },
   async demipass_rotate(args) {
     return await demipass.rotate({ name: args.name, newValue: args.new_value, reason: args.reason });

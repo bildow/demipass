@@ -140,6 +140,29 @@ function list({ owner, tag } = {}) {
   return _request('GET', '/api/demipass/list', null, { owner, tag });
 }
 
+/** DELETE /api/demipass/delete — permanently retire a secret by name or ref code.
+ *  Terminal state: gone from list/search, value never served again. */
+function deleteSecret({ name, ref } = {}) {
+  if (!name && !ref) throw new Error('deleteSecret() requires name or ref');
+  return _request('DELETE', '/api/demipass/delete', { name, ref });
+}
+
+// ── Token tracking (revocation surface) ──
+
+/** GET /api/identity/tokens — list access tokens issued to this DID */
+function tokens() {
+  return _request('GET', '/api/identity/tokens');
+}
+
+/** POST /api/identity/tokens/revoke — kill one issued token by jti.
+ *  { all: true } hits /revoke-all instead: kills EVERY token for this DID,
+ *  including the one making the call. */
+function tokenRevoke({ jti, all } = {}) {
+  if (all) return _request('POST', '/api/identity/tokens/revoke-all', {});
+  if (!jti) throw new Error('tokenRevoke() requires jti (or all: true)');
+  return _request('POST', '/api/identity/tokens/revoke', { jti });
+}
+
 // ── Context management ──
 
 /** POST /api/demipass/context/add — add context to a secret */
@@ -719,6 +742,9 @@ module.exports = {
   deposit,
   rotate,
   list,
+  deleteSecret,
+  tokens,
+  tokenRevoke,
   addContext,
   listContexts,
   requestContext,
