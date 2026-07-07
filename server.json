@@ -1,0 +1,35 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
+  "name": "com.dustforge/demipass",
+  "description": "Credential custody for agents: store secrets once, use them blind (ssh/http/smtp/git/db) without values entering context. Token tracking and revocation included.",
+  "version": "2.5.0",
+  "repository": {
+    "url": "https://github.com/bildow/demipass",
+    "source": "github"
+  },
+  "websiteUrl": "https://dustforge.com",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "demipass",
+      "version": "2.5.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "DEMIPASS_TOKEN",
+          "description": "Dustforge JWT bearer token. Self-onboard at https://dustforge.com/.well-known/silicon or mint via the 2FA email flow.",
+          "isRequired": true,
+          "isSecret": true
+        },
+        {
+          "name": "DEMIPASS_URL",
+          "description": "API base URL (default https://api.dustforge.com)",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
+    }
+  ]
+}

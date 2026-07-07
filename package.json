@@ -1,8 +1,12 @@
 {
   "name": "demipass",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "description": "Secrets management for LLM sessions. Keep credentials out of context windows.",
   "main": "index.js",
+  "bin": {
+    "demipass-mcp": "./mcp-server.js"
+  },
+  "mcpName": "com.dustforge/demipass",
   "scripts": {
     "mcp": "node mcp-server.js",
     "buoy": "node buoy-mcp.js"
