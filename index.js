@@ -105,7 +105,7 @@ function _request(method, path, body, query) {
 // ── Secret management (carbon operations) ──
 
 /** POST /api/demipass/store — store a secret */
-function store({ name, value, type, secret_type, description, expires_in, ownership, rotatable, metadata } = {}) {
+function store({ name, value, type, secret_type, description, expires_in, ownership, rotatable, metadata, category, labels, rotation_interval_days } = {}) {
   if (!name || !value) throw new Error('store() requires name and value');
   const body = { name, value };
   if (type || secret_type) body.secret_type = type || secret_type;
@@ -114,6 +114,9 @@ function store({ name, value, type, secret_type, description, expires_in, owners
   if (ownership) body.ownership = ownership;
   if (rotatable !== undefined) body.rotatable = rotatable;
   if (metadata) body.metadata = metadata;
+  if (category) body.category = category;
+  if (labels) body.labels = labels;
+  if (rotation_interval_days !== undefined) body.rotation_interval_days = rotation_interval_days;
   return _request('POST', '/api/demipass/store', body);
 }
 

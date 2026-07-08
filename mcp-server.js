@@ -42,6 +42,9 @@ const TOOLS = [
         expires_in:  { type: 'string', description: 'Optional expiration: 30d, 90d, etc. Auto-detected for known providers (GitHub=90d, npm=30d)' },
         ownership:   { type: 'string', description: 'Ownership model: "sole" (you own the target, rotation OK), "shared" (shared credential, rotation blocked unless all parties agree), "delegated" (delegated to you, cannot rotate source). Default: sole' },
         rotatable:   { type: 'boolean', description: 'Whether blind rotation is allowed for this secret. Default: true. Set false for shared credentials.' },
+        category:    { type: 'string', description: 'Organizational group (lowercase-dashes): infrastructure, platform, agents, services, products, personal, evidence, test, other. Used for vault grouping — set it instead of encoding the group in the name.' },
+        labels:      { type: 'array', items: { type: 'string' }, description: 'Up to 10 free-form tags for filtering (e.g. ["prod","kyle-shared"]).' },
+        rotation_interval_days: { type: 'integer', description: 'Rotation cadence in days (1–3650). Drives rotation-due / overdue telemetry and the daily reminder digest. Set this even for non-expiring credentials you want to rotate on a schedule.' },
       },
       required: ['name', 'value'],
     },
@@ -323,6 +326,8 @@ const HANDLERS = {
       name: args.name, value: args.value, type: args.type,
       description: args.description, expires_in: args.expires_in,
       ownership: args.ownership, rotatable: args.rotatable,
+      category: args.category, labels: args.labels,
+      rotation_interval_days: args.rotation_interval_days,
     });
   },
   async demipass_get_token(args) {
