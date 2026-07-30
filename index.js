@@ -206,14 +206,27 @@ function requestContext({ secretName, key, reason } = {}) {
 // server.js, and context/add rejects it — so a 'document' action could never
 // obtain a context, and use-tokens always require one. It was unreachable by
 // construction and failed with an error that named neither problem.
-const VALID_ACTIONS = ['http_header', 'ssh_exec', 'http_body', 'env_inject', 'git_clone', 'smtp_auth', 'database_connect'];
+const VALID_ACTIONS = ['http_header', 'ssh_exec', 'http_body', 'git_clone', 'smtp_auth', 'database_connect'];
+
+// Actions the server will mint a context and a token for, then refuse to
+// redeem. Rejecting them here turns a late, confusing failure into an
+// immediate, explanatory one.
+const DISABLED_ACTIONS = {
+  document: `'document' is not implemented anywhere in the server, and context/add rejects it as an action_type — it could never be redeemed.`,
+  env_inject: `'env_inject' is deliberately DISABLED server-side as fundamentally unsafe: any command can re-encode the env var (base64, hex) to defeat literal-match redaction. The server mints a context and a token for it, then rejects redemption.`,
+};
 
 function _assertAction(action) {
-  if (action && !VALID_ACTIONS.includes(action)) {
+  if (!action) return;
+  if (DISABLED_ACTIONS[action]) {
     throw new Error(
-      `unknown action '${action}'. Valid actions: ${VALID_ACTIONS.join(', ')}. ` +
-      `('document' is not implemented — to read a secret value use a context-bound ` +
-      `action such as http_body with a {{SECRET}} placeholder.)`
+      `${DISABLED_ACTIONS[action]} Use one of: ${VALID_ACTIONS.join(', ')}. ` +
+      `To read a secret value, use a context-bound action such as http_body with a {{SECRET}} placeholder.`
+    );
+  }
+  if (!VALID_ACTIONS.includes(action)) {
+    throw new Error(
+      `unknown action '${action}'. Valid actions: ${VALID_ACTIONS.join(', ')}.`
     );
   }
 }
@@ -240,9 +253,13 @@ const getToken = requestToken;
 function execute({ token, use_token, action, params, target_user, command } = {}) {
   const t = token || use_token;
   if (!t) throw new Error('execute() requires token or use_token');
-  const body = { use_token: t };
+  // Must match use() exactly. This path (get_token -> execute) is the documented
+  // two-step MCP flow, and it previously sent ONLY top-level params — so
+  // http_body/git_clone/smtp_auth, which read req.body.params, saw no template
+  // and silently fell back to {key: secret}. Same bug as use() had, reachable
+  // through the other route. Send both shapes.
+  const body = { use_token: t, ...(params || {}), params: params || {} };
   if (action) body.action = action;
-  if (params) Object.assign(body, params);
   if (target_user) body.target_user = target_user;
   if (command) body.command = command;
   return _request('POST', '/api/demipass/use', body);

@@ -67,12 +67,12 @@ const TOOLS = [
   },
   {
     name: 'demipass_execute',
-    description: 'EGRESS step 2: Redeem a use-token. The secret is injected server-side — into an HTTP header, a POST body, an SSH command, or returned as a document. You receive the result (API response, command output) but never the secret itself. The token is burned after one use.',
+    description: 'EGRESS step 2: Redeem a use-token. The secret is injected server-side — into an HTTP header, a POST body, an SSH command, a git clone URL, or an SMTP auth exchange. You receive the result (API response, command output) but never the secret itself. The token is burned after one use.',
     inputSchema: {
       type: 'object',
       properties: {
         token:  { type: 'string', description: 'Use-token from demipass_get_token (valid 30 seconds)' },
-        params: { type: 'object', description: 'Action params: {command, target_user} for ssh_exec, {url, method} for http_header, etc.' },
+        params: { type: 'object', description: 'Action params. For http_body pass {method, body_template} where body_template contains a {{SECRET}} placeholder. For ssh_exec pass {command, target_user}. Sent both nested and top-level for server compatibility.' },
       },
       required: ['token'],
     },

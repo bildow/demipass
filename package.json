@@ -9,7 +9,8 @@
   "mcpName": "com.dustforge/demipass",
   "scripts": {
     "mcp": "node mcp-server.js",
-    "buoy": "node buoy-mcp.js"
+    "buoy": "node buoy-mcp.js",
+    "test": "node test/use-token-flow.test.js"
   },
   "keywords": [
     "secrets",
