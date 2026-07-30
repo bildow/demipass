@@ -364,7 +364,7 @@ async function use({ ref, name, action, owner_did, target_host, target_url, targ
     if (!_retried && err.message && err.message.includes('context') && err.message.includes('not found')) {
       const healed = await _healContext({ ref, name, action, target_host });
       if (healed.ok) {
-        return use({ ref, name, action, owner_did, target_host, target_user, command, params, _retried: true });
+        return use({ ref, name, action, owner_did, target_host, target_url, target_user, command, params, _retried: true });
       }
       throw new Error(`${err.message}. Auto-heal attempted: ${healed.error || 'created context but retry needed'}`);
     }
@@ -376,13 +376,18 @@ async function use({ ref, name, action, owner_did, target_host, target_url, targ
     if (!_retried && tokenRes.error && tokenRes.error.includes('context') && tokenRes.error.includes('not found')) {
       const healed = await _healContext({ ref, name, action, target_host });
       if (healed.ok) {
-        return use({ ref, name, action, owner_did, target_host, target_user, command, params, _retried: true });
+        return use({ ref, name, action, owner_did, target_host, target_url, target_user, command, params, _retried: true });
       }
     }
     throw new Error(tokenRes.error || 'failed to get use-token');
   }
 
-  const execReq = { use_token: tokenRes.use_token, ...params };
+  // The /use handler is inconsistent about where it reads action params:
+  // ssh_exec/http_header destructure req.body directly, http_body reads
+  // req.body.params. Sending both shapes keeps every action working —
+  // spreading alone silently broke http_body (body_template never arrived,
+  // so the server fell back to {key: secret} and targets saw no fields).
+  const execReq = { use_token: tokenRes.use_token, ...(params || {}), params: params || {} };
   if (target_user) execReq.target_user = target_user;
   if (command) execReq.command = command;
   return _request('POST', '/api/demipass/use', execReq);
