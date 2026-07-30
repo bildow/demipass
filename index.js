@@ -201,10 +201,28 @@ function requestContext({ secretName, key, reason } = {}) {
 
 // ── Use-token flow (silicon operations) ──
 
+// The only action types the server will mint a context for. 'document' was
+// advertised by the MCP tools for a long time but is implemented nowhere in
+// server.js, and context/add rejects it — so a 'document' action could never
+// obtain a context, and use-tokens always require one. It was unreachable by
+// construction and failed with an error that named neither problem.
+const VALID_ACTIONS = ['http_header', 'ssh_exec', 'http_body', 'env_inject', 'git_clone', 'smtp_auth', 'database_connect'];
+
+function _assertAction(action) {
+  if (action && !VALID_ACTIONS.includes(action)) {
+    throw new Error(
+      `unknown action '${action}'. Valid actions: ${VALID_ACTIONS.join(', ')}. ` +
+      `('document' is not implemented — to read a secret value use a context-bound ` +
+      `action such as http_body with a {{SECRET}} placeholder.)`
+    );
+  }
+}
+
 /** POST /api/demipass/request-token — get a 30s nonce for secret use */
 function requestToken({ secretName, name, action, scope, context, target_host, targetHost, target_url, targetUrl, ref, owner_did, ownerDid } = {}) {
   const resolvedName = secretName || name;
   if (!resolvedName && !ref) throw new Error('requestToken() requires secretName/name or ref');
+  _assertAction(action);
   const body = { action, scope };
   if (resolvedName) body.name = resolvedName;
   if (ref) body.ref = ref;
@@ -353,6 +371,7 @@ async function onboard(opts) {
 
 // Combined use: request token + execute in one call, with self-healing context recovery
 async function use({ ref, name, action, owner_did, target_host, target_url, target_user, command, params, _retried } = {}) {
+  _assertAction(action);
   const tokenReq = { ref, name, action, owner_did, target_host, target_url };
   Object.keys(tokenReq).forEach(k => tokenReq[k] === undefined && delete tokenReq[k]);
 
