@@ -105,7 +105,7 @@ function _request(method, path, body, query) {
 // ── Secret management (carbon operations) ──
 
 /** POST /api/demipass/store — store a secret */
-function store({ name, value, type, secret_type, description, expires_in, ownership, rotatable, metadata } = {}) {
+function store({ name, value, type, secret_type, description, expires_in, ownership, rotatable, metadata, category, labels, rotation_interval_days } = {}) {
   if (!name || !value) throw new Error('store() requires name and value');
   const body = { name, value };
   if (type || secret_type) body.secret_type = type || secret_type;
@@ -114,6 +114,9 @@ function store({ name, value, type, secret_type, description, expires_in, owners
   if (ownership) body.ownership = ownership;
   if (rotatable !== undefined) body.rotatable = rotatable;
   if (metadata) body.metadata = metadata;
+  if (category) body.category = category;
+  if (labels) body.labels = labels;
+  if (rotation_interval_days !== undefined) body.rotation_interval_days = rotation_interval_days;
   return _request('POST', '/api/demipass/store', body);
 }
 
@@ -198,10 +201,28 @@ function requestContext({ secretName, key, reason } = {}) {
 
 // ── Use-token flow (silicon operations) ──
 
+// The only action types the server will mint a context for. 'document' was
+// advertised by the MCP tools for a long time but is implemented nowhere in
+// server.js, and context/add rejects it — so a 'document' action could never
+// obtain a context, and use-tokens always require one. It was unreachable by
+// construction and failed with an error that named neither problem.
+const VALID_ACTIONS = ['http_header', 'ssh_exec', 'http_body', 'env_inject', 'git_clone', 'smtp_auth', 'database_connect'];
+
+function _assertAction(action) {
+  if (action && !VALID_ACTIONS.includes(action)) {
+    throw new Error(
+      `unknown action '${action}'. Valid actions: ${VALID_ACTIONS.join(', ')}. ` +
+      `('document' is not implemented — to read a secret value use a context-bound ` +
+      `action such as http_body with a {{SECRET}} placeholder.)`
+    );
+  }
+}
+
 /** POST /api/demipass/request-token — get a 30s nonce for secret use */
 function requestToken({ secretName, name, action, scope, context, target_host, targetHost, target_url, targetUrl, ref, owner_did, ownerDid } = {}) {
   const resolvedName = secretName || name;
   if (!resolvedName && !ref) throw new Error('requestToken() requires secretName/name or ref');
+  _assertAction(action);
   const body = { action, scope };
   if (resolvedName) body.name = resolvedName;
   if (ref) body.ref = ref;
@@ -350,6 +371,7 @@ async function onboard(opts) {
 
 // Combined use: request token + execute in one call, with self-healing context recovery
 async function use({ ref, name, action, owner_did, target_host, target_url, target_user, command, params, _retried } = {}) {
+  _assertAction(action);
   const tokenReq = { ref, name, action, owner_did, target_host, target_url };
   Object.keys(tokenReq).forEach(k => tokenReq[k] === undefined && delete tokenReq[k]);
 
@@ -361,7 +383,7 @@ async function use({ ref, name, action, owner_did, target_host, target_url, targ
     if (!_retried && err.message && err.message.includes('context') && err.message.includes('not found')) {
       const healed = await _healContext({ ref, name, action, target_host });
       if (healed.ok) {
-        return use({ ref, name, action, owner_did, target_host, target_user, command, params, _retried: true });
+        return use({ ref, name, action, owner_did, target_host, target_url, target_user, command, params, _retried: true });
       }
       throw new Error(`${err.message}. Auto-heal attempted: ${healed.error || 'created context but retry needed'}`);
     }
@@ -373,13 +395,18 @@ async function use({ ref, name, action, owner_did, target_host, target_url, targ
     if (!_retried && tokenRes.error && tokenRes.error.includes('context') && tokenRes.error.includes('not found')) {
       const healed = await _healContext({ ref, name, action, target_host });
       if (healed.ok) {
-        return use({ ref, name, action, owner_did, target_host, target_user, command, params, _retried: true });
+        return use({ ref, name, action, owner_did, target_host, target_url, target_user, command, params, _retried: true });
       }
     }
     throw new Error(tokenRes.error || 'failed to get use-token');
   }
 
-  const execReq = { use_token: tokenRes.use_token, ...params };
+  // The /use handler is inconsistent about where it reads action params:
+  // ssh_exec/http_header destructure req.body directly, http_body reads
+  // req.body.params. Sending both shapes keeps every action working —
+  // spreading alone silently broke http_body (body_template never arrived,
+  // so the server fell back to {key: secret} and targets saw no fields).
+  const execReq = { use_token: tokenRes.use_token, ...(params || {}), params: params || {} };
   if (target_user) execReq.target_user = target_user;
   if (command) execReq.command = command;
   return _request('POST', '/api/demipass/use', execReq);

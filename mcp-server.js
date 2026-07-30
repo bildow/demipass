@@ -42,6 +42,9 @@ const TOOLS = [
         expires_in:  { type: 'string', description: 'Optional expiration: 30d, 90d, etc. Auto-detected for known providers (GitHub=90d, npm=30d)' },
         ownership:   { type: 'string', description: 'Ownership model: "sole" (you own the target, rotation OK), "shared" (shared credential, rotation blocked unless all parties agree), "delegated" (delegated to you, cannot rotate source). Default: sole' },
         rotatable:   { type: 'boolean', description: 'Whether blind rotation is allowed for this secret. Default: true. Set false for shared credentials.' },
+        category:    { type: 'string', description: 'Organizational group (lowercase-dashes): infrastructure, platform, agents, services, products, personal, evidence, test, other. Used for vault grouping — set it instead of encoding the group in the name.' },
+        labels:      { type: 'array', items: { type: 'string' }, description: 'Up to 10 free-form tags for filtering (e.g. ["prod","kyle-shared"]).' },
+        rotation_interval_days: { type: 'integer', description: 'Rotation cadence in days (1–3650). Drives rotation-due / overdue telemetry and the daily reminder digest. Set this even for non-expiring credentials you want to rotate on a schedule.' },
       },
       required: ['name', 'value'],
     },
@@ -55,7 +58,7 @@ const TOOLS = [
         ref:     { type: 'string', description: 'Routed reference code (e.g. DP-API-openrout-7f3a9c1e). Preferred — auto-resolves owner, delegation, context, action.' },
         name:    { type: 'string', description: 'Secret name (use ref instead when possible)' },
         context: { type: 'string', description: 'Context name for the use-token' },
-        action:  { type: 'string', description: 'Action type: http_header, ssh_exec, http_body, document' },
+        action:  { type: 'string', description: 'Action type. Contexts accept: http_header, ssh_exec, http_body, env_inject, git_clone, smtp_auth, database_connect. NOTE: "document" is NOT a valid context action_type — context/add rejects it. For http_body pass params.body_template with a {{SECRET}} placeholder.' },
         owner_did: { type: 'string', description: 'Owner DID (only needed if using name without ref for delegated secrets)' },
         target_host: { type: 'string', description: 'Target host for SSH exec actions' },
         target_url: { type: 'string', description: 'Target URL for HTTP header/body and database actions' },
@@ -144,7 +147,7 @@ const TOOLS = [
       properties: {
         ref:         { type: 'string', description: 'Routed reference code (e.g. DP-API-openrout-7f3a9c1e). Preferred.' },
         name:        { type: 'string', description: 'Secret name (if not using ref)' },
-        action:      { type: 'string', description: 'Action type: http_header, ssh_exec, http_body, document' },
+        action:      { type: 'string', description: 'Action type. Contexts accept: http_header, ssh_exec, http_body, env_inject, git_clone, smtp_auth, database_connect. NOTE: "document" is NOT a valid context action_type — context/add rejects it. For http_body pass params.body_template with a {{SECRET}} placeholder.' },
         owner_did:   { type: 'string', description: 'Owner DID (only for delegated access without ref)' },
         target_host: { type: 'string', description: 'Target host (required for SSH)' },
         target_url:  { type: 'string', description: 'Target URL for HTTP header/body and database actions' },
@@ -323,12 +326,17 @@ const HANDLERS = {
       name: args.name, value: args.value, type: args.type,
       description: args.description, expires_in: args.expires_in,
       ownership: args.ownership, rotatable: args.rotatable,
+      category: args.category, labels: args.labels,
+      rotation_interval_days: args.rotation_interval_days,
     });
   },
   async demipass_get_token(args) {
+    // target_url was dropped here, so http_body/http_header tokens minted via
+    // this path failed at redemption with "target_url must be set on the
+    // use-token" — the URL is validated onto the token, not supplied at execute.
     return await demipass.getToken({
       name: args.name, context: args.context, action: args.action,
-      target_host: args.target_host, ref: args.ref,
+      target_host: args.target_host, target_url: args.target_url, ref: args.ref,
     });
   },
   async demipass_execute(args) {
