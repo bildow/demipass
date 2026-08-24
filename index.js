@@ -264,7 +264,7 @@ function requestToken({ secretName, name, action, scope, context, target_host, t
 const getToken = requestToken;
 
 /** POST /api/demipass/use — redeem token, execute action */
-function execute({ token, use_token, action, params, target_user, command } = {}) {
+function execute({ token, use_token, action, params, target_user, command, override_reason } = {}) {
   const t = token || use_token;
   if (!t) throw new Error('execute() requires token or use_token');
   // Must match use() exactly. This path (get_token -> execute) is the documented
@@ -276,6 +276,11 @@ function execute({ token, use_token, action, params, target_user, command } = {}
   if (action) body.action = action;
   if (target_user) body.target_user = target_user;
   if (command) body.command = command;
+  // Account-binding override forwarding (2026-08-24 Shadow #2 item 3).
+  if (override_reason) {
+    body.override_reason = override_reason;
+    body.params.override_reason = override_reason;
+  }
   return _request('POST', '/api/demipass/use', body);
 }
 
@@ -401,7 +406,7 @@ async function onboard(opts) {
 // ── High-level ergonomic operations ──
 
 // Combined use: request token + execute in one call, with self-healing context recovery
-async function use({ ref, name, action, owner_did, target_host, target_url, target_user, command, params, _retried } = {}) {
+async function use({ ref, name, action, owner_did, target_host, target_url, target_user, command, params, override_reason, _retried } = {}) {
   _assertAction(action);
   const tokenReq = { ref, name, action, owner_did, target_host, target_url };
   Object.keys(tokenReq).forEach(k => tokenReq[k] === undefined && delete tokenReq[k]);
@@ -414,7 +419,7 @@ async function use({ ref, name, action, owner_did, target_host, target_url, targ
     if (!_retried && err.message && err.message.includes('context') && err.message.includes('not found')) {
       const healed = await _healContext({ ref, name, action, target_host });
       if (healed.ok) {
-        return use({ ref, name, action, owner_did, target_host, target_url, target_user, command, params, _retried: true });
+        return use({ ref, name, action, owner_did, target_host, target_url, target_user, command, params, override_reason, _retried: true });
       }
       throw new Error(`${err.message}. Auto-heal attempted: ${healed.error || 'created context but retry needed'}`);
     }
@@ -426,7 +431,7 @@ async function use({ ref, name, action, owner_did, target_host, target_url, targ
     if (!_retried && tokenRes.error && tokenRes.error.includes('context') && tokenRes.error.includes('not found')) {
       const healed = await _healContext({ ref, name, action, target_host });
       if (healed.ok) {
-        return use({ ref, name, action, owner_did, target_host, target_url, target_user, command, params, _retried: true });
+        return use({ ref, name, action, owner_did, target_host, target_url, target_user, command, params, override_reason, _retried: true });
       }
     }
     throw new Error(tokenRes.error || 'failed to get use-token');
@@ -440,6 +445,12 @@ async function use({ ref, name, action, owner_did, target_host, target_url, targ
   const execReq = { use_token: tokenRes.use_token, ...(params || {}), params: params || {} };
   if (target_user) execReq.target_user = target_user;
   if (command) execReq.command = command;
+  // Account-binding override forwarding (2026-08-24 Shadow #2 item 3): send both
+  // top-level and inside params so the server's action_params flatten picks it up.
+  if (override_reason) {
+    execReq.override_reason = override_reason;
+    execReq.params.override_reason = override_reason;
+  }
   return _request('POST', '/api/demipass/use', execReq);
 }
 
@@ -486,9 +497,14 @@ async function _healContext({ ref, name, action, target_host } = {}) {
 }
 
 // SSH: one call with ref + host + command → output (self-healing)
-async function ssh({ ref, target_host, target_user = 'root', command } = {}) {
+// target_user default REMOVED (2026-08-24 Shadow round #2): defaulting to 'root'
+// at the SDK layer silently overrode the server-side resolver, sending 'root' as
+// an explicit value regardless of the secret's bound username. Now leave it
+// undefined so the server resolver decides: bound → username, else hard error.
+// override_reason forwarded through for bound-mismatch cases.
+async function ssh({ ref, target_host, target_user, command, override_reason } = {}) {
   if (!ref || !target_host || !command) throw new Error('ref, target_host, and command required');
-  return use({ ref, action: 'ssh_exec', target_host, target_user, command });
+  return use({ ref, action: 'ssh_exec', target_host, target_user, command, override_reason });
 }
 
 // Search secrets by name pattern, type, or provider

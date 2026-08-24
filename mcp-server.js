@@ -45,7 +45,7 @@ const TOOLS = [
         category:    { type: 'string', description: 'Organizational group (lowercase-dashes): infrastructure, platform, agents, services, products, personal, evidence, test, other. Used for vault grouping — set it instead of encoding the group in the name.' },
         labels:      { type: 'array', items: { type: 'string' }, description: 'Up to 10 free-form tags for filtering (e.g. ["prod","kyle-shared"]).' },
         rotation_interval_days: { type: 'integer', description: 'Rotation cadence in days (1–3650). Drives rotation-due / overdue telemetry and the daily reminder digest. Set this even for non-expiring credentials you want to rotate on a schedule.' },
-        username:    { type: 'string', description: 'Account / login this credential is for (e.g. "flimflam", "root", "admin@example.com"). REQUIRED for password / ssh_key secrets that will be used via ssh_exec — without it, an omitted target_user is a hard error. Letters, digits, and . _ @ + - only.' },
+        username:    { type: 'string', description: 'Account / login this credential is for (e.g. "flimflam", "root"). REQUIRED for password / ssh_key secrets that will be used via ssh_exec — without it, an omitted target_user is a hard error. SSH-safe grammar: letters, digits, and . _ - only. For email-authenticated services (IMAP, web logins), leave empty and put the address in description.' },
       },
       required: ['name', 'value'],
     },
@@ -58,7 +58,7 @@ const TOOLS = [
       properties: {
         ref:      { type: 'string', description: 'Routed reference code (e.g. DP-PWD-flimflam-e542b0b9). Preferred.' },
         name:     { type: 'string', description: 'Secret name (alternative to ref).' },
-        username: { type: 'string', description: 'The account this credential targets. Letters, digits, and . _ @ + - only. Empty string clears the binding.' },
+        username: { type: 'string', description: 'The account this credential targets. SSH-safe grammar: letters, digits, and . _ - only. Empty string clears the binding.' },
       },
       required: ['username'],
     },
@@ -86,7 +86,11 @@ const TOOLS = [
       type: 'object',
       properties: {
         token:  { type: 'string', description: 'Use-token from demipass_get_token (valid 30 seconds)' },
-        params: { type: 'object', description: 'Action params. For http_body pass {method, body_template} where body_template contains a {{SECRET}} placeholder. For ssh_exec pass {command, target_user}. Sent both nested and top-level for server compatibility.' },
+        action: { type: 'string', description: 'Optional action override (normally derived from the token). Contexts accept: http_header, ssh_exec, http_body, env_inject, git_clone, smtp_auth, database_connect.' },
+        target_user: { type: 'string', description: 'For ssh_exec: SSH user. Resolution order server-side: this explicit value → secret.username → context.target_user_default → HARD ERROR. No silent default.' },
+        command: { type: 'string', description: 'For ssh_exec: command to run.' },
+        override_reason: { type: 'string', description: 'Required when target_user differs from the secret\'s bound username. ≤128 chars. Logged to blindkey_events as ssh_exec_account_override.' },
+        params: { type: 'object', description: 'Action params. For http_body pass {method, body_template} where body_template contains a {{SECRET}} placeholder. Fields are sent both nested and top-level for server compatibility.' },
       },
       required: ['token'],
     },
@@ -165,9 +169,10 @@ const TOOLS = [
         owner_did:   { type: 'string', description: 'Owner DID (only for delegated access without ref)' },
         target_host: { type: 'string', description: 'Target host (required for SSH)' },
         target_url:  { type: 'string', description: 'Target URL for HTTP header/body and database actions' },
-        target_user: { type: 'string', description: 'SSH user. Resolution order: this explicit value, then the secret\'s bound username, then the context\'s target_user_default, then HARD ERROR. There is no silent default. If the secret is account-bound and this value differs, pass params.override_reason (≤128 chars) to proceed; the mismatch is logged as ssh_exec_account_override.' },
+        target_user: { type: 'string', description: 'SSH user. Resolution order: this explicit value, then the secret\'s bound username, then the context\'s target_user_default, then HARD ERROR. There is no silent default.' },
         command:     { type: 'string', description: 'Command to execute (for SSH)' },
-        params:      { type: 'object', description: 'Additional action-specific parameters. For ssh_exec against a bound secret with a different target_user, include {override_reason: "..."}.' },
+        override_reason: { type: 'string', description: 'Required when target_user differs from the secret\'s bound username. ≤128 chars. Logged to blindkey_events as ssh_exec_account_override.' },
+        params:      { type: 'object', description: 'Additional action-specific parameters. Fields are sent both nested and top-level for server compatibility.' },
       },
     },
   },
@@ -362,6 +367,7 @@ const HANDLERS = {
     return await demipass.execute({
       use_token: args.token || args.use_token, action: args.action,
       target_user: args.target_user, command: args.command, params: args.params,
+      override_reason: args.override_reason,
     });
   },
   async demipass_list() {
