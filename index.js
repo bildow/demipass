@@ -105,7 +105,7 @@ function _request(method, path, body, query) {
 // ── Secret management (carbon operations) ──
 
 /** POST /api/demipass/store — store a secret */
-function store({ name, value, type, secret_type, description, expires_in, ownership, rotatable, metadata, category, labels, rotation_interval_days } = {}) {
+function store({ name, value, type, secret_type, description, expires_in, ownership, rotatable, metadata, category, labels, rotation_interval_days, username } = {}) {
   if (!name || !value) throw new Error('store() requires name and value');
   const body = { name, value };
   if (type || secret_type) body.secret_type = type || secret_type;
@@ -117,7 +117,21 @@ function store({ name, value, type, secret_type, description, expires_in, owners
   if (category) body.category = category;
   if (labels) body.labels = labels;
   if (rotation_interval_days !== undefined) body.rotation_interval_days = rotation_interval_days;
+  if (username !== undefined) body.username = username;
   return _request('POST', '/api/demipass/store', body);
+}
+
+/** POST /api/blindkey/set-username — update the account binding without rotating the value.
+ *  Account binding (2026-08-24): password secrets carry the identity of the account they're for.
+ *  Empty username clears the binding. Does NOT trigger rotation grace period.
+ */
+function setUsername({ ref, name, username } = {}) {
+  if (!ref && !name) throw new Error('setUsername() requires ref or name');
+  if (username === undefined || username === null) throw new Error('setUsername() requires username (empty string clears binding)');
+  const body = { username };
+  if (ref) body.ref = ref;
+  if (name) body.name = name;
+  return _request('POST', '/api/blindkey/set-username', body);
 }
 
 /** POST /api/demipass/deposit — admin deposits a secret for a target silicon */
@@ -783,6 +797,7 @@ async function conduitStatus() {
 module.exports = {
   configure,
   store,
+  setUsername,
   deposit,
   rotate,
   list,

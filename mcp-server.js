@@ -45,8 +45,22 @@ const TOOLS = [
         category:    { type: 'string', description: 'Organizational group (lowercase-dashes): infrastructure, platform, agents, services, products, personal, evidence, test, other. Used for vault grouping — set it instead of encoding the group in the name.' },
         labels:      { type: 'array', items: { type: 'string' }, description: 'Up to 10 free-form tags for filtering (e.g. ["prod","kyle-shared"]).' },
         rotation_interval_days: { type: 'integer', description: 'Rotation cadence in days (1–3650). Drives rotation-due / overdue telemetry and the daily reminder digest. Set this even for non-expiring credentials you want to rotate on a schedule.' },
+        username:    { type: 'string', description: 'Account / login this credential is for (e.g. "flimflam", "root", "admin@example.com"). REQUIRED for password / ssh_key secrets that will be used via ssh_exec — without it, an omitted target_user is a hard error. Letters, digits, and . _ @ + - only.' },
       },
       required: ['name', 'value'],
+    },
+  },
+  {
+    name: 'demipass_set_username',
+    description: 'Update the account binding on an existing secret without rotating its value. Use to backfill legacy secrets that don\'t yet carry a username, or to correct a typo. Empty string clears the binding. Idempotent. Does NOT trigger rotation grace period — the secret value is untouched. Emits a username_changed audit event.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ref:      { type: 'string', description: 'Routed reference code (e.g. DP-PWD-flimflam-e542b0b9). Preferred.' },
+        name:     { type: 'string', description: 'Secret name (alternative to ref).' },
+        username: { type: 'string', description: 'The account this credential targets. Letters, digits, and . _ @ + - only. Empty string clears the binding.' },
+      },
+      required: ['username'],
     },
   },
   {
@@ -151,9 +165,9 @@ const TOOLS = [
         owner_did:   { type: 'string', description: 'Owner DID (only for delegated access without ref)' },
         target_host: { type: 'string', description: 'Target host (required for SSH)' },
         target_url:  { type: 'string', description: 'Target URL for HTTP header/body and database actions' },
-        target_user: { type: 'string', description: 'SSH user (default: root)' },
+        target_user: { type: 'string', description: 'SSH user. Resolution order: this explicit value, then the secret\'s bound username, then the context\'s target_user_default, then HARD ERROR. There is no silent default. If the secret is account-bound and this value differs, pass params.override_reason (≤128 chars) to proceed; the mismatch is logged as ssh_exec_account_override.' },
         command:     { type: 'string', description: 'Command to execute (for SSH)' },
-        params:      { type: 'object', description: 'Additional action-specific parameters' },
+        params:      { type: 'object', description: 'Additional action-specific parameters. For ssh_exec against a bound secret with a different target_user, include {override_reason: "..."}.' },
       },
     },
   },
@@ -165,8 +179,9 @@ const TOOLS = [
       properties: {
         ref:         { type: 'string', description: 'Ref code for the SSH password (e.g. DP-PWD-sharedra-b08a108a)' },
         target_host: { type: 'string', description: 'IP or hostname to SSH into' },
-        target_user: { type: 'string', description: 'SSH username (default: root)' },
+        target_user: { type: 'string', description: 'SSH username. Resolution order: this explicit value, then the secret\'s bound username, then the context\'s target_user_default, then HARD ERROR. There is no silent default. Omit only when the secret is account-bound.' },
         command:     { type: 'string', description: 'Command to run on the remote host' },
+        override_reason: { type: 'string', description: 'Required when target_user differs from the secret\'s bound username. ≤128 chars. Logged to blindkey_events.' },
       },
       required: ['ref', 'target_host', 'command'],
     },
@@ -328,7 +343,11 @@ const HANDLERS = {
       ownership: args.ownership, rotatable: args.rotatable,
       category: args.category, labels: args.labels,
       rotation_interval_days: args.rotation_interval_days,
+      username: args.username, // account-binding (2026-08-24)
     });
+  },
+  async demipass_set_username(args) {
+    return await demipass.setUsername({ ref: args.ref, name: args.name, username: args.username });
   },
   async demipass_get_token(args) {
     // target_url was dropped here, so http_body/http_header tokens minted via
