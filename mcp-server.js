@@ -9,20 +9,33 @@
  *   node mcp-server.js
  *
  * Configuration (env or .env):
- *   DEMIPASS_URL    — API base URL
- *   DEMIPASS_TOKEN  — bearer token for auth
+ *   DEMIPASS_URL         — API base URL
+ *   DEMIPASS_TOKEN       — static bearer token (legacy; a device-login credentials file wins when present)
+ *   DEMIPASS_CREDENTIALS — path of the device-login credentials file (default ~/.config/demipass/credentials.json)
+ *
+ * Authentication: run the demipass_login tool (device flow — operator approves on
+ * https://demipass.com/device, phone included). Tokens land in the credentials file
+ * with 0600 perms and are refreshed automatically before they expire.
  */
 
 try { require('dotenv').config(); } catch {}
 
 const demipass = require('./index.js');
+const os = require('os');
 
 // Configure SDK with env vars
 demipass.configure({
   baseUrl: process.env.DEMIPASS_URL || 'https://api.dustforge.com',
-  bearerToken: process.env.DEMIPASS_TOKEN || '',
   adminKey: process.env.DEMIPASS_ADMIN_KEY || '',
 });
+// Bearer: a live device-login credentials file beats the static DEMIPASS_TOKEN env value.
+const BEARER_SOURCE = demipass.loadBearerFromEnvironment();
+// Refresh in the background at startup if the token is near expiry (never blocks, never throws).
+demipass.ensureFreshToken().catch(() => {});
+// Tools that establish or inspect auth must not trigger a refresh first.
+const NO_REFRESH_TOOLS = new Set(['demipass_login', 'demipass_login_wait', 'demipass_login_status', 'demipass_logout', 'demipass_onboard', 'demipass_refresh', 'demipass_refresh_revoke']);
+// user_code -> in-flight device login (device_code stays in this process; the model only ever sees the user_code)
+const PENDING_LOGINS = new Map();
 
 // ---------------------------------------------------------------------------
 // Tool definitions — each entry becomes a tool Claude Code can invoke
@@ -214,6 +227,38 @@ const TOOLS = [
     },
   },
   {
+    name: 'demipass_login',
+    description: 'AUTH (device flow, no password): start a login for this agent. Returns a short user_code and a URL — show BOTH to the operator verbatim and ask them to open the URL (phone is fine) and approve. Then call demipass_login_wait. Nothing secret is returned or needs pasting anywhere: on approval the access + refresh tokens are written to a 0600 credentials file and this running server adopts them immediately. Use when DemiPass calls return 401/expired, when no DEMIPASS_TOKEN is configured, or to bind this session to the operator\'s identity.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        agent_label: { type: 'string', description: 'Shown on the approval screen so the operator knows what they are approving, e.g. "claude-code@flimflam". Default: claude-code@<hostname>.' },
+        scope:       { type: 'string', description: 'Token scope to request: read | write | transact (default) | admin | full. The approver must hold at least this scope.' },
+      },
+    },
+  },
+  {
+    name: 'demipass_login_wait',
+    description: 'AUTH (device flow): wait for the operator to approve the code from demipass_login. Polls for up to timeout_seconds (default 25, max 240) and returns {status:"approved", did, email, scope, credentials_path, token_expires_at} — never token values — or {status:"pending"} if not yet approved (just call it again). Errors if the operator denied it or the code expired (start a new demipass_login).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        user_code:       { type: 'string', description: 'The code from demipass_login. Optional when only one login is in flight.' },
+        timeout_seconds: { type: 'integer', description: 'How long this call waits before returning pending (default 25, max 240).' },
+      },
+    },
+  },
+  {
+    name: 'demipass_login_status',
+    description: 'AUTH: which identity this server is acting as, where the bearer came from (device-login credentials file vs DEMIPASS_TOKEN env), when it expires, and whether a refresh token is on file. No secret values.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'demipass_logout',
+    description: 'AUTH: revoke the refresh token on file (and best-effort the current access token), delete the local credentials file, and drop the in-memory bearer. Afterwards demipass_login is needed again (or a DEMIPASS_TOKEN env value on next start).',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
     name: 'demipass_whoami',
     description: 'Check your own identity: trust gradient band, wallet status, DID, attestation. Use to verify your current standing in the system.',
     inputSchema: {
@@ -403,6 +448,66 @@ const HANDLERS = {
   async demipass_expiring(args) {
     return await demipass.expiring({ days: args.days || 7 });
   },
+  async demipass_login(args) {
+    const scope = args.scope || 'transact';
+    const label = String(args.agent_label || `claude-code@${os.hostname()}`).slice(0, 80);
+    const r = await demipass.deviceCodeStart({ agentLabel: label, scope });
+    if (!r || !r.device_code || !r.user_code) throw new Error('server returned no device code');
+    PENDING_LOGINS.set(r.user_code, { device_code: r.device_code, scope, agent_label: label, interval: r.interval || 5, expires_at: Date.now() + (r.expires_in || 900) * 1000 });
+    const url = r.verification_url_complete || r.verification_url;
+    return {
+      status: 'awaiting_approval',
+      user_code: r.user_code,
+      verification_url: url,
+      verification_url_plain: r.verification_url,
+      scope, agent_label: label,
+      expires_in_seconds: r.expires_in || 900,
+      operator_instructions: `Open ${url} (or go to ${r.verification_url} and enter the code ${r.user_code}), sign in, and approve "${label}" for scope "${scope}". Any device works, including the DemiPass phone vault (Settings → Approve an agent login). The code expires in ${Math.round((r.expires_in || 900) / 60)} minutes.`,
+      next: 'Call demipass_login_wait — it waits up to 25s per call and returns pending until the operator approves.',
+    };
+  },
+  async demipass_login_wait(args) {
+    let uc = String(args.user_code || '').toUpperCase().trim();
+    if (!uc) {
+      if (PENDING_LOGINS.size === 1) uc = [...PENDING_LOGINS.keys()][0];
+      else if (PENDING_LOGINS.size === 0) throw new Error('no login in flight — call demipass_login first');
+      else throw new Error(`several logins in flight (${[...PENDING_LOGINS.keys()].join(', ')}) — pass user_code`);
+    }
+    const p = PENDING_LOGINS.get(uc);
+    if (!p) throw new Error(`unknown user_code ${uc} — it may belong to another process or have already completed; call demipass_login again`);
+    const timeout = Math.max(3, Math.min(Number(args.timeout_seconds) || 25, 240)) * 1000;
+    const deadline = Date.now() + timeout;
+    let wait = p.interval * 1000;
+    for (;;) {
+      let res;
+      try { res = await demipass.deviceCodePoll({ deviceCode: p.device_code }); }
+      catch (e) { PENDING_LOGINS.delete(uc); throw e; }
+      if (res.status === 'approved') {
+        PENDING_LOGINS.delete(uc);
+        demipass.configure({ bearerToken: res.token });
+        const saved = demipass.saveCredentials({ ...res, agent_label: res.agent_label || p.agent_label });
+        return {
+          status: 'approved',
+          did: saved.did, email: saved.email, scope: saved.scope, agent_label: saved.agent_label,
+          token_expires_at: saved.token_expires_at, refresh_expires_at: saved.refresh_expires_at,
+          credentials_path: saved.path,
+          note: 'This server is authenticated now. Future sessions pick the credentials file up automatically and it is refreshed before expiry.',
+        };
+      }
+      if (res.slow_down) wait += 5000;
+      if (Date.now() + wait > deadline) {
+        return { status: 'pending', user_code: uc, code_expires_in_seconds: Math.max(0, Math.round((p.expires_at - Date.now()) / 1000)), next: 'Ask the operator to approve, then call demipass_login_wait again.' };
+      }
+      await new Promise((r) => setTimeout(r, wait));
+    }
+  },
+  async demipass_login_status() {
+    return { ...demipass.loginStatus(), bearer_source_at_startup: BEARER_SOURCE.source, pending_logins: [...PENDING_LOGINS.keys()] };
+  },
+  async demipass_logout() {
+    PENDING_LOGINS.clear();
+    return await demipass.logout();
+  },
   async demipass_whoami() {
     return await demipass.whoami();
   },
@@ -533,6 +638,8 @@ async function handleMessage(msg) {
       return jsonrpcError(id, -32602, `Unknown tool: ${toolName}`);
     }
     try {
+      // Keep the bearer fresh (local decode unless a refresh is actually due; never fatal).
+      if (!NO_REFRESH_TOOLS.has(toolName)) { try { await demipass.ensureFreshToken(); } catch {} }
       const result = await handler(params.arguments || {});
       return jsonrpcResponse(id, {
         content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
