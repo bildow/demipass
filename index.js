@@ -43,7 +43,7 @@ function configure(opts) {
 
 // ── Internal HTTP helper ──
 
-function _request(method, path, body, query) {
+function _send(method, path, body, query) {
   return new Promise((resolve, reject) => {
     let url = `${config.baseUrl}${path}`;
     if (query) {
@@ -88,17 +88,24 @@ function _request(method, path, body, query) {
         const raw = Buffer.concat(chunks).toString();
         let data;
         try { data = JSON.parse(raw); } catch { data = raw; }
-        if (res.statusCode >= 400) {
-          const msg = (data && data.error) || `HTTP ${res.statusCode}`;
-          return reject(new Error(`${method} ${path} failed: ${msg}`));
-        }
-        resolve(data);
+        resolve({ status: res.statusCode, data });
       });
     });
 
     req.on('error', (err) => reject(new Error(`Network error: ${err.message}`)));
     if (payload) req.write(payload);
     req.end();
+  });
+}
+
+// Throwing wrapper: every SDK method uses this. Non-2xx becomes an Error carrying the server's message.
+function _request(method, path, body, query) {
+  return _send(method, path, body, query).then(({ status, data }) => {
+    if (status >= 400) {
+      const msg = (data && data.error) || `HTTP ${status}`;
+      throw new Error(`${method} ${path} failed: ${msg}`);
+    }
+    return data;
   });
 }
 
@@ -643,7 +650,7 @@ async function doctor() {
 
   // Recommendations
   report.recommendations = [];
-  if (!report.configured) report.recommendations.push('Run demipass.configure({ baseUrl, bearerToken }) or set DEMIPASS_URL + DEMIPASS_TOKEN env vars');
+  if (!report.configured) report.recommendations.push('Sign in with the device flow — demipass_login (MCP) or `npx demipass-login` (CLI) — or run demipass.configure({ baseUrl, bearerToken }) / set DEMIPASS_URL + DEMIPASS_TOKEN');
   if (report.identity?.expired) report.recommendations.push('Bearer token expired — re-authenticate via POST /api/identity/auth-fingerprint');
   if (report.trust?.recovery_email === 'NOT SET') report.recommendations.push('Set a recovery email in Settings — required for password recovery');
   if (!report.conduit_configured) report.recommendations.push('Set CONDUIT_TOKEN env var to enable agent-to-agent messaging');
@@ -810,8 +817,290 @@ async function conduitStatus() {
   return _conduit('GET', '/carbon/status');
 }
 
+// ── Device authorization (agent login without sharing a password) ──
+//
+// The agent asks the server for a one-time request, shows the operator a short
+// code + URL, and polls. The operator approves on https://demipass.com/device
+// from any device (the phone vault works). The agent then receives an access
+// JWT plus a single-use refresh token, persisted locally with 0600 perms and
+// kept fresh automatically. No secret transits a chat, and nothing is pasted
+// into a config file by hand.
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+const DEFAULT_VERIFICATION_URL = 'https://demipass.com/device';
+
+/** Where the login credentials live. Override with DEMIPASS_CREDENTIALS. */
+function credentialsPath() {
+  if (process.env.DEMIPASS_CREDENTIALS) return process.env.DEMIPASS_CREDENTIALS;
+  const base = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
+  return path.join(base, 'demipass', 'credentials.json');
+}
+
+function defaultAgentLabel() {
+  const who = process.env.DEMIPASS_AGENT_LABEL || process.env.DEMIPASS_AGENT_NAME || 'demipass-sdk';
+  return `${who}@${os.hostname()}`.slice(0, 80);
+}
+
+/**
+ * Decode a DemiPass JWT WITHOUT verifying it (the server verifies; we only need
+ * lifecycle fields). Returns null for anything that is not a JWT. Never returns
+ * the token itself, so the result is safe to log.
+ */
+function tokenInfo(token) {
+  try {
+    const parts = String(token || '').split('.');
+    if (parts.length !== 3) return null;
+    const p = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    const now = Math.floor(Date.now() / 1000);
+    const exp = Number(p.exp) || 0;
+    return {
+      did: p.sub || '', scope: p.scope || '', jti: p.jti || '',
+      email: p.email || '', username: p.username || '',
+      agent_label: p.agent_label || '', auth_method: p.auth_method || '',
+      issued_at: p.iat ? new Date(p.iat * 1000).toISOString() : null,
+      expires_at: exp ? new Date(exp * 1000).toISOString() : null,
+      seconds_remaining: exp ? exp - now : null,
+      expired: exp ? exp <= now : false,
+    };
+  } catch { return null; }
+}
+
+/** Redacted view of a credentials record — everything except the secret values. */
+function describeCredentials(rec) {
+  if (!rec) return null;
+  const info = tokenInfo(rec.token) || {};
+  return {
+    base_url: rec.base_url || null,
+    did: rec.did || info.did || '',
+    email: rec.email || info.email || '',
+    scope: rec.scope || info.scope || '',
+    agent_label: rec.agent_label || info.agent_label || '',
+    auth_method: rec.auth_method || info.auth_method || '',
+    token_expires_at: info.expires_at || rec.token_expires_at || null,
+    token_seconds_remaining: info.seconds_remaining ?? null,
+    token_expired: 'expired' in info ? info.expired : true,
+    has_refresh_token: Boolean(rec.refresh_token),
+    refresh_expires_at: rec.refresh_expires_at || null,
+    saved_at: rec.saved_at || null,
+  };
+}
+
+function loadCredentials(file = credentialsPath()) {
+  try {
+    const rec = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return rec && typeof rec === 'object' && rec.token ? rec : null;
+  } catch { return null; }
+}
+
+/** Persist a token bundle (device login, auth-fingerprint, or refresh). Atomic write, 0600 file, 0700 dir. */
+function saveCredentials(bundle, file = credentialsPath()) {
+  if (!bundle || !bundle.token) throw new Error('saveCredentials() requires a bundle with a token');
+  const info = tokenInfo(bundle.token) || {};
+  const rec = {
+    base_url: bundle.base_url || config.baseUrl,
+    token: bundle.token,
+    token_expires_at: info.expires_at || null,
+    refresh_token: bundle.refresh_token || null,
+    refresh_expires_at: bundle.refresh_expires_at || null,
+    did: bundle.did || info.did || '',
+    email: bundle.email || info.email || '',
+    scope: bundle.scope || info.scope || '',
+    agent_label: bundle.agent_label || info.agent_label || '',
+    auth_method: bundle.auth_method || info.auth_method || '',
+    saved_at: new Date().toISOString(),
+  };
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(rec, null, 2) + '\n', { mode: 0o600 });
+  try { fs.chmodSync(tmp, 0o600); } catch {}
+  fs.renameSync(tmp, file);
+  return { path: file, ...describeCredentials(rec) };
+}
+
+function clearCredentials(file = credentialsPath()) {
+  try { fs.unlinkSync(file); return { path: file, removed: true }; }
+  catch (e) { return { path: file, removed: false, reason: e.code === 'ENOENT' ? 'absent' : e.message }; }
+}
+
+/**
+ * Pick the bearer for this process. A credentials file written by an explicit
+ * login (and kept fresh by refresh) beats a static DEMIPASS_TOKEN env value —
+ * the env value is the legacy hand-pasted token that goes stale. Returns where
+ * the bearer came from, never the bearer itself.
+ */
+function loadBearerFromEnvironment({ envToken = process.env.DEMIPASS_TOKEN || '', envBaseUrl = process.env.DEMIPASS_URL || '', file = credentialsPath() } = {}) {
+  const rec = loadCredentials(file);
+  if (rec) {
+    const info = tokenInfo(rec.token);
+    const refreshAlive = Boolean(rec.refresh_token) && (!rec.refresh_expires_at || new Date(rec.refresh_expires_at).getTime() > Date.now());
+    if ((info && !info.expired) || refreshAlive) {
+      if (!envBaseUrl && rec.base_url) config.baseUrl = rec.base_url;
+      config.bearerToken = rec.token;
+      return { source: 'credentials_file', path: file, ...describeCredentials(rec) };
+    }
+  }
+  if (envToken) {
+    config.bearerToken = envToken;
+    const info = tokenInfo(envToken);
+    return { source: 'env', did: info?.did || '', scope: info?.scope || '', token_expires_at: info?.expires_at || null, token_expired: info ? info.expired : null };
+  }
+  return { source: 'none' };
+}
+
+let _refreshInFlight = null;
+/**
+ * Refresh the bearer when it is within `minRemainingSeconds` of expiry, using
+ * the refresh token on file. Cheap to call before every request: it is a local
+ * decode unless a refresh is actually due. Several processes may share one
+ * file and refresh tokens are single-use, so a failed refresh re-reads the file
+ * and adopts a sibling's fresher token before giving up.
+ */
+async function ensureFreshToken({ minRemainingSeconds = 3600, file = credentialsPath() } = {}) {
+  const info = tokenInfo(config.bearerToken);
+  if (info && info.seconds_remaining !== null && info.seconds_remaining > minRemainingSeconds) {
+    return { refreshed: false, reason: 'fresh', token_expires_at: info.expires_at };
+  }
+  if (_refreshInFlight) return _refreshInFlight;
+  _refreshInFlight = (async () => {
+    const adopt = () => {
+      const latest = loadCredentials(file);
+      const li = latest && tokenInfo(latest.token);
+      if (li && li.seconds_remaining > minRemainingSeconds) {
+        config.bearerToken = latest.token;
+        return { refreshed: false, reason: 'adopted_from_file', token_expires_at: li.expires_at };
+      }
+      return null;
+    };
+    const rec = loadCredentials(file);
+    if (!rec || !rec.refresh_token) {
+      return { refreshed: false, reason: info ? 'no_refresh_token' : 'no_token', token_expires_at: info ? info.expires_at : null };
+    }
+    if (rec.token !== config.bearerToken) { const a = adopt(); if (a) return a; }
+    let r;
+    try {
+      r = await refreshAccess({ refreshToken: rec.refresh_token });
+    } catch (e) {
+      const a = adopt(); if (a) return a;
+      throw new Error(`token refresh failed: ${e.message} — run demipass_login (or npx demipass-login) to sign in again`);
+    }
+    if (!r || !r.token) { const a = adopt(); if (a) return a; throw new Error('token refresh failed: no token returned'); }
+    config.bearerToken = r.token;
+    const saved = saveCredentials({ ...rec, ...r, agent_label: rec.agent_label, base_url: rec.base_url || config.baseUrl }, file);
+    return { refreshed: true, token_expires_at: saved.token_expires_at, refresh_expires_at: saved.refresh_expires_at };
+  })();
+  try { return await _refreshInFlight; } finally { _refreshInFlight = null; }
+}
+
+/** Step 1: ask the server for a device request. Returns the user_code + URL to show the operator. */
+function deviceCodeStart({ agentLabel, agent_label, scope = 'transact' } = {}) {
+  const label = String(agentLabel || agent_label || defaultAgentLabel()).slice(0, 80);
+  return _request('POST', '/api/identity/device/code', { agent_label: label, scope });
+}
+
+/** Step 2: poll once. Resolves {status:'pending'} or {status:'approved', ...tokens}; throws on denied / expired / invalid. */
+async function deviceCodePoll({ deviceCode, device_code } = {}) {
+  const dc = deviceCode || device_code;
+  if (!dc) throw new Error('deviceCodePoll() requires deviceCode');
+  const { status, data } = await _send('POST', '/api/identity/device/token', { device_code: dc });
+  const err = data && data.error;
+  if (status === 428 || err === 'authorization_pending') return { status: 'pending' };
+  if (status === 429 || err === 'slow_down') return { status: 'pending', slow_down: true };
+  if (status >= 400) {
+    const map = {
+      access_denied: 'device login denied by the operator',
+      expired_token: 'device login expired before it was approved — start a new login',
+      already_claimed: 'device login already redeemed — start a new login',
+    };
+    throw new Error(map[err] || `device login failed: ${err || `HTTP ${status}`}`);
+  }
+  if (!data || !data.token) throw new Error('device login failed: no token in response');
+  return { status: 'approved', ...data };
+}
+
+/**
+ * Whole flow: start, hand the code to `onCode`, poll until approved (or timeout),
+ * then adopt + persist the tokens. Resolves a redacted description — no token values.
+ */
+async function deviceLogin({ agentLabel, agent_label, scope = 'transact', onCode, intervalMs, timeoutMs = 15 * 60 * 1000, persist = true, file = credentialsPath() } = {}) {
+  const label = String(agentLabel || agent_label || defaultAgentLabel()).slice(0, 80);
+  const start = await deviceCodeStart({ agentLabel: label, scope });
+  if (!start || !start.device_code || !start.user_code) throw new Error('device login failed: server returned no device code');
+  const shown = {
+    user_code: start.user_code,
+    verification_url: start.verification_url || DEFAULT_VERIFICATION_URL,
+    verification_url_complete: start.verification_url_complete || `${DEFAULT_VERIFICATION_URL}?code=${encodeURIComponent(start.user_code)}`,
+    expires_in: start.expires_in || 900,
+    interval: start.interval || 5,
+    scope, agent_label: label,
+  };
+  if (typeof onCode === 'function') await onCode(shown);
+  let wait = intervalMs || shown.interval * 1000;
+  const deadline = Date.now() + Math.min(timeoutMs, shown.expires_in * 1000);
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, wait));
+    const p = await deviceCodePoll({ deviceCode: start.device_code });
+    if (p.status === 'approved') {
+      config.bearerToken = p.token;
+      const bundle = { ...p, agent_label: p.agent_label || label, base_url: config.baseUrl };
+      const saved = persist ? saveCredentials(bundle, file) : { path: null, ...describeCredentials(bundle) };
+      return { ok: true, persisted: persist, user_code: shown.user_code, ...saved };
+    }
+    if (p.slow_down) wait += 5000;
+  }
+  throw new Error(`device login timed out — code ${shown.user_code} was not approved in time`);
+}
+
+/** Current auth state for this process. No secret values. */
+function loginStatus({ file = credentialsPath() } = {}) {
+  const rec = loadCredentials(file);
+  const active = tokenInfo(config.bearerToken);
+  return {
+    base_url: config.baseUrl,
+    active,
+    active_source: !config.bearerToken ? 'none' : (rec && rec.token === config.bearerToken ? 'credentials_file' : 'env_or_configure'),
+    credentials_file: rec ? { path: file, present: true, ...describeCredentials(rec) } : { path: file, present: false },
+  };
+}
+
+/** Revoke the refresh token on file (best-effort the access token too), delete the file, drop the in-memory bearer. */
+async function logout({ file = credentialsPath(), revoke = true } = {}) {
+  const rec = loadCredentials(file);
+  let refreshRevoked = false, accessRevoked = false;
+  if (revoke && rec) {
+    const info = tokenInfo(rec.token);
+    if (info && info.jti && !info.expired) {
+      const keep = config.bearerToken; config.bearerToken = rec.token;
+      try { await tokenRevoke({ jti: info.jti }); accessRevoked = true; } catch {}
+      config.bearerToken = keep;
+    }
+    if (rec.refresh_token) {
+      try { const r = await revokeRefresh({ refreshToken: rec.refresh_token }); refreshRevoked = Boolean(r && r.revoked); } catch {}
+    }
+  }
+  const credentials = clearCredentials(file);
+  if (!rec || config.bearerToken === rec.token) config.bearerToken = '';
+  return { ok: true, refresh_revoked: refreshRevoked, access_revoked: accessRevoked, credentials };
+}
+
 module.exports = {
   configure,
+  // Device login + local credentials (no secret values are ever returned)
+  deviceCodeStart,
+  deviceCodePoll,
+  deviceLogin,
+  loginStatus,
+  logout,
+  credentialsPath,
+  loadCredentials,
+  saveCredentials,
+  clearCredentials,
+  describeCredentials,
+  loadBearerFromEnvironment,
+  ensureFreshToken,
+  tokenInfo,
   store,
   setUsername,
   deposit,
