@@ -300,14 +300,13 @@ const TOOLS = [
   },
   {
     name: 'demipass_refresh',
-    description: 'AUTH: Swap a refresh token for a fresh access token before the access token expires (avoids the hour-25 lockout). Single-use: each call returns a NEW refresh token and revokes the old one — store the new refresh_token (ideally back into DemiPass). auth-fingerprint returns the initial refresh_token alongside the access token.',
+    description: 'AUTH: Rotate the refresh token on the credentials file for a fresh access token (avoids the hour-25 lockout). Refresh tokens are single-use and the file is shared by every process on this machine, so the rotated pair is WRITTEN BACK to the file and adopted here; no token values are returned. Normally unnecessary: this server refreshes the file by itself before each call. Pass refreshToken only for a token that is not the one on file.',
     inputSchema: {
       type: 'object',
       properties: {
-        refreshToken: { type: 'string', description: 'The current refresh token (dpr_...)' },
+        refreshToken: { type: 'string', description: 'Optional. Defaults to the refresh token on the credentials file.' },
         expiresIn: { type: 'string', description: 'Access token TTL: 1h | 24h | 7d | 30d (default 24h)' },
       },
-      required: ['refreshToken'],
     },
   },
   {
@@ -527,7 +526,8 @@ const HANDLERS = {
     return await demipass.genesisStatus();
   },
   async demipass_refresh(args) {
-    return await demipass.refreshAccess({ refreshToken: args.refreshToken, expiresIn: args.expiresIn });
+    // Persist the rotation: a bare refreshAccess() here orphaned every sibling process on 2026-10-07.
+    return await demipass.refreshAndPersist({ refreshToken: args.refreshToken, expiresIn: args.expiresIn });
   },
   async demipass_refresh_revoke(args) {
     return await demipass.revokeRefresh({ refreshToken: args.refreshToken });

@@ -158,6 +158,32 @@ const server = http.createServer((req, res) => {
     assert.strictEqual((await demipass.ensureFreshToken({ file: absent })).reason, 'no_token');
   });
 
+  console.log('\nrefreshAndPersist (an explicit refresh must not orphan sibling processes — 2026-10-07)');
+  await check('rotated pair is written back, nothing secret returned, this process adopts it, a sibling adopts from file', async () => {
+    fs.writeFileSync(CRED, JSON.stringify({ base_url: base, token: mint(600), refresh_token: state.refreshCurrent, agent_label: 'test-agent@host', did: 'did:key:zTEST' }));
+    const before = state.refreshCurrent;
+    const r = await demipass.refreshAndPersist({ file: CRED });                       // no token given → the one on file
+    assert.strictEqual(r.persisted, true); assert.notStrictEqual(state.refreshCurrent, before);
+    const rec = JSON.parse(fs.readFileSync(CRED, 'utf8'));
+    assert.strictEqual(rec.refresh_token, state.refreshCurrent, 'the successor refresh token must be on disk, not only in the caller\'s hands');
+    assert.strictEqual(rec.agent_label, 'test-agent@host');
+    assert.ok(!JSON.stringify(r).includes('dpr_') && !JSON.stringify(r).includes('.sig'), 'no token values in output');
+    await demipass.list(); assert.strictEqual(state.lastAuth, 'Bearer ' + rec.token, 'this process uses the new bearer');
+    demipass.configure({ bearerToken: mint(60) }); const n = state.log.length;        // a sibling with a stale bearer
+    assert.strictEqual((await demipass.ensureFreshToken({ file: CRED })).reason, 'adopted_from_file'); assert.strictEqual(state.log.length, n);
+  });
+  await check('another identity\'s refresh token is rotated for the caller but the file is left alone', async () => {
+    const keep = { base_url: base, token: mint(600), refresh_token: 'dpr_other_file', did: 'did:key:zSOMEONE' };
+    fs.writeFileSync(CRED, JSON.stringify(keep));
+    const r = await demipass.refreshAndPersist({ refreshToken: state.refreshCurrent, file: CRED });
+    assert.strictEqual(r.persisted, false); assert.ok(r.refresh_token, 'the caller still receives the rotated pair');
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(CRED, 'utf8')), keep);
+  });
+  await check('no token given and none on file → clear error', async () => {
+    const absent = path.join(tmpdir, 'absent2.json');
+    await assert.rejects(demipass.refreshAndPersist({ file: absent }), /none given and none on the credentials file/);
+  });
+
   console.log('\nlogout');
   await check('revokes refresh + access, deletes file, drops bearer', async () => {
     const t = mint(600);
@@ -193,6 +219,14 @@ const server = http.createServer((req, res) => {
       await call('demipass_list');
       assert.strictEqual(state.lastAuth, 'Bearer ' + rec.token, 'MCP must use the freshly approved bearer without a restart');
       const st = await call('demipass_login_status'); assert.strictEqual(st.active_source, 'credentials_file'); assert.strictEqual(st.active.did, 'did:key:zTEST'); assert.strictEqual(st.bearer_source_at_startup, 'none');
+      // Explicit refresh over MCP: the rotated pair lands on the shared file (the 2026-10-07 orphaning), nothing secret in the output.
+      state.refreshCurrent = rec.refresh_token;
+      const rf = await call('demipass_refresh', {});
+      assert.strictEqual(rf.persisted, true); assert.strictEqual(rf.credentials_path, mcpCred);
+      assert.ok(!JSON.stringify(rf).includes('dpr_') && !JSON.stringify(rf).includes('.sig'), 'no token values in output');
+      const rec2 = JSON.parse(fs.readFileSync(mcpCred, 'utf8'));
+      assert.strictEqual(rec2.refresh_token, state.refreshCurrent); assert.notStrictEqual(rec2.refresh_token, rec.refresh_token);
+      await call('demipass_list'); assert.strictEqual(state.lastAuth, 'Bearer ' + rec2.token, 'MCP uses the refreshed bearer without a restart');
       await assert.rejects(call('demipass_login_wait', {}), /no login in flight/);
       const out = await call('demipass_logout'); assert.strictEqual(out.credentials.removed, true); assert.strictEqual(fs.existsSync(mcpCred), false);
     } finally { child.kill(); }

@@ -574,6 +574,44 @@ async function revokeRefresh({ refreshToken } = {}) {
   return _request("POST", "/api/identity/refresh/revoke", { refresh_token: refreshToken });
 }
 
+/**
+ * Explicit refresh that also PERSISTS the rotated pair.
+ *
+ * Refresh tokens are single-use, and the one on the credentials file is shared
+ * by every process on this machine. A caller that rotates it and keeps the
+ * successor only in its own hands orphans all of them: on 2026-10-07 one such
+ * call left every agent on flimflam with an expired access token and a revoked
+ * refresh token ("login expired" for three days, device codes expiring unapproved).
+ * A rotation that belongs to the identity on file is therefore written back and
+ * adopted in-process, and no token values are returned (a transcript copy is
+ * exactly the state that orphaned the fleet). Another identity's rotation is
+ * returned as before and the file is left alone.
+ */
+async function refreshAndPersist({ refreshToken, expiresIn, file = credentialsPath() } = {}) {
+  const rec = loadCredentials(file);
+  const used = refreshToken || (rec && rec.refresh_token) || '';
+  if (!used) throw new Error('refreshAndPersist() needs a refresh token: none given and none on the credentials file');
+  const r = await refreshAccess({ refreshToken: used, expiresIn });
+  if (!r || !r.token) throw new Error('token refresh failed: no token returned');
+  const did = r.did || (tokenInfo(r.token) || {}).did || '';
+  const mine = !rec || rec.refresh_token === used || (!!rec.did && !!did && rec.did === did);
+  if (!mine) {
+    return { ...r, persisted: false, reason: 'the refresh token belongs to a different identity than the credentials file; file left alone' };
+  }
+  config.bearerToken = r.token;
+  const saved = saveCredentials({
+    ...(rec || {}), ...r,
+    agent_label: (rec && rec.agent_label) || r.agent_label,
+    base_url: (rec && rec.base_url) || config.baseUrl,
+  }, file);
+  return {
+    ok: true, persisted: true, credentials_path: saved.path,
+    did: saved.did, email: saved.email, scope: saved.scope, agent_label: saved.agent_label,
+    token_expires_at: saved.token_expires_at, refresh_expires_at: saved.refresh_expires_at,
+    note: 'Rotated pair written to the credentials file; this process and every sibling reading that file use it from their next call.',
+  };
+}
+
 // Check genesis status
 async function genesisStatus() {
   let did = '';
@@ -1135,6 +1173,7 @@ module.exports = {
   genesisSeed,
   genesisSubmit,
   refreshAccess,
+  refreshAndPersist,
   revokeRefresh,
   genesisVerify,
   genesisStatus,
