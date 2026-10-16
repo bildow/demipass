@@ -11,6 +11,36 @@ DemiPass is a client SDK for the [Dustforge](https://dustforge.com) identity pla
 3. DemiPass injects the secret server-side (SSH, HTTP header, etc.)
 4. The agent gets the result back — never the secret itself
 
+## Sign in without a password (device flow)
+
+Agents should never be handed a password or a pasted token. Instead:
+
+```bash
+npx demipass-login                # or, from Claude Code: the demipass_login tool
+```
+
+The CLI (or MCP tool) prints a short code and a URL such as
+`https://demipass.com/device?code=ABCD-EFGH`. Open it on any device — the DemiPass
+phone vault works (Settings → *Approve an agent login*) — sign in, review the agent
+name and scope, and tap **Approve**. The CLI receives an access token plus a
+single-use refresh token, saves them to `~/.config/demipass/credentials.json`
+(mode 0600; override with `DEMIPASS_CREDENTIALS`), and the SDK / MCP server keep
+the token fresh automatically before it expires. Nothing secret is printed and
+nothing needs pasting into `.mcp.json`.
+
+| Command / tool | What it does |
+|---|---|
+| `npx demipass-login [--scope transact] [--label name@host]` | start a login, wait for approval, save credentials |
+| `npx demipass-login status` / `demipass_login_status` | who you are, where the bearer came from, expiry |
+| `npx demipass-login logout` / `demipass_logout` | revoke the refresh token and delete the local file |
+| `demipass_login` → `demipass_login_wait` (MCP) | same flow from inside a Claude Code session; the running server adopts the token immediately |
+
+Precedence: a live credentials file beats a static `DEMIPASS_TOKEN` env value.
+Set `DEMIPASS_TOKEN` only for fixed service identities that are provisioned some other way.
+
+SDK: `demipass.deviceLogin({ agentLabel, scope, onCode })`, `demipass.ensureFreshToken()`,
+`demipass.loginStatus()`, `demipass.logout()`.
+
 ## Install
 
 ```bash

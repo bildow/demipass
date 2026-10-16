@@ -1,16 +1,18 @@
 {
   "name": "demipass",
-  "version": "2.6.0",
+  "version": "2.7.0",
   "description": "Secrets management for LLM sessions. Keep credentials out of context windows.",
   "main": "index.js",
   "bin": {
-    "demipass-mcp": "./mcp-server.js"
+    "demipass-mcp": "./mcp-server.js",
+    "demipass-login": "./bin/demipass-login.js"
   },
   "mcpName": "com.dustforge/demipass",
   "scripts": {
     "mcp": "node mcp-server.js",
     "buoy": "node buoy-mcp.js",
-    "test": "node test/use-token-flow.test.js"
+    "test": "node test/use-token-flow.test.js && node test/device-login.test.js",
+    "login": "node bin/demipass-login.js"
   },
   "keywords": [
     "secrets",
@@ -45,6 +47,7 @@
     "README.md",
     "ONBOARDING.md",
     "docs/security-stance.md",
-    ".env.example"
+    ".env.example",
+    "bin/"
   ]
 }
