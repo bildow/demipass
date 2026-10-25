@@ -1,0 +1,63 @@
+:root {
+  --bg: #ffffff;
+  --fg: #111827;
+  --muted: #6b7280;
+  --line: #e5e7eb;
+  --accent: #2563eb;
+  --accent-fg: #ffffff;
+  --warn-bg: #fef3c7;
+  --warn-fg: #92400e;
+  --err: #b91c1c;
+  --ok: #047857;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111827;
+    --fg: #f3f4f6;
+    --muted: #9ca3af;
+    --line: #374151;
+    --accent: #3b82f6;
+    --warn-bg: #451a03;
+    --warn-fg: #fde68a;
+    --err: #f87171;
+    --ok: #34d399;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+body.popup { width: 360px; }
+main { padding: 12px; }
+h1 { font-size: 15px; margin: 0 0 8px; }
+h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 14px 0 6px; }
+section + section { border-top: 1px solid var(--line); margin-top: 12px; }
+.muted { color: var(--muted); }
+.err { color: var(--err); }
+.ok { color: var(--ok); }
+.banner { background: var(--warn-bg); color: var(--warn-fg); padding: 6px 8px; border-radius: 4px; margin-bottom: 8px; }
+.row { display: flex; align-items: center; gap: 8px; }
+.row > .grow { flex: 1; min-width: 0; }
+.entry { padding: 6px 0; border-bottom: 1px solid var(--line); }
+.entry:last-child { border-bottom: 0; }
+.entry .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.entry .user { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.code { font: 600 20px/1.2 ui-monospace, monospace; letter-spacing: .08em; padding: 6px 0; user-select: all; }
+label { display: block; margin: 6px 0 2px; color: var(--muted); }
+input[type=text], input[type=password], input[type=url], select {
+  width: 100%; padding: 6px 8px; border: 1px solid var(--line); border-radius: 4px;
+  background: var(--bg); color: var(--fg); font: inherit;
+}
+button {
+  font: inherit; padding: 5px 12px; border-radius: 4px; border: 1px solid var(--line);
+  background: var(--bg); color: var(--fg); cursor: pointer;
+}
+button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+button:disabled { opacity: .5; cursor: default; }
+.actions { display: flex; gap: 8px; margin-top: 10px; }
+a { color: var(--accent); }
+[hidden] { display: none !important; }

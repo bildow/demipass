@@ -1,0 +1,282 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { ApiClient, ApiError, NotPairedError, jwtClaims, waitForFill, waitForPairing } from '../lib/api.js';
+import { startMock, createMockState, approveDevice, phoneDecide } from './mock-server.js';
+
+const b64u = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
+const jwt = (claims) => `${b64u({ alg: 'none' })}.${b64u(claims)}.sig`;
+const future = () => Math.floor(Date.now() / 1000) + 3600;
+
+// In-memory token store that records the order of writes.
+function memTokens(init = {}) {
+  const t = { access: init.access || null, refresh: init.refresh || null, log: [] };
+  return Object.assign(t, {
+    async getAccess() { return t.access; },
+    async setAccess(v) { t.log.push('setAccess'); t.access = v; },
+    async getRefresh() { return t.refresh; },
+    async setRefresh(v) { t.log.push('setRefresh'); t.refresh = v; },
+    async clear() { t.log.push('clear'); t.access = null; t.refresh = null; },
+  });
+}
+
+// Scripted fetch: each route is a list of responses consumed in order.
+function scripted(routes) {
+  const calls = [];
+  const f = async (url, init) => {
+    const path = new URL(url).pathname;
+    const key = `${init.method} ${path}`;
+    const body = init.body ? JSON.parse(init.body) : undefined;
+    calls.push({ key, auth: init.headers.Authorization || null, body });
+    const q = routes[key];
+    if (!q || q.length === 0) throw new Error('unexpected ' + key);
+    const [status, json] = q.length > 1 ? q.shift() : q[0];
+    return { status, json: async () => json };
+  };
+  f.calls = calls;
+  return f;
+}
+
+const noSleep = async () => {};
+
+test('jwtClaims reads exp/jti and tolerates junk', () => {
+  assert.equal(jwtClaims(jwt({ exp: 5, jti: 'j' })).jti, 'j');
+  assert.equal(jwtClaims('nope'), null);
+  assert.equal(jwtClaims('a.!!!.c'), null);
+  assert.equal(jwtClaims(null), null);
+});
+
+test('redeem state machine: 428 pending, 403 denied, 410 expired/already_redeemed, 200 approved', async () => {
+  const at = jwt({ exp: future() });
+  const fetch = scripted({
+    'POST /api/blindkey/fill/redeem': [
+      [428, { error: 'approval_pending' }],
+      [403, { error: 'denied' }],
+      [410, { error: 'expired' }],
+      [410, { error: 'already_redeemed' }],
+      [200, { ok: true, value: 's3cret', username: 'me', origin: 'https://example.com', name: 'n', ref: 'DP-PWD-x' }],
+      [500, { error: 'boom' }],
+    ],
+  });
+  const c = new ApiClient({ base: 'https://api.test', fetch, tokens: memTokens({ access: at, refresh: 'r' }) });
+  assert.deepEqual(await c.redeemOnce('dpf_1'), { state: 'pending' });
+  assert.deepEqual(await c.redeemOnce('dpf_1'), { state: 'denied' });
+  assert.deepEqual(await c.redeemOnce('dpf_1'), { state: 'expired' });
+  assert.deepEqual(await c.redeemOnce('dpf_1'), { state: 'already_redeemed' });
+  const ok = await c.redeemOnce('dpf_1');
+  assert.equal(ok.state, 'approved');
+  assert.equal(ok.fill.value, 's3cret');
+  assert.equal(ok.fill.origin, 'https://example.com');
+  await assert.rejects(c.redeemOnce('dpf_1'), (e) => e instanceof ApiError && e.status === 500 && !/s3cret/.test(e.message));
+  // A 403 'denied' must not be mistaken for a bad token: no refresh happened.
+  assert.equal(fetch.calls.filter((x) => x.key === 'POST /api/identity/refresh').length, 0);
+});
+
+test('waitForFill polls through 428 until approved', async () => {
+  const at = jwt({ exp: future() });
+  const fetch = scripted({
+    'POST /api/blindkey/fill/redeem': [[428, { error: 'approval_pending' }], [428, { error: 'approval_pending' }],
+      [200, { ok: true, value: 'v', username: '', origin: 'https://a.test', name: 'n', ref: 'r' }]],
+  });
+  const c = new ApiClient({ base: 'https://api.test', fetch, tokens: memTokens({ access: at, refresh: 'r' }) });
+  let pendings = 0;
+  const r = await waitForFill(c, 'dpf_1', { sleep: noSleep, onPending: () => pendings++ });
+  assert.equal(r.state, 'approved');
+  assert.equal(pendings, 2);
+});
+
+test('waitForFill gives up at the client deadline and honours cancel', async () => {
+  const at = jwt({ exp: future() });
+  const fetch = scripted({ 'POST /api/blindkey/fill/redeem': [[428, { error: 'approval_pending' }]] });
+  const c = new ApiClient({ base: 'https://api.test', fetch, tokens: memTokens({ access: at, refresh: 'r' }) });
+  let t = 0;
+  const r = await waitForFill(c, 'dpf_1', { expiresIn: 10, sleep: async (ms) => { t += ms; }, now: () => t });
+  assert.equal(r.state, 'expired');
+  let n = 0;
+  const r2 = await waitForFill(c, 'dpf_1', { sleep: noSleep, isCancelled: () => ++n > 2 });
+  assert.equal(r2.state, 'cancelled');
+});
+
+test('fill request: 201 pending; 403 carries bound_origins and no refresh', async () => {
+  const at = jwt({ exp: future() });
+  const fetch = scripted({
+    'POST /api/blindkey/fill/request': [
+      [201, { ok: true, request_id: 'dpf_a', status: 'pending', expires_in: 120 }],
+      [403, { error: 'origin not bound', bound_origins: ['https://example.com'] }],
+    ],
+  });
+  const c = new ApiClient({ base: 'https://api.test', fetch, tokens: memTokens({ access: at, refresh: 'r' }) });
+  assert.deepEqual(await c.requestFill('DP-1', 'https://example.com', 'x'), { request_id: 'dpf_a', status: 'pending', expires_in: 120 });
+  await assert.rejects(c.requestFill('DP-1', 'https://evil.test', 'x'), (e) => e.status === 403 && e.boundOrigins[0] === 'https://example.com');
+  assert.equal(fetch.calls.filter((x) => x.key === 'POST /api/identity/refresh').length, 0);
+});
+
+test('refresh: expiring access token is refreshed first; new refresh token persisted before access', async () => {
+  const old = jwt({ exp: Math.floor(Date.now() / 1000) + 10 });
+  const fresh = jwt({ exp: future(), jti: 'new' });
+  const fetch = scripted({
+    'POST /api/identity/refresh': [[200, { ok: true, token: fresh, refresh_token: 'r2' }]],
+    'GET /api/blindkey/fill/candidates': [[200, { ok: true, candidates: [] }]],
+  });
+  const tokens = memTokens({ access: old, refresh: 'r1' });
+  const c = new ApiClient({ base: 'https://api.test', fetch, tokens });
+  await c.candidates('https://example.com');
+  assert.deepEqual(tokens.log, ['setRefresh', 'setAccess']);
+  assert.equal(tokens.refresh, 'r2');
+  assert.equal(fetch.calls[0].body.refresh_token, 'r1');
+  assert.equal(fetch.calls[1].auth, 'Bearer ' + fresh);
+});
+
+test('refresh: a 401 triggers one refresh and one retry', async () => {
+  const at = jwt({ exp: future() });
+  const fresh = jwt({ exp: future(), jti: 'n' });
+  const fetch = scripted({
+    'GET /api/blindkey/fill/candidates': [[401, { error: 'token invalid: revoked' }], [200, { ok: true, candidates: [{ ref: 'r', name: 'n', username: 'u', secret_type: 'password' }] }]],
+    'POST /api/identity/refresh': [[200, { ok: true, token: fresh, refresh_token: 'r2' }]],
+  });
+  const c = new ApiClient({ base: 'https://api.test', fetch, tokens: memTokens({ access: at, refresh: 'r1' }) });
+  const out = await c.candidates('https://example.com');
+  assert.equal(out.length, 1);
+  assert.deepEqual(fetch.calls.map((x) => x.key), ['GET /api/blindkey/fill/candidates', 'POST /api/identity/refresh', 'GET /api/blindkey/fill/candidates']);
+});
+
+test("refresh: dustforge's 403 'admin access or Bearer token required' is treated as a rejected bearer", async () => {
+  const at = jwt({ exp: future() });
+  const fresh = jwt({ exp: future() });
+  const fetch = scripted({
+    'POST /api/blindkey/store': [[403, { error: 'admin access or Bearer token required' }], [200, { ok: true, name: 'k', ref: 'DP-API-k', secret_type: 'api_key' }]],
+    'POST /api/identity/refresh': [[200, { ok: true, token: fresh, refresh_token: 'r2' }]],
+  });
+  const c = new ApiClient({ base: 'https://api.test', fetch, tokens: memTokens({ access: at, refresh: 'r1' }) });
+  const out = await c.store({ name: 'k', value: 'sk-123', secret_type: 'api_key' });
+  assert.equal(out.ref, 'DP-API-k');
+});
+
+test('refresh: a dead refresh token clears both tokens and reports not paired', async () => {
+  const fetch = scripted({ 'POST /api/identity/refresh': [[401, { error: 'invalid, expired, or revoked refresh token' }]] });
+  const tokens = memTokens({ access: null, refresh: 'dead' });
+  const c = new ApiClient({ base: 'https://api.test', fetch, tokens });
+  await assert.rejects(c.candidates('https://example.com'), NotPairedError);
+  assert.equal(tokens.refresh, null);
+  assert.equal(await c.isPaired(), false);
+});
+
+test('refresh: a network error keeps the tokens', async () => {
+  const fetch = async () => { throw new TypeError('Failed to fetch'); };
+  const tokens = memTokens({ access: null, refresh: 'r1' });
+  const c = new ApiClient({ base: 'https://api.test', fetch, tokens });
+  await assert.rejects(c.candidates('https://example.com'), (e) => e instanceof ApiError && e.status === 0);
+  assert.equal(tokens.refresh, 'r1');
+});
+
+test('refresh is single-flight: parallel calls share one rotation', async () => {
+  let refreshes = 0;
+  const fresh = jwt({ exp: future() });
+  const fetch = async (url, init) => {
+    const p = new URL(url).pathname;
+    if (p === '/api/identity/refresh') {
+      refreshes++;
+      await new Promise((r) => setTimeout(r, 20));
+      return { status: 200, json: async () => ({ ok: true, token: fresh, refresh_token: 'r' + (refreshes + 1) }) };
+    }
+    return { status: 200, json: async () => ({ ok: true, candidates: [] }) };
+  };
+  const c = new ApiClient({ base: 'https://api.test', fetch, tokens: memTokens({ access: null, refresh: 'r1' }) });
+  await Promise.all([c.candidates('https://a.test'), c.candidates('https://b.test'), c.candidates('https://c.test')]);
+  assert.equal(refreshes, 1);
+});
+
+test('no refresh token -> NotPairedError without any network call', async () => {
+  const fetch = scripted({});
+  const c = new ApiClient({ base: 'https://api.test', fetch, tokens: memTokens() });
+  await assert.rejects(c.candidates('https://a.test'), NotPairedError);
+  assert.equal(fetch.calls.length, 0);
+});
+
+test('device flow: 428 pending, 403 denied, 400 expired, 200 stores both tokens (refresh first)', async () => {
+  const fresh = jwt({ exp: future() });
+  const fetch = scripted({
+    'POST /api/identity/device/code': [[200, { ok: true, device_code: 'dpd_x', user_code: 'ABCD-1234', interval: 5, expires_in: 600 }]],
+    'POST /api/identity/device/token': [
+      [428, { error: 'authorization_pending' }],
+      [403, { error: 'access_denied' }],
+      [400, { error: 'expired_token' }],
+      [200, { ok: true, token: fresh, refresh_token: 'r1', scope: 'transact' }],
+    ],
+  });
+  const tokens = memTokens();
+  const c = new ApiClient({ base: 'https://api.test', fetch, tokens });
+  const p = await c.startPairing('test');
+  assert.equal(fetch.calls[0].body.scope, 'transact');
+  assert.equal(p.verification_url, 'https://demipass.com/device');
+  assert.equal(p.verification_url_complete, 'https://demipass.com/device?code=ABCD-1234');
+  assert.equal((await c.pollPairing('dpd_x')).state, 'pending');
+  assert.equal((await c.pollPairing('dpd_x')).state, 'denied');
+  assert.equal((await c.pollPairing('dpd_x')).state, 'expired');
+  assert.equal((await c.pollPairing('dpd_x')).state, 'paired');
+  assert.deepEqual(tokens.log, ['setRefresh', 'setAccess']);
+});
+
+test('sign out revokes the refresh token and the access jti, and clears local tokens', async () => {
+  const at = jwt({ exp: future(), jti: 'jti_1' });
+  const fetch = scripted({
+    'POST /api/identity/refresh/revoke': [[200, { ok: true, revoked: true }]],
+    'POST /api/identity/tokens/revoke': [[200, { ok: true, revoked: true }]],
+  });
+  const tokens = memTokens({ access: at, refresh: 'r1' });
+  const c = new ApiClient({ base: 'https://api.test', fetch, tokens });
+  assert.deepEqual(await c.signOut(), { refreshRevoked: true, accessRevoked: true });
+  assert.equal(fetch.calls[0].body.refresh_token, 'r1');
+  assert.equal(fetch.calls[1].body.jti, 'jti_1');
+  assert.equal(tokens.refresh, null);
+  assert.equal(tokens.access, null);
+});
+
+test('store sends login + origins (contract field names)', async () => {
+  const at = jwt({ exp: future() });
+  const fetch = scripted({ 'POST /api/blindkey/store': [[200, { ok: true, name: 'n', ref: 'DP-PWD-n', secret_type: 'password' }]] });
+  const c = new ApiClient({ base: 'https://api.test', fetch, tokens: memTokens({ access: at, refresh: 'r' }) });
+  await c.store({ name: 'n', value: 'pw', secret_type: 'password', login: 'me@example.com', origins: ['https://example.com'] });
+  assert.deepEqual(fetch.calls[0].body, { name: 'n', value: 'pw', secret_type: 'password', login: 'me@example.com', origins: ['https://example.com'] });
+  assert.equal('username' in fetch.calls[0].body, false);
+});
+
+// ---- the same client against the mock over real HTTP ----------------------
+
+test('end to end against the mock: pair, store, candidates, fill approved on the phone, refresh survives', async (t) => {
+  const state = createMockState({ accessTtlSec: 30 }); // inside the 60 s skew: every call refreshes
+  const m = await startMock({ state });
+  t.after(() => m.close());
+  const tokens = memTokens();
+  const c = new ApiClient({ base: m.apiBase, fetch, tokens });
+
+  const p = await c.startPairing('node test');
+  await approveDevice(state, p.user_code);
+  const paired = await waitForPairing(c, p.device_code, { interval: 0, sleep: noSleep });
+  assert.equal(paired.state, 'paired');
+
+  await c.store({ name: 'site', value: 'hunter2', secret_type: 'password', login: 'me@example.com', origins: ['https://example.com'] });
+  const cands = await c.candidates('https://example.com');
+  assert.deepEqual(cands.map((x) => [x.name, x.username]), [['site', 'me@example.com']]);
+  assert.deepEqual(await c.candidates('https://login.example.com'), []);
+
+  await assert.rejects(c.requestFill(cands[0].ref, 'https://evil.test', 't'), (e) => e.status === 403);
+  const req = await c.requestFill(cands[0].ref, 'https://example.com', 't');
+  assert.equal(req.status, 'pending');
+  assert.equal((await c.redeemOnce(req.request_id)).state, 'pending');
+  assert.equal(await phoneDecide(m.apiBase, state, req.request_id, 'approve'), 200);
+  const r = await c.redeemOnce(req.request_id);
+  assert.equal(r.state, 'approved');
+  assert.equal(r.fill.value, 'hunter2');
+  assert.equal((await c.redeemOnce(req.request_id)).state, 'already_redeemed');
+
+  const req2 = await c.requestFill(cands[0].ref, 'https://example.com', 't');
+  assert.equal(await phoneDecide(m.apiBase, state, req2.request_id, 'deny'), 200);
+  assert.equal((await c.redeemOnce(req2.request_id)).state, 'denied');
+
+  // The mock never records a value in its call log.
+  assert.equal(JSON.stringify(state.calls).includes('hunter2'), false);
+
+  const out = await c.signOut();
+  assert.equal(out.refreshRevoked, true);
+  assert.equal(await c.isPaired(), false);
+});

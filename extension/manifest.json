@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "DemiPass",
+  "version": "0.1.0",
+  "description": "Put passwords and API keys into your DemiPass vault, and fill logins after approving on your phone.",
+  "minimum_chrome_version": "116",
+  "permissions": ["storage", "contextMenus", "scripting", "activeTab"],
+  "host_permissions": ["https://api.dustforge.com/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "DemiPass",
+    "default_popup": "ui/popup.html"
+  },
+  "options_ui": {
+    "page": "ui/options.html",
+    "open_in_tab": false
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content/form-detect.js", "content/content.js"],
+      "all_frames": true,
+      "run_at": "document_idle"
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'"
+  }
+}
