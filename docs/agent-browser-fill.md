@@ -26,7 +26,7 @@ claims its page is `https://bank.example`, the server approves bank.example's lo
 fake in `Runtime.callFunctionOn`. So:
 
 - **`DEMIPASS_CDP_URL` set (operator config):** it is the only endpoint. A `cdp_url` argument that differs is refused (`cdp_url_not_allowed`). The advertised `webSocketDebuggerUrl` must be on the same host or on loopback.
-- **Not set:** the agent's `cdp_url` must be loopback by literal name or address (`127.0.0.0/8`, `::1`, `localhost`), and so must the `webSocketDebuggerUrl` that `/json/version` advertises (`cdp_not_loopback`). `/json/version` redirects are not followed.
+- **Not set:** the agent's `cdp_url` must be a literal loopback address (`127.0.0.0/8` or `[::1]`; not a name, not even `localhost`, so no DNS answer decides it), and so must the `webSocketDebuggerUrl` that `/json/version` advertises (`cdp_not_loopback`). `/json/version` redirects are not followed.
 
 What remains: **any process of the same uid (or any local user, if the port is not otherwise guarded) that listens
 on loopback can pose as the browser.** Loopback narrows the attack to local code, which already has the same-uid
@@ -84,12 +84,18 @@ Other 1.0.1 facts that matter here:
 3. `fill/request` + `fill/redeem`. The origin the server approved must equal the page origin.
 4. `getUrl` again, then Lightpanda `fill` on the tagged selectors, which fires real input and change events. If the page navigated, the tags are gone and the fill fails closed.
 5. Optional submit through `click` on the tagged submit button (or Enter).
-6. After the password `fill`, an internal `evaluate` reads the field's length (never its value). If the field kept fewer or more characters than the value (a maxlength guard, a page script), the field is cleared and the fill fails `value_not_accepted`; `chars` is the measured length.
+6. After the password `fill`, an internal `evaluate` reads the field's length. If the field holds a different number of characters than the value (a length guard, a page script):
+   - What the field holds is read (internal `evaluate`, never forwarded) and added to the Redactor: it derives from the value, and page JS may keep a copy.
+   - The field is emptied with Lightpanda `fill ''` (events, so page state follows), then, if the page refilled it, with the native setter and no events. Emptiness is re-checked.
+   - Emptied → `value_not_accepted`. Still not empty → `clear_failed` ("part of the value may still be in the field"); what it holds is redacted from later results unless under 4 characters.
+   The Chromium path does the same two-step clear in the page and reports `clear_failed` the same way (nothing is scrubbed there; see below). On success `chars` is the measured length.
 7. From then on, Lightpanda results and stderr lines are scrubbed, best-effort, of the value where they echo it as-is or in one of the encodings in `fill-core.js` (`encodingVariants`): JSON; `encodeURIComponent`, with `+` spaces, with `'` → `%27` (how the URL parser re-serializes an encoded href in links / interactiveElements / extract), and strict RFC 3986; form encoding; a form query passed through `decodeURIComponent` (spaces left as `+`); a raw value in a parsed query; HTML escapes `&<>"'` / `&<>"` / `&<>` (text nodes leave quotes raw); markdown backslash escapes ``\`*_{}[]()#+-!|``; lowercase-hex percent forms; and the JSON string body of each. Anything transformed another way is not caught.
 
 Protocol details of the proxy:
 - **Ids.** Every request Lightpanda sees carries an id the proxy minted. Agent ids are rewritten on the way in and restored on the way out; internal calls use ids from the same counter; a reply to an id the proxy did not mint for the agent is dropped. An agent id can never be taken for an internal reply, and an internal reply can never reach the agent. `notifications/cancelled` is mapped to the minted id. JSON-RPC batches are refused.
-- **Holding.** Agent requests are held while a fill tool runs and until every internal call has been answered. A call that times out (30 s) fails the fill, but its id stays registered, so agent requests stay held until Lightpanda answers it (or exits), and the late reply is swallowed.
+- **Holding.** Agent requests are held while a fill tool runs and until every internal call has been answered. A call that times out (30 s) fails the fill, but its id stays registered, so agent requests stay held until Lightpanda answers it, and the late reply is swallowed. Still unanswered 60 s after the timeout (a page stuck in `while (true)`), Lightpanda is killed and every held request is answered "the browser exited".
+- **DemiPass HTTP calls** (candidates, request, each redeem poll) have a 15 s deadline per call (`configure({ fillTimeoutMs })`), mapped to the `network` error. An approval wait is many short polls, so `wait_seconds` is not capped by it.
+- **Lightpanda exits.** A fill running at that moment still answers (`browser_gone`) before the wrapper exits with Lightpanda's code.
 - **`tools/list`.** Child tools named `demipass_*` are dropped; the fill tools are added to the first page only (no `cursor`).
 
 ### goose config (proposed — not applied to the fleet)

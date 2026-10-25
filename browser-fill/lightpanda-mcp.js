@@ -106,9 +106,11 @@ function lineSplitter(onLine) {
  * for an internal reply, and no internal reply (Lightpanda's `fill` result echoes the value) can reach the agent.
  *
  * Holding: while a fill tool runs, and until every internal call has been answered (a call that timed out keeps its
- * id registered until Lightpanda answers or exits), agent requests are held, so the page stays still.
+ * id registered until Lightpanda answers or exits), agent requests are held, so the page stays still. A timed-out
+ * call that is still unanswered `hardKillMs` later means Lightpanda is stuck (a page in `while (true)`): the child is
+ * killed, and every held request is answered "the browser exited".
  */
-function createProxy({ lightpanda, extra = [], api, token, getToken, env = process.env, io = process, clientLabel, internalTimeoutMs = 30000 }) {
+function createProxy({ lightpanda, extra = [], api, token, getToken, env = process.env, io = process, clientLabel, internalTimeoutMs = 30000, hardKillMs = 60000 }) {
   const tokenFor = typeof getToken === 'function' ? getToken : () => token;
   const redactor = new Redactor();
   const childEnv = { ...env, LIGHTPANDA_DISABLE_TELEMETRY: env.LIGHTPANDA_DISABLE_TELEMETRY || 'true' };
@@ -121,6 +123,8 @@ function createProxy({ lightpanda, extra = [], api, token, getToken, env = proce
   const forAgent = new Map();     // child id → { id: the agent's id, kind, firstPage }
   let running = false;            // a fill tool is running
   let childGone = false;
+  let exitCode;                   // set when the child exited while a fill tool was running (its reply goes out first)
+  const killTimers = new Set();
   const held = [];                // agent requests held while busy (keeps the page still)
   const busy = () => running || internal.size > 0;
 
@@ -164,7 +168,12 @@ function createProxy({ lightpanda, extra = [], api, token, getToken, env = proce
       const entry = { done: (m) => { clearTimeout(timer); resolve(m); } };
       // On timeout the fill fails, but the id stays registered: Lightpanda may still be acting on the page, so agent
       // requests stay held, and the late reply is swallowed when it comes.
-      const timer = setTimeout(() => { entry.done = () => {}; reject(new FillError('browser_timeout', `browser ${name} timed out`)); }, internalTimeoutMs);
+      const timer = setTimeout(() => {
+        const kill = setTimeout(() => { try { child.kill('SIGKILL'); } catch (_) {} }, hardKillMs);
+        killTimers.add(kill);
+        entry.done = () => { clearTimeout(kill); killTimers.delete(kill); };
+        reject(new FillError('browser_timeout', `browser ${name} timed out`));
+      }, internalTimeoutMs);
       internal.set(id, entry);
       toChild({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } });
     });
@@ -236,11 +245,7 @@ function createProxy({ lightpanda, extra = [], api, token, getToken, env = proce
       // Verify what the field holds (length only), like the CDP path: maxlength handling or a page script can change it.
       const chk = await evalPage({ mode: 'check', mark, expectedOrigin: secret.origin });
       if (!chk.ok) throw new FillError(chk.code === 'origin_changed' ? 'origin_changed' : 'fill_failed', 'the password field is gone after the fill (the page changed)', { origin: secret.origin });
-      if (chk.password_chars !== secret.value.length) {
-        // Never leave a partial value in the page: a prefix of the password is not something the redactor knows.
-        await callChild('fill', { selector: sel('p'), value: '' }).catch(() => {});
-        throw new FillError('value_not_accepted', 'the password field did not accept the value (maxlength or a page script?) — the field was cleared', { origin: secret.origin });
-      }
+      if (chk.password_chars !== secret.value.length) await refuseAndClear(sel, mark, secret.origin);
       const usernameFilled = usernameTried && chk.username_chars === secret.username.length;
       const chars = chk.password_chars;
 
@@ -266,6 +271,26 @@ function createProxy({ lightpanda, extra = [], api, token, getToken, env = proce
     }
   }
 
+  // The field holds something other than the value (a length guard, a page script). Whatever it holds derives from the
+  // value, so it joins the Redactor (page JS may keep a copy and echo it later); then the field is emptied — as a
+  // user would, then, if the page refills it, with no events — and the emptying is verified.
+  async function refuseAndClear(sel, mark, origin) {
+    const learn = async () => {
+      const r = await evalPage({ mode: 'residue', mark }).catch(() => null);
+      if (r && r.ok && typeof r.value === 'string') redactor.add(r.value);
+    };
+    const empty = async () => { const c = await evalPage({ mode: 'check', mark }).catch(() => null); return Boolean(c && c.ok && c.password_chars === 0); };
+    await learn();
+    await callChild('fill', { selector: sel('p'), value: '' }).catch(() => null);
+    let ok = await empty();
+    if (!ok) { await evalPage({ mode: 'clear', mark }).catch(() => null); ok = await empty(); }
+    if (!ok) {
+      await learn();
+      throw new FillError('clear_failed', 'the password field did not accept the value, and the page would not let it be emptied: part of the value may still be in the field (what it holds is redacted from later results, unless under 4 characters)', { origin });
+    }
+    throw new FillError('value_not_accepted', 'the password field did not accept the value; the field was cleared', { origin });
+  }
+
   async function runTool(msg) {
     const { id, params } = msg;
     const name = params && params.name;
@@ -276,13 +301,16 @@ function createProxy({ lightpanda, extra = [], api, token, getToken, env = proce
       const out = name === TOOL_FILL ? await doFill(args) : await doCandidates(args);
       result = { content: [{ type: 'text', text: JSON.stringify(redactor.scrubDeep(out), null, 2) }] };
     } catch (err) {
-      result = { content: [{ type: 'text', text: JSON.stringify(failureResult(err, redactor), null, 2) }], isError: true };
+      const e = childGone ? new FillError('browser_gone', 'the browser exited during the fill') : err;
+      result = { content: [{ type: 'text', text: JSON.stringify(failureResult(e, redactor), null, 2) }], isError: true };
     } finally {
       running = false;
     }
     if (id !== undefined) toAgent({ jsonrpc: '2.0', id, result });
+    if (exitCode !== undefined) { exitProcess(exitCode); return; }
     drain();
   }
+  function exitProcess(code) { if (io === process) process.exit(code == null ? 1 : code); }
   function drain() { while (held.length && !busy()) onAgentMessage(held.shift()); }
 
   // ── agent → us ──
@@ -323,12 +351,17 @@ function createProxy({ lightpanda, extra = [], api, token, getToken, env = proce
   child.stdin.on('error', () => { /* child gone; handled by 'exit' */ });
   child.on('exit', (code) => {
     childGone = true;
+    for (const k of killTimers) clearTimeout(k);
+    killTimers.clear();
     for (const e of internal.values()) e.done({ error: { code: -32603, message: 'browser exited' } });
     internal.clear();
     for (const a of forAgent.values()) agentError(a.id, 'the browser exited');
     forAgent.clear();
     while (held.length) { const m = held.shift(); if (m.id !== undefined && m.id !== null) agentError(m.id, 'the browser exited'); }
-    if (io === process) process.exit(code == null ? 1 : code);
+    // A fill tool still running answers first (its remaining steps fail at once now that the child is gone); a cap
+    // keeps a fill stuck in an HTTP call from holding the process past its browser.
+    if (running) { exitCode = code; setTimeout(() => exitProcess(code), 5000).unref(); return; }
+    exitProcess(code);
   });
   child.on('error', (e) => { io.stderr.write(`demipass-lightpanda-mcp: cannot start ${path.basename(String(lightpanda))}: ${e.code || 'error'}\n`); if (io === process) process.exit(1); });
 

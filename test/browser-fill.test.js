@@ -135,6 +135,11 @@ const PAGES = {
   '/login-trunc': `<!doctype html><html><head><title>Short</title></head><body>
     <form action="/done" method="post"><input name="username" type="email"><input id="p" name="password" type="password"><button>Go</button></form>
     <script>document.querySelector('#p').addEventListener('input', function (e) { if (e.target.value.length > 5) e.target.value = e.target.value.slice(0, 5); });</script></body></html>`,
+  // Keeps 8 characters in a JS variable and refills the field from it when something empties it with events.
+  '/login-sticky': `<!doctype html><html><head><title>Sticky</title></head><body>
+    <form action="/done" method="post"><input name="username" type="email"><input id="p" name="password" type="password"><button>Go</button></form>
+    <script>var last = ''; var p = document.querySelector('#p');
+      p.addEventListener('input', function () { if (this.value === '') { this.value = last; } else { last = this.value.slice(0, 8); this.value = last; } });</script></body></html>`,
   '/nofields': '<!doctype html><html><head><title>Nothing</title></head><body><p>No form here.</p></body></html>',
   '/welcome': '<!doctype html><html><head><title>Welcome</title></head><body><p>Welcome.</p></body></html>',
 };
@@ -430,14 +435,15 @@ async function cdpPolicySuite(mock, site) {
   const fakeUrl = `http://127.0.0.1:${fake.address().port}`;
   const fill = (o) => fillViaCdp({ ref: 'DP-PWD-good', api: demipass, token: SILICON, ...o });
   try {
-    await test('cdp_url on a non-loopback host is refused before any connection or request', async () => {
+    await test('cdp_url not a literal loopback address (incl. the name localhost) is refused before any connection or request', async () => {
       const before = requestsMade(mock);
-      for (const u of ['http://192.0.2.1:9222', 'ws://evil.example/devtools/browser/x', 'http://127.0.0.1.nip.io:9222', 'https://bank.example', 'http://[::2]:9222']) {
+      for (const u of ['http://192.0.2.1:9222', 'ws://evil.example/devtools/browser/x', 'http://127.0.0.1.nip.io:9222', 'https://bank.example', 'http://[::2]:9222',
+        'http://localhost:9222', 'ws://localhost:9222/devtools/browser/x', 'http://[::ffff:127.0.0.1]:9222']) {
         const r = await fill({ cdpUrl: u });
         assert.strictEqual(r.error, 'cdp_not_loopback', `${u} → ${r.error}`);
       }
       assert.strictEqual(requestsMade(mock), before);
-      for (const u of ['http://127.0.0.1:9222', 'http://localhost:9222', 'http://[::1]:9222', 'ws://127.0.0.5:1/x']) assert.strictEqual(chooseCdpEndpoint(u).url, u);
+      for (const u of ['http://127.0.0.1:9222', 'http://[::1]:9222', 'ws://127.0.0.5:1/x']) assert.strictEqual(chooseCdpEndpoint(u).url, u);
     });
     await test('a loopback endpoint advertising a WebSocket on another host is refused', async () => {
       mode = 'evilws'; hits = 0;
@@ -507,7 +513,7 @@ function inProcessProxy({ lightpanda, env, api, label, ...rest }) {
   return { io, child, send, call, textOf, lines, errs, close: () => { io.stdin.end(); setTimeout(() => { try { child.kill('SIGKILL'); } catch (_) {} }, 500); } };
 }
 
-async function wrapperProtocolSuite() {
+async function wrapperProtocolSuite(mock) {
   log('\nLightpanda wrapper protocol (scripted Lightpanda)');
   const lp = fakeLightpandaShim();
   const mk = (extraEnv, opts = {}) => {
@@ -579,6 +585,53 @@ async function wrapperProtocolSuite() {
     } finally { px.close(); }
   });
 
+  await test('a field that cannot be emptied → clear_failed, and what it kept is redacted from later results', async () => {
+    const { px } = mk({ FAKE_MAXLEN: '8', FAKE_STICKY: '1' });
+    try {
+      const fr = JSON.parse(px.textOf(await px.call('f', 'demipass_browser_fill', { ref: 'DP-PWD-fake' })));
+      assert.strictEqual(fr.error, 'clear_failed', JSON.stringify(fr)); assert(!/cleared/.test(fr.message));
+      const echo = await px.call('e', 'echo', { text: `the page says ${SECRET2.slice(0, 8)}` });
+      assert.strictEqual(px.textOf(echo), `the page says ${REDACTED}`);
+    } finally { px.close(); }
+  });
+
+  await test('Lightpanda stuck past the hard deadline is killed; held requests get "the browser exited"', async () => {
+    const { px } = mk({ FAKE_FILL_DELAY_MS: '600000' }, { internalTimeoutMs: 300, hardKillMs: 700 });
+    try {
+      const fr = JSON.parse(px.textOf(await px.call('f', 'demipass_browser_fill', { ref: 'DP-PWD-fake' })));
+      assert.strictEqual(fr.error, 'browser_timeout');
+      const t0 = Date.now();
+      const e = await px.call('held', 'echo', { text: 'x' }, 5000);
+      assert(e.error && /browser exited/.test(e.error.message), JSON.stringify(e));
+      assert(Date.now() - t0 < 3000);
+    } finally { px.close(); }
+  });
+
+  await test('fill HTTP calls have a per-call deadline: an API that never answers → network error, nothing stays held', async () => {
+    const net = require('net');
+    const hole = net.createServer(() => {}).listen(0, '127.0.0.1');
+    await new Promise((r) => hole.on('listening', r));
+    const sdk = require(path.join(ROOT, 'index.js'));
+    sdk.configure({ baseUrl: `http://127.0.0.1:${hole.address().port}`, fillTimeoutMs: 600 });
+    const px = inProcessProxy({ lightpanda: lp, env: cleanEnv(), api: sdk, label: 'fake-lp-wrapper', token: SILICON });
+    try {
+      const t0 = Date.now();
+      const fr = JSON.parse(px.textOf(await px.call('f', 'demipass_browser_fill', { ref: 'DP-PWD-good' }, 8000)));
+      assert.strictEqual(fr.error, 'network', JSON.stringify(fr));
+      assert(Date.now() - t0 < 4000);
+      assert.strictEqual(px.textOf(await px.call('e', 'echo', { text: 'alive' }, 3000)), 'alive');
+      // Per call, not per wait: a 428 approval poll longer than the deadline still completes.
+      sdk.configure({ baseUrl: mock.url });
+      mock.secrets.set('DP-PWD-poll', { value: SECRET, username: USERNAME, origins: ['http://127.0.0.1:9'], grant: true, redeem: 'pending2' });
+      const t1 = Date.now();
+      const got = await obtainFill(sdk, { ref: 'DP-PWD-poll', origin: 'http://127.0.0.1:9', token: SILICON, waitSeconds: 10, sleep: () => sleep(700) });
+      assert.strictEqual(got.value.length, SECRET.length); assert(Date.now() - t1 > 1200, 'poll ended too soon to prove per-call');
+    } finally {
+      px.close(); hole.close();
+      sdk.configure({ baseUrl: mock.url, fillTimeoutMs: 15000 });
+    }
+  });
+
   await test('a 32 MiB child reply passes through intact after a fill (scrubbed, framed linearly)', async () => {
     const { px } = mk();
     try {
@@ -627,6 +680,17 @@ async function processSuite(mock, site) {
       assert(f.isError); assert.strictEqual(f.json.error, 'no_fill_identity', f.text);
       assert.strictEqual(mock.calls.slice(before).filter((x) => x.path.startsWith('/api/blindkey/fill')).length, 0);
     } finally { mcp.close(); }
+  });
+  await test('demipass-lightpanda-mcp: Lightpanda exiting mid-fill → the fill still answers (browser_gone) before the wrapper exits', async () => {
+    const env = { ...baseEnv(mock), FAKE_EXIT_ON_FILL: '1', FAKE_URL: `${site.origin}/login` };
+    const w = startMcp(process.execPath, [path.join(ROOT, 'browser-fill/lightpanda-mcp.js'), '--lightpanda', fakeLightpandaShim()], env, 'lp-wrapper-exit');
+    try {
+      await w.init();
+      const f = await w.call('demipass_browser_fill', { ref: 'DP-PWD-good' }, 8000);
+      assert(f.isError); assert.strictEqual(f.json.error, 'browser_gone', f.text);
+      const code = await new Promise((r) => (w.p.exitCode !== null ? r(w.p.exitCode) : w.p.on('exit', r)));
+      assert.strictEqual(code, 3, 'the wrapper exits with the browser\'s code');
+    } finally { w.close(); }
   });
   await test('demipass-lightpanda-mcp loads no dotenv (a planted ~/.node_modules/dotenv never runs)', async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dpfill-home-'));
@@ -747,6 +811,13 @@ async function chromiumSuite(mock, site, bin) {
 
     await test('page keeps fewer characters → value_not_accepted, the field is cleared', async () => {
       await drv.goto(`${site.origin}/login-trunc`);
+      const r = await mcp.call('demipass_browser_fill', { ref: 'DP-PWD-good', cdp_url: chrome.cdpUrl });
+      assert(r.isError); assert.strictEqual(r.json.error, 'value_not_accepted', r.text);
+      assert.strictEqual(await drv.evalJs('document.querySelector("#p").value.length'), 0);
+    });
+
+    await test('page refills the field when emptied → cleared without events, value_not_accepted', async () => {
+      await drv.goto(`${site.origin}/login-sticky`);
       const r = await mcp.call('demipass_browser_fill', { ref: 'DP-PWD-good', cdp_url: chrome.cdpUrl });
       assert(r.isError); assert.strictEqual(r.json.error, 'value_not_accepted', r.text);
       assert.strictEqual(await drv.evalJs('document.querySelector("#p").value.length'), 0);
@@ -913,6 +984,16 @@ async function lightpandaSuite(mock, site, bin) {
       assert.strictEqual(ev.text.trim(), '0');
     });
 
+    await test('page refills the field when emptied → cleared without events; the 8 characters it kept are redacted', async () => {
+      await goto('/login-sticky');
+      const r = await mcp.call('demipass_browser_fill', { ref: 'DP-PWD-good' });
+      assert(r.isError); assert.strictEqual(r.json.error, 'value_not_accepted', r.text);
+      const len = await mcp.call('evaluate', { script: 'String(document.querySelector("#p").value.length)' });
+      assert.strictEqual(len.text.trim(), '0');
+      const kept = await mcp.call('evaluate', { script: 'last' });  // the page's own copy of the prefix
+      assert(kept.text.includes(REDACTED) && !kept.text.includes(SECRET.slice(0, 8)), 'the kept prefix reached the agent');
+    });
+
     await test('no fill identity provisioned: token file absent → no_fill_identity (Lightpanda still works); provisioned later → fills', async () => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dpfill-prov-'));
       const tokenFile = path.join(dir, 'demipass-fill.token');
@@ -1000,7 +1081,7 @@ async function lightpandaServeSuite(mock, site, bin) {
   try {
     await unitSuite(mock, site);
     await cdpPolicySuite(mock, site).catch((e) => { results.fail++; log(`  FAIL  cdp policy suite crashed: ${e.message}`); });
-    await wrapperProtocolSuite().catch((e) => { results.fail++; log(`  FAIL  wrapper protocol suite crashed: ${e.message}`); });
+    await wrapperProtocolSuite(mock).catch((e) => { results.fail++; log(`  FAIL  wrapper protocol suite crashed: ${e.message}`); });
     await processSuite(mock, site).catch((e) => { results.fail++; log(`  FAIL  entry point suite crashed: ${e.message}`); });
 
     const chromium = findChromium();

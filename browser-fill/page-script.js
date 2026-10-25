@@ -8,6 +8,9 @@
  *   mode 'fill'    origin re-check, then set the fields the way a typing user would (input + change), optional submit
  *   mode 'submit'  submit the form around the marked password field
  *   mode 'check'   lengths (never values) of the marked fields — verifies what a field accepted after a fill
+ *   mode 'clear'   empty the marked password field with the native setter and no events (a page cannot refill it)
+ *   mode 'residue' the marked password field's current value. Only for the Lightpanda wrapper's internal evaluate,
+ *                  whose reply never reaches the agent: it feeds the Redactor what a field kept of a refused value.
  *   mode 'unmark'  remove the tags
  */
 
@@ -53,6 +56,14 @@ function dpBrowserFill(a) {
     if (!cp) return fail('field_gone', 'password');
     var cu = document.querySelector('[' + ATTR + '="' + a.mark + ':u"]');
     return { ok: true, password_chars: String(cp.value).length, username_chars: cu ? String(cu.value).length : null };
+  }
+  if (a.mode === 'clear' || a.mode === 'residue') {
+    var rp = document.querySelector('[' + ATTR + '="' + a.mark + ':p"]');
+    if (!rp) return fail('field_gone', 'password');
+    if (a.mode === 'residue') return { ok: true, value: String(rp.value) };
+    var rd = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+    if (rd && rd.set && rp.tagName.toLowerCase() === 'input') rd.set.call(rp, ''); else rp.value = '';
+    return { ok: true, password_chars: String(rp.value).length };
   }
   if (a.mode === 'submit') {
     var marked = document.querySelector('[' + ATTR + '="' + a.mark + ':p"]');
@@ -137,7 +148,15 @@ function dpBrowserFill(a) {
   if (user && typeof a.username === 'string' && a.username.length > 0) userFilled = setValue(user, a.username);
   var pwFilled = setValue(pw, a.password);
   // A field that kept only part of the value is cleared: a prefix of the password is not something the redactor knows.
-  if (!pwFilled) { setValue(pw, ''); return fail('value_not_accepted', 'password'); }
+  // First as a user would (events, so page state follows), then, if the page refilled it, with no events at all.
+  if (!pwFilled) {
+    setValue(pw, '');
+    if (pw.value.length !== 0) {
+      var cd = Object.getOwnPropertyDescriptor(pw.tagName.toLowerCase() === 'textarea' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype, 'value');
+      if (cd && cd.set) cd.set.call(pw, ''); else pw.value = '';
+    }
+    return fail(pw.value.length === 0 ? 'value_not_accepted' : 'clear_failed', 'password');
+  }
   var out = { ok: true, username_filled: userFilled, password_filled: true, chars: a.password.length, submitted: false };
   if (a.submit) {
     var s = doSubmit(pw);

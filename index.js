@@ -33,17 +33,19 @@ const config = {
   baseUrl: 'https://api.dustforge.com',
   bearerToken: '',
   adminKey: '',
+  fillTimeoutMs: 15000,   // per HTTP call of the browser-fill API (a 428 poll is many short calls)
 };
 
 function configure(opts) {
   if (opts.baseUrl) config.baseUrl = opts.baseUrl;
   if (opts.bearerToken) config.bearerToken = opts.bearerToken;
   if (opts.adminKey) config.adminKey = opts.adminKey;
+  if (Number(opts.fillTimeoutMs) > 0) config.fillTimeoutMs = Number(opts.fillTimeoutMs);
 }
 
 // ── Internal HTTP helper ──
 
-function _send(method, path, body, query, bearerOverride, { adminKey = true } = {}) {
+function _send(method, path, body, query, bearerOverride, { adminKey = true, timeoutMs = 0 } = {}) {
   return new Promise((resolve, reject) => {
     let url = `${config.baseUrl}${path}`;
     if (query) {
@@ -93,7 +95,13 @@ function _send(method, path, body, query, bearerOverride, { adminKey = true } = 
       });
     });
 
-    req.on('error', (err) => reject(new Error(`Network error: ${err.message}`)));
+    // timeoutMs: a hard deadline for the whole call (connect, send, response), not an idle timeout.
+    let timer = null;
+    if (timeoutMs > 0) {
+      timer = setTimeout(() => req.destroy(new Error(`no answer within ${Math.round(timeoutMs / 1000)} s`)), timeoutMs);
+      req.on('close', () => clearTimeout(timer));
+    }
+    req.on('error', (err) => { if (timer) clearTimeout(timer); reject(new Error(`Network error: ${err.message}`)); });
     if (payload) req.write(payload);
     req.end();
   });
@@ -1064,26 +1072,27 @@ async function deviceCodePoll({ deviceCode, device_code } = {}) {
 // carries the secret value: callers must hand it straight to the page and never log or return it.
 // `token` overrides the configured bearer (an agent's silicon token, e.g. DEMIPASS_FILL_TOKEN).
 
-// A fill runs as the agent's token alone; the operator's admin key never rides along.
-const NO_ADMIN_KEY = { adminKey: false };
+// A fill runs as the agent's token alone; the operator's admin key never rides along. Each call has a deadline
+// (config.fillTimeoutMs): a server that accepts and never answers must not wedge the browser session behind it.
+const fillOpts = () => ({ adminKey: false, timeoutMs: config.fillTimeoutMs });
 
 /** GET /api/blindkey/fill/candidates?origin= — logins this caller may fill on that origin. Never a value. */
 function fillCandidates({ origin, token } = {}) {
   if (!origin) throw new Error('fillCandidates() requires origin');
-  return _send('GET', '/api/blindkey/fill/candidates', null, { origin }, token, NO_ADMIN_KEY);
+  return _send('GET', '/api/blindkey/fill/candidates', null, { origin }, token, fillOpts());
 }
 
 /** POST /api/blindkey/fill/request — { ref | name, origin, client_label? } → 201 {request_id, status}. */
 function fillRequest({ ref, name, origin, client_label, token } = {}) {
   if (!ref && !name) throw new Error('fillRequest() requires ref or name');
   if (!origin) throw new Error('fillRequest() requires origin');
-  return _send('POST', '/api/blindkey/fill/request', { ref, name, origin, client_label }, null, token, NO_ADMIN_KEY);
+  return _send('POST', '/api/blindkey/fill/request', { ref, name, origin, client_label }, null, token, fillOpts());
 }
 
 /** POST /api/blindkey/fill/redeem — { request_id } → 200 {value, username, origin, ...} once; 428 / 403 / 410. */
 function fillRedeem({ request_id, token } = {}) {
   if (!request_id) throw new Error('fillRedeem() requires request_id');
-  return _send('POST', '/api/blindkey/fill/redeem', { request_id }, null, token, NO_ADMIN_KEY);
+  return _send('POST', '/api/blindkey/fill/redeem', { request_id }, null, token, fillOpts());
 }
 
 /**

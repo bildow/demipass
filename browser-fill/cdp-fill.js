@@ -27,13 +27,11 @@ const DEFAULT_TIMEOUT_MS = 15000;
 
 // ── a minimal CDP client ──────────────────────────────────────────────────────────────────────────────────────
 
-// Loopback by literal name or address only (no DNS answer decides it).
+// Loopback by literal address only — 127.0.0.0/8 or [::1]; no name (not even `localhost`), so no DNS answer decides it.
+// (The URL parser has already normalized the host: `[::ffff:127.0.0.1]` arrives as `[::ffff:7f00:1]`, not accepted.)
 function isLoopbackHost(hostname) {
-  const h = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
-  if (h === 'localhost' || h === '::1') return true;
-  if (/^127(\.\d{1,3}){3}$/.test(h)) return true;
-  const m = h.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-  return Boolean(m && /^127\./.test(m[1]));
+  const h = String(hostname || '').toLowerCase();
+  return h === '[::1]' || h === '::1' || /^127(\.\d{1,3}){3}$/.test(h);
 }
 
 /**
@@ -57,7 +55,7 @@ function chooseCdpEndpoint(agentUrl, configuredUrl) {
   if (typeof agentUrl !== 'string' || !agentUrl) throw new FillError('bad_args', 'cdp_url is required (http://127.0.0.1:9222 or a ws:// URL on loopback)');
   let u;
   try { u = new URL(agentUrl); } catch (_) { throw new FillError('bad_args', 'cdp_url is not a URL'); }
-  if (!isLoopbackHost(u.hostname)) throw new FillError('cdp_not_loopback', 'cdp_url must be a loopback DevTools endpoint (127.0.0.1, ::1, localhost); a remote browser needs DEMIPASS_CDP_URL set by the operator');
+  if (!isLoopbackHost(u.hostname)) throw new FillError('cdp_not_loopback', 'cdp_url must be a loopback DevTools endpoint by address (127.0.0.1 or [::1], not a name); a remote browser needs DEMIPASS_CDP_URL set by the operator');
   return { url: agentUrl, loopbackOnly: true };
 }
 
@@ -177,6 +175,7 @@ function pageFailure(v, origin) {
     bad_selector: `the ${v.field}_selector is not valid CSS`,
     field_not_usable: `the ${v.field} field is hidden, disabled or read-only`,
     value_not_accepted: 'the password field did not accept the value (maxlength or a page script?) — the field was cleared',
+    clear_failed: 'the password field did not accept the value, and the page would not let it be emptied — part of the value may still be in the field',
   };
   return new FillError(v.code || 'page_script_failed', msgs[v.code] || 'the fill could not be completed in the page', { origin, ...(v.count ? { count: v.count } : {}) });
 }

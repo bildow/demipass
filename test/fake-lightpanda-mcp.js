@@ -7,6 +7,8 @@
  *   FAKE_URL            what getUrl answers (default http://127.0.0.1:9/login)
  *   FAKE_FILL_DELAY_MS  delay before answering a `fill` of the password field
  *   FAKE_MAXLEN         the password field keeps at most this many characters (like a page script truncating it)
+ *   FAKE_STICKY         the password field refuses to be emptied (by `fill ''` and by the page-script 'clear' mode)
+ *   FAKE_EXIT_ON_FILL   exit (code 3) instead of answering a `fill` of the password field
  *
  * Like Lightpanda 1.0.1, the `fill` result echoes the value. stderr gets one line per fill with the length only.
  */
@@ -36,12 +38,19 @@ function onMessage(m) {
     if (s.includes('"mode":"find"')) return text(m.id, JSON.stringify({ ok: true, username_field: true, password_field: true, has_form: true, has_submit: true }));
     if (s.includes('"mode":"check"')) return text(m.id, JSON.stringify({ ok: true, password_chars: fields.p.length, username_chars: fields.u.length }));
     if (s.includes('"mode":"unmark"')) return text(m.id, JSON.stringify({ ok: true }));
+    if (s.includes('"mode":"residue"')) return text(m.id, JSON.stringify({ ok: true, value: fields.p }));
+    if (s.includes('"mode":"clear"')) { if (!env.FAKE_STICKY) fields.p = ''; return text(m.id, JSON.stringify({ ok: true, password_chars: fields.p.length })); }
     return text(m.id, 'evaluated');
   }
   if (name === 'fill') {
     const k = /:p"\]$/.test(a.selector) ? 'p' : 'u';
     let v = String(a.value);
+    if (k === 'p' && env.FAKE_EXIT_ON_FILL && v !== '') process.exit(3);
     if (k === 'p' && env.FAKE_MAXLEN) v = v.slice(0, Number(env.FAKE_MAXLEN));
+    if (k === 'p' && env.FAKE_STICKY && v === '') {
+      process.stderr.write('fake fill p refused to empty\n');
+      return reply(m.id, { content: [{ type: 'text', text: 'element refused the value' }], isError: true });
+    }
     fields[k] = v;
     process.stderr.write(`fake fill ${k} len=${v.length}\n`);
     const answer = () => text(m.id, `Filled element (selector: ${a.selector}) with "${a.value}"`);
