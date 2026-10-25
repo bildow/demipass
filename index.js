@@ -43,7 +43,7 @@ function configure(opts) {
 
 // ── Internal HTTP helper ──
 
-function _send(method, path, body, query) {
+function _send(method, path, body, query, bearerOverride) {
   return new Promise((resolve, reject) => {
     let url = `${config.baseUrl}${path}`;
     if (query) {
@@ -69,8 +69,9 @@ function _send(method, path, body, query) {
       },
     };
 
-    if (config.bearerToken) {
-      opts.headers['Authorization'] = `Bearer ${config.bearerToken}`;
+    const bearer = bearerOverride || config.bearerToken;
+    if (bearer) {
+      opts.headers['Authorization'] = `Bearer ${bearer}`;
     }
     if (config.adminKey) {
       opts.headers['X-Admin-Key'] = config.adminKey;
@@ -1058,6 +1059,30 @@ async function deviceCodePoll({ deviceCode, device_code } = {}) {
   return { status: 'approved', ...data };
 }
 
+// ── Browser fill (agent side; docs/browser-fill-api.md on dustforge feat/browser-fill) ──
+// These return the raw {status, data} so the fill core can map 428/403/410 itself. fillRedeem's 200 body
+// carries the secret value: callers must hand it straight to the page and never log or return it.
+// `token` overrides the configured bearer (an agent's silicon token, e.g. DEMIPASS_FILL_TOKEN).
+
+/** GET /api/blindkey/fill/candidates?origin= — logins this caller may fill on that origin. Never a value. */
+function fillCandidates({ origin, token } = {}) {
+  if (!origin) throw new Error('fillCandidates() requires origin');
+  return _send('GET', '/api/blindkey/fill/candidates', null, { origin }, token);
+}
+
+/** POST /api/blindkey/fill/request — { ref | name, origin, client_label? } → 201 {request_id, status}. */
+function fillRequest({ ref, name, origin, client_label, token } = {}) {
+  if (!ref && !name) throw new Error('fillRequest() requires ref or name');
+  if (!origin) throw new Error('fillRequest() requires origin');
+  return _send('POST', '/api/blindkey/fill/request', { ref, name, origin, client_label }, null, token);
+}
+
+/** POST /api/blindkey/fill/redeem — { request_id } → 200 {value, username, origin, ...} once; 428 / 403 / 410. */
+function fillRedeem({ request_id, token } = {}) {
+  if (!request_id) throw new Error('fillRedeem() requires request_id');
+  return _send('POST', '/api/blindkey/fill/redeem', { request_id }, null, token);
+}
+
 /**
  * Whole flow: start, hand the code to `onCode`, poll until approved (or timeout),
  * then adopt + persist the tokens. Resolves a redacted description — no token values.
@@ -1185,4 +1210,8 @@ module.exports = {
   conduitSend,
   conduitThreads,
   conduitStatus,
+  // Browser fill (agent side)
+  fillCandidates,
+  fillRequest,
+  fillRedeem,
 };

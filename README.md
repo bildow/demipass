@@ -96,6 +96,15 @@ Add to your `.mcp.json`:
 | `demipass_genesis_submit` | Submit origin refraction (permanent) |
 | `demipass_genesis_verify` | Verify refraction matches origin |
 | `demipass_genesis_status` | Check genesis status |
+| `demipass_browser_fill_candidates` | Logins this agent may fill on a page's origin (never values) |
+| `demipass_browser_fill` | Log in to a web page over CDP — the password goes vault → page, the result is `{filled, chars, origin}` |
+
+### Browser fill for Lightpanda (goose)
+
+`demipass-lightpanda-mcp` (`browser-fill/lightpanda-mcp.js`) replaces `lightpanda mcp` as the goose extension
+command. It passes Lightpanda's own tools through and adds the two fill tools on the same browser session. A second
+CDP client cannot see a Lightpanda MCP page. See [docs/agent-browser-fill.md](docs/agent-browser-fill.md).
+The server half (`/api/blindkey/fill/*`) is on dustforge `feat/browser-fill`.
 
 ### Buoy (temporal anchoring)
 

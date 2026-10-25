@@ -12,6 +12,8 @@
  *   DEMIPASS_URL         — API base URL
  *   DEMIPASS_TOKEN       — static bearer token (legacy; a device-login credentials file wins when present)
  *   DEMIPASS_CREDENTIALS — path of the device-login credentials file (default ~/.config/demipass/credentials.json)
+ *   DEMIPASS_FILL_TOKEN  — optional silicon token (silicon:…) used only by the browser-fill tools
+ *   DEMIPASS_FILL_TOKEN_FILE — or a file holding it (first line)
  *
  * Authentication: run the demipass_login tool (device flow — operator approves on
  * https://demipass.com/device, phone included). Tokens land in the credentials file
@@ -22,6 +24,7 @@ try { require('dotenv').config(); } catch {}
 
 const demipass = require('./index.js');
 const os = require('os');
+const browserFill = require('./browser-fill/cdp-fill.js');
 
 // Configure SDK with env vars
 demipass.configure({
@@ -36,6 +39,8 @@ demipass.ensureFreshToken().catch(() => {});
 const NO_REFRESH_TOOLS = new Set(['demipass_login', 'demipass_login_wait', 'demipass_login_status', 'demipass_logout', 'demipass_onboard', 'demipass_refresh', 'demipass_refresh_revoke']);
 // user_code -> in-flight device login (device_code stays in this process; the model only ever sees the user_code)
 const PENDING_LOGINS = new Map();
+// Browser fill can run on a separate silicon token (action:browser_fill grants are per silicon); else the bearer above.
+const FILL_TOKEN = require('./browser-fill/fill-core.js').fillTokenFromEnv(process.env);
 
 // ---------------------------------------------------------------------------
 // Tool definitions — each entry becomes a tool Claude Code can invoke
@@ -333,6 +338,36 @@ const TOOLS = [
     },
   },
   {
+    name: 'demipass_browser_fill_candidates',
+    description: 'BROWSER FILL: list the stored logins you may fill into a web page — for the page open in the browser at cdp_url, or for an explicit origin. Returns ref, name, username — never a password. Agents need an action:browser_fill grant per secret; only granted logins are listed.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        cdp_url:   { type: 'string', description: 'DevTools endpoint of the browser you drive (http://127.0.0.1:9222 or its ws:// URL). Used to read the page origin when origin is not given.' },
+        target_id: { type: 'string', description: 'CDP target id of the page when several are open.' },
+        origin:    { type: 'string', description: 'Origin to look up (https://host[:port]) instead of reading it from the browser.' },
+      },
+    },
+  },
+  {
+    name: 'demipass_browser_fill',
+    description: 'BROWSER FILL: log in to a website without seeing the password. Attaches to the browser you drive over CDP, reads the page origin from the browser, asks DemiPass for the login bound to that origin, and types username + password straight into the page (input/change events; optional submit). Returns {filled, chars, origin} — never the value. Refused unless the page origin is bound to the secret. Navigate to the login page first. Lightpanda: use demipass-lightpanda-mcp instead (a second CDP client cannot see a Lightpanda page).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ref:               { type: 'string', description: 'DemiPass ref code of the login (see demipass_browser_fill_candidates).' },
+        cdp_url:           { type: 'string', description: 'DevTools endpoint of the browser (http://127.0.0.1:9222 or a ws:// URL).' },
+        target_id:         { type: 'string', description: 'CDP target id of the page; required when several pages are open.' },
+        username_selector: { type: 'string', description: 'CSS selector of the username/email field. Default: detected.' },
+        password_selector: { type: 'string', description: 'CSS selector of the password field. Default: the one visible password field.' },
+        submit:            { type: 'boolean', description: 'Submit the form after filling. Default false.' },
+        request_id:        { type: 'string', description: 'Resume an earlier request that was waiting for approval (approval_pending).' },
+        wait_seconds:      { type: 'integer', description: 'Wait up to this long (max 120) for a person to approve in the DemiPass wallet — carbon tokens only; silicon grants are approved at once. Default 0.' },
+      },
+      required: ['ref', 'cdp_url'],
+    },
+  },
+  {
     name: 'conduit_send',
     description: 'CONDUIT: Send a message to another agent via Conduit (agent-to-agent messaging). If no handshake exists with the target, one is filed automatically — the target agent must approve before messages flow. Known agents: civitasvox-brain (Brain), civitasvox-conductor (Conductor), civitasvox-riley (Riley), platform-rowen (Rowen), platform-lori (Lori). Requires CONDUIT_TOKEN env var.',
     inputSchema: {
@@ -541,6 +576,22 @@ const HANDLERS = {
   },
   async demipass_explain_denial(args) {
     return await demipass.explainDenial(args);
+  },
+  async demipass_browser_fill_candidates(args) {
+    const r = await browserFill.candidatesViaCdp({ cdpUrl: args.cdp_url, targetId: args.target_id, origin: args.origin, api: demipass, token: FILL_TOKEN });
+    if (!r.ok) throw new Error(JSON.stringify(r));
+    return r;
+  },
+  async demipass_browser_fill(args) {
+    // The value goes vault → page inside fillViaCdp; what comes back is value-free (and scrubbed again there).
+    const r = await browserFill.fillViaCdp({
+      cdpUrl: args.cdp_url, targetId: args.target_id, ref: args.ref,
+      usernameSelector: args.username_selector, passwordSelector: args.password_selector, submit: args.submit === true,
+      requestId: args.request_id, waitSeconds: args.wait_seconds,
+      api: demipass, token: FILL_TOKEN, clientLabel: `demipass-mcp@${os.hostname()}`.slice(0, 80),
+    });
+    if (!r.filled) throw new Error(JSON.stringify(r));
+    return r;
   },
   async conduit_send(args) {
     return await demipass.conduitSend(args);
