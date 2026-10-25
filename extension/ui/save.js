@@ -1,9 +1,11 @@
 // Name prompt for "Store in DemiPass" on selected text. The value stays in the
 // background worker; this page only learns its length and source origin.
 
+import { ext } from '../lib/browser.js';
+
 const $ = (id) => document.getElementById(id);
 const id = location.hash.slice(1);
-const send = (msg) => chrome.runtime.sendMessage(msg);
+const send = (msg) => ext.runtime.sendMessage(msg);
 
 (async () => {
   const r = await send({ type: 'ui:pendingInfo', id });

@@ -2,15 +2,17 @@
 // only value it handles is the password a person types into "Add for this site",
 // which goes straight to the background worker.
 
+import { ext } from '../lib/browser.js';
+
 const $ = (id) => document.getElementById(id);
-const send = (msg) => chrome.runtime.sendMessage(msg);
+const send = (msg) => ext.runtime.sendMessage(msg);
 
 // ?tab=<id> lets the popup be opened as a page for a given tab (tests,
 // pop-out). Extension pages are not web-accessible, so a site cannot open it.
 async function targetTabId() {
   const q = new URLSearchParams(location.search).get('tab');
   if (q && /^\d+$/.test(q)) return Number(q);
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const [tab] = await ext.tabs.query({ active: true, currentWindow: true });
   return tab ? tab.id : null;
 }
 
@@ -60,6 +62,8 @@ function render() {
     setMsg($('status'), c.error ? c.error : (c.topOrigin ? c.topOrigin : 'This page cannot be filled.'), c.error ? 'err' : 'muted');
   }
 
+  renderAccess(c);
+
   // Pending login capture
   const pl = c.pendingLogin;
   show('capture', !!pl);
@@ -99,7 +103,7 @@ function render() {
         btn.textContent = 'Fill';
         btn.className = 'primary';
         btn.dataset.ref = cand.ref;
-        btn.addEventListener('click', () => fill(t.documentId, cand.ref, btn));
+        btn.addEventListener('click', () => fill(t.docKey, cand.ref, btn));
         row.append(info, btn);
         list.append(row);
       }
@@ -112,6 +116,41 @@ function render() {
     }
   }
 }
+
+// Host access (Firefox / Zen mostly: there, site access and the API host are
+// the person's choice and can be off). The background says what is missing
+// and which origins to ask for; the request runs from the click itself, which
+// permissions.request() requires.
+function renderAccess(c) {
+  const a = c.access;
+  let text = '';
+  if (a && a.requestApi) {
+    text = `DemiPass is not allowed to connect to ${c.apiBase}, so it cannot pair, save or fill.`;
+  } else if (a && c.topOrigin && a.site === false) {
+    text = `Site access is off for ${new URL(c.topOrigin).hostname}. DemiPass can fill here when you open it from the toolbar, but it does not watch this site's login forms, so it cannot offer to save a login you type.`;
+  }
+  show('access', !!text);
+  $('access-text').textContent = text;
+  const set = (id, origins) => {
+    show(id, !!(text && origins));
+    $(id).dataset.origins = origins ? JSON.stringify(origins) : '';
+  };
+  const apiOnly = !!(a && a.requestApi) && !(c.topOrigin && a.site === false);
+  set('access-api', apiOnly ? a.requestApi : null);
+  set('access-site', !apiOnly && a ? a.requestSite : null);
+  set('access-all', !apiOnly && a ? a.requestAll : null);
+}
+
+function requestAccess(e) {
+  const origins = JSON.parse(e.currentTarget.dataset.origins || '[]');
+  if (!origins.length) return;
+  // No await before this call: it must run inside the click's user gesture.
+  ext.permissions.request({ origins }).then(
+    (granted) => { setMsg($('access-msg'), granted ? 'Access granted.' : 'Access was not granted.', granted ? 'ok' : 'err'); return refresh(); },
+    () => setMsg($('access-msg'), 'Could not ask for access.', 'err'),
+  );
+}
+for (const id of ['access-site', 'access-all', 'access-api']) $(id).addEventListener('click', requestAccess);
 
 const FILL_TEXT = {
   requesting: 'Asking DemiPass…',
@@ -126,11 +165,11 @@ const FILL_TEXT = {
   unpaired: 'Not paired with DemiPass.',
 };
 
-async function fill(documentId, ref, btn) {
+async function fill(docKey, ref, btn) {
   if (fillTimer) return;
   for (const b of document.querySelectorAll('#entry-list button')) b.disabled = true;
   const msg = $('fill-msg');
-  const r = await send({ type: 'ui:fill', tabId, documentId, ref });
+  const r = await send({ type: 'ui:fill', tabId, docKey, ref });
   if (!r || !r.ok) { setMsg(msg, (r && r.error) || 'Fill failed.', 'err'); done(); return; }
   setMsg(msg, FILL_TEXT.requesting, 'muted');
   fillTimer = setInterval(async () => {

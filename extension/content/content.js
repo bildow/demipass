@@ -3,7 +3,7 @@
 // It holds no token and never receives a value. It does two things:
 //  1. Tells the background whether this frame has a login form (no values).
 //  2. On login submit, hands the typed username + password straight to the
-//     background with chrome.runtime.sendMessage. The background keeps it in
+//     background with runtime.sendMessage. The background keeps it in
 //     memory for a few minutes and stores it only if the person clicks Save in
 //     the extension popup. Nothing is injected into the page's DOM.
 (function () {
@@ -12,6 +12,15 @@
   globalThis.__demipassContent = true;
   const D = globalThis.DemiPassFormDetect;
   if (!D) return;
+  // Firefox / Zen: browser.* (promises). Chromium: chrome.* (promises in MV3).
+  const ext = globalThis.browser || globalThis.chrome;
+
+  // Per-document nonce, in this isolated world only (the page cannot read it).
+  // The background uses it to tell this document from a later one in the same
+  // frame, and the fill re-checks it in the frame right before writing.
+  const DOC = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
+  globalThis.__demipassDoc = DOC;
+  const send = (msg) => ext.runtime.sendMessage({ ...msg, doc: DOC, origin: location.origin }).catch(() => {});
 
   let lastHasLogin = null;
   function announce(force) {
@@ -19,7 +28,7 @@
     try { has = !!D.findLoginFields(document); } catch (_) {}
     if (!force && has === lastHasLogin) return;
     lastHasLogin = has;
-    chrome.runtime.sendMessage({ type: 'dp:frame', hasLogin: has }).catch(() => {});
+    send({ type: 'dp:frame', hasLogin: has });
   }
 
   let lastCapture = 0;
@@ -34,7 +43,7 @@
     if (now - lastCapture < 800) return; // submit + click on the same action
     lastCapture = now;
     const login = f.username ? String(f.username.value || '').trim() : '';
-    chrome.runtime.sendMessage({ type: 'dp:capture', login, password }).catch(() => {});
+    send({ type: 'dp:capture', login, password });
   }
 
   // Native form submit.
@@ -59,7 +68,7 @@
     if (t instanceof HTMLInputElement && t.type === 'password' && !t.form) capture(null);
   }, true);
 
-  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  ext.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg && msg.type === 'dp:announce') { announce(true); sendResponse({ ok: true }); }
     return false;
   });

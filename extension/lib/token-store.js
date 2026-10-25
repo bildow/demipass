@@ -1,12 +1,16 @@
-// Token storage for the background service worker.
+// Token storage for the background (Chromium service worker / Firefox event page).
 //
-//   access token  -> chrome.storage.session (memory only; trusted contexts only)
-//   refresh token -> chrome.storage.local, sealed with AES-GCM
+//   access token  -> storage.session (memory only; trusted contexts only —
+//                    Chromium's default access level, and Firefox never
+//                    exposes storage.session to content scripts)
+//   refresh token -> storage.local, sealed with AES-GCM
 //
-// chrome.storage.local is readable from content scripts by default, so the
+// storage.local is readable from content scripts by default, so the
 // refresh token is not stored there in the clear. The AES key is a
 // non-extractable CryptoKey kept in this extension's own IndexedDB, which only
-// extension-origin contexts (the worker and extension pages) can open.
+// extension-origin contexts (the background and extension pages) can open.
+// Firefox: the extension origin is moz-extension://<per-install UUID>, and
+// IndexedDB stores the CryptoKey by structured clone like Chromium does.
 
 const ACCESS_KEY = 'dp_access';
 const REFRESH_KEY = 'dp_refresh_sealed';
@@ -67,25 +71,25 @@ async function unseal(box) {
   }
 }
 
-export function chromeTokenStore() {
+export function extensionTokenStore(ext) {
   return {
     async getAccess() {
-      const r = await chrome.storage.session.get(ACCESS_KEY);
+      const r = await ext.storage.session.get(ACCESS_KEY);
       return r[ACCESS_KEY] || null;
     },
     async setAccess(t) {
-      await chrome.storage.session.set({ [ACCESS_KEY]: t });
+      await ext.storage.session.set({ [ACCESS_KEY]: t });
     },
     async getRefresh() {
-      const r = await chrome.storage.local.get(REFRESH_KEY);
+      const r = await ext.storage.local.get(REFRESH_KEY);
       return unseal(r[REFRESH_KEY]);
     },
     async setRefresh(t) {
-      await chrome.storage.local.set({ [REFRESH_KEY]: await seal(t) });
+      await ext.storage.local.set({ [REFRESH_KEY]: await seal(t) });
     },
     async clear() {
-      await chrome.storage.session.remove(ACCESS_KEY);
-      await chrome.storage.local.remove(REFRESH_KEY);
+      await ext.storage.session.remove(ACCESS_KEY);
+      await ext.storage.local.remove(REFRESH_KEY);
     },
   };
 }
