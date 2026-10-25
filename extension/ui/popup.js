@@ -162,6 +162,7 @@ const FILL_TEXT = {
   expired: 'The request expired.',
   already_redeemed: 'That request was already used.',
   cancelled: 'Cancelled.',
+  withdrawn: 'Withdrawn.',
   unpaired: 'Not paired with DemiPass.',
 };
 
@@ -225,7 +226,7 @@ $('add-name').addEventListener('input', () => { addReplace = null; $('add-submit
 $('cap-save').addEventListener('click', async () => {
   const pl = ctx && ctx.pendingLogin;
   if (!pl) return;
-  const name = $('cap-name').value;
+  const name = $('cap-name').value.trim(); // the background trims too; compare what it compares
   const replace = capReplace === name || (!!pl.existing && name === pl.existing);
   $('cap-save').disabled = true;
   const r = await send({ type: 'ui:savePending', id: pl.id, name, replace });
@@ -244,7 +245,7 @@ $('cap-dismiss').addEventListener('click', async () => {
 $('add-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const pw = $('add-password');
-  const name = $('add-name').value;
+  const name = $('add-name').value.trim();
   // origin: what this popup showed; the background refuses if the tab has moved on.
   const r = await send({ type: 'ui:addManual', tabId, origin: ctx && ctx.topOrigin, name, login: $('add-login').value, password: pw.value, replace: addReplace === name });
   if (r && r.conflict) { addReplace = r.conflict.name; $('add-submit').textContent = 'Replace'; setMsg($('add-msg'), conflictText(r.conflict), 'err'); return; }

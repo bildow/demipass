@@ -30,7 +30,7 @@ $('form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const btn = e.submitter;
   if (btn) btn.disabled = true;
-  const name = $('name').value;
+  const name = $('name').value.trim();
   const r = await send({ type: 'ui:savePending', id, name, secret_type: $('type').value, bindOrigin: $('bind').checked, replace: replaceName === name });
   if (r && r.conflict) {
     replaceName = r.conflict.name;

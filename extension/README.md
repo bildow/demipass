@@ -68,7 +68,7 @@ Build first: `npm run package:extension` (from the repo root). It writes
 | Save a login on submit | The content script sees a login form submit and passes the username and password straight to the worker, but only for a password the person put in the field themselves (see the security model). The worker holds them in memory for 3 minutes, one per frame, and shows **SAVE** on the toolbar badge. The popup offers **Save to DemiPass**: `secret_type: 'password'`, `login`, `origins: [page origin]`. Nothing is stored unless the person clicks Save. |
 | Fill | The popup lists the vault entries bound to the page's origin (`/fill/candidates`). **Fill** → `/fill/request` → "Approve on your phone…" → polls `/fill/redeem` (428/403/410/200). On 200 the worker re-checks the frame, injects the fill into that exact document, then drops the value. |
 | Add for this site | Popup form (name, username, password), stored bound to the origin the popup showed. It is refused if the tab is on another origin by the time of Add. |
-| Same name | Every save path checks `/api/blindkey/list` first. If the name exists, nothing is stored. The button turns into **Replace** and says what would be replaced. A confirmed replace stores without `origins`, which keeps the existing binding, then adds this page's origin with `/api/blindkey/origins` `mode: 'add'`. |
+| Same name | Every save path checks `/api/blindkey/list` first, comparing the trimmed name. If the name exists, nothing is stored. The button turns into **Replace** and says what would be replaced. A confirmed replace stores without `origins`, which keeps the existing binding, then adds this page's origin with `/api/blindkey/origins` `mode: 'add'`. If that second step fails, the popup says exactly that: "Password replaced in “X”, but this site wasn't added to it. Try again." |
 | Sign out | Revokes the refresh token (`/api/identity/refresh/revoke`), revokes the access token by `jti` (best effort), and clears both from storage. |
 
 ## Security model
@@ -91,6 +91,10 @@ Build first: `npm run package:extension` (from the repo root). It writes
   `data:`) is never fillable. Each content script also makes a random
   128-bit nonce for its document, in its isolated world, where the page
   cannot read it. The fill is requested for that origin. At fill time:
+  0. Before asking at all, the worker checks that it can script that frame
+     and that the frame is still that document. If it cannot (no host
+     access, for example a cross-origin frame in Chromium), the person gets
+     the reason, and no card goes to the phone.
   1. The poll stops if the document is gone, and the request is then never
      redeemed. A document that unloads says so from `pagehide`, and before
      every redeem the worker asks the frame itself (same `documentIds`/nonce
@@ -98,12 +102,15 @@ Build first: `npm run package:extension` (from the repo root). It writes
      Same-document changes do not stop the poll: pushState, hash changes,
      and subframes loading. The fill still lands after the person approved
      it. (An earlier build dropped every record on Chromium's tab
-     `status: 'loading'`, which fires for all of those.) A request the worker
-     stops waiting for is withdrawn: it finds it in `/fill/pending` as this
-     session's (`own_session`) only one for that ref and origin, and denies
-     it by its wallet id. The card leaves the phone and does not count
-     toward the 20-waiting limit. If that lookup is ambiguous, or the
-     request belonged to an access token since refreshed, it is left to
+     `status: 'loading'`, which fires for all of those.) A `pagehide` that
+     the page dispatches itself (`isTrusted: false`) is ignored. A request
+     the worker stops waiting for (page gone, cancelled, an error) is
+     withdrawn with `POST /api/blindkey/fill/withdraw { request_id }`. Only
+     the session that asked can do that, so another tab's request for the
+     same login is never touched. The card leaves the phone, does not count
+     toward the 20-waiting limit, and a later redeem answers 410 `withdrawn`.
+     An expired request is not withdrawn, because it is over already. One
+     orphaned by a token refresh belongs to the old token, so it is left to
      expire (120 s).
   2. The redeem response's `origin`/`ref` must equal what was requested.
   3. The worker re-checks its own record of the document.
@@ -117,14 +124,27 @@ Build first: `npm run package:extension` (from the repo root). It writes
      check and the fill. A reload or a navigation gives a new document,
      with a new nonce or none, and is refused ("The page changed before the
      fill; nothing was filled").
-- **Save prompts come from the person.** The content script records the
-  value of a password field after each trusted `input` event (typing,
-  paste, the browser's autofill; `isTrusted`). A capture is sent only if the
-  field still holds that value, and only on a trusted submit, click or
-  Enter. A page that sets `.value` from script, dispatches events, or calls
-  `requestSubmit()` on its own gets no SAVE prompt. Neither does a value
-  DemiPass filled. Pending saves are kept per (tab, frame): a cross-origin
-  iframe can neither replace the top frame's save nor be offered ahead of it.
+- **Save prompts come from the person's own typing.** The content script
+  counts an `input` event on a field only when three things hold:
+  - it is trusted;
+  - the page has transient user activation (`navigator.userActivation.isActive`);
+  - a trusted `keydown`, `paste`, `drop` or `compositionend` hit that same
+    field within the last second.
+
+  A capture is sent only if the password field still holds the value from
+  its last counted input, and only on a trusted submit, click or Enter.
+  `execCommand('insertText')` does make trusted input events without a
+  person, but it makes no keydown or paste, so it does not count. Neither
+  do script `.value` writes, dispatched events or `requestSubmit()`. Every
+  input is tracked, whatever its type, so typing while a show-password
+  toggle has the field as `type=text` still counts when it is hidden again.
+  Pending saves are kept per (tab, frame): a cross-origin iframe can
+  neither replace the top frame's save nor be offered ahead of it.
+
+  What this does not catch: a page script can still change the value while
+  the person is typing in that field (inside the one-second window). The
+  person still has to click Save, and the card shows the site and the
+  username.
 - **Values:** never logged, never written to storage, never put in a badge,
   title, notification or error message, and never sent to the popup. A
   pending save lives only in worker memory, with a 3-minute TTL. A fill value
@@ -235,6 +255,12 @@ browsing history" warning.
   the session from another DemiPass session. `runtime.setUninstallURL` is
   not used: it could only open a web page, and that page has no token to
   revoke.
+- **Logins entered by something other than the person's own keystrokes or
+  paste are not offered for saving.** That includes another password
+  manager's fill, the browser's own autofill, DemiPass's own fill, and
+  input methods that send no key, paste or composition events (some
+  dictation tools). This is deliberate: those look the same as a page
+  forging a value. Use **Add for this site** for them.
 - The submit capture covers native submits, clicks on sign-in buttons, and
   Enter in a form-less password field. Multi-step logins that ask for the
   username and password on separate pages capture only the password page's

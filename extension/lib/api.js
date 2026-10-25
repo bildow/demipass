@@ -296,20 +296,15 @@ export class ApiClient {
     return { ref: String(r.body.ref || ''), origins: Array.isArray(r.body.origins) ? r.body.origins.map(String) : [] };
   }
 
-  // Withdraws a fill request this session made and no longer wants, so its
-  // card leaves the phone (and does not count toward the 20-waiting limit).
-  // The deny route takes the wallet's numeric id, which only /fill/pending
-  // shows; the request is found there as this session's (own_session) only
-  // pending request for that ref + origin. Anything else is left to expire.
-  async withdrawFill({ ref, origin }) {
-    const r = await this.call('GET', '/api/blindkey/fill/pending');
-    if (r.status !== 200 || !r.body || !Array.isArray(r.body.requests)) return { denied: false, reason: 'pending_unavailable' };
-    const mine = r.body.requests.filter((q) => q && q.own_session === true && q.ref === ref && q.origin === origin);
-    if (mine.length !== 1) return { denied: false, reason: mine.length ? 'ambiguous' : 'not_found' };
-    const id = mine[0].id;
-    if (!(Number.isInteger(id) || /^\d+$/.test(String(id)))) return { denied: false, reason: 'bad_id' };
-    const d = await this.call('POST', `/api/blindkey/fill/${encodeURIComponent(String(id))}/deny`);
-    return { denied: d.status === 200, id };
+  // Gives up a fill request this session made (the page left, the person
+  // cancelled): a pending card leaves the phone, an approved one can no
+  // longer be redeemed. By request_id, and only the asking session (its jti)
+  // may do it, so another tab's request is never touched.
+  // -> { withdrawn: bool, status }
+  async withdrawFill(requestId) {
+    const r = await this.call('POST', '/api/blindkey/fill/withdraw', { request_id: requestId });
+    if (r.status !== 200 || !r.body || !r.body.ok) return { withdrawn: false, status: r.status === 404 ? 'not_found' : 'error' };
+    return { withdrawn: r.body.status === 'withdrawn', status: String(r.body.status || '') };
   }
 
   // { name, value, secret_type, login?, origins?, description? }
@@ -337,7 +332,7 @@ export class ApiClient {
 
   // One redeem attempt.
   // -> { state: 'pending' } | { state: 'busy' } (429: rate limited, poll slower) |
-  //    { state: 'denied' } | { state: 'expired' } | { state: 'already_redeemed' } |
+  //    { state: 'denied' } | { state: 'expired' } | { state: 'already_redeemed' } | { state: 'withdrawn' } |
   //    { state: 'lost' } (404 and the access token changed: the request belonged to the old one) |
   //    { state: 'gone', error } (404 with the same token, e.g. the login was deleted) |
   //    { state: 'approved', fill: {...value} }
@@ -347,7 +342,7 @@ export class ApiClient {
     if (r.status === 428) return { state: 'pending' };
     if (r.status === 429) return { state: 'busy' };
     if (r.status === 403 && code === 'denied') return { state: 'denied' };
-    if (r.status === 410) return { state: code === 'already_redeemed' ? 'already_redeemed' : 'expired' };
+    if (r.status === 410) return { state: code === 'already_redeemed' ? 'already_redeemed' : code === 'withdrawn' ? 'withdrawn' : 'expired' };
     // The request is bound to the token that asked; after a refresh it is gone.
     // With the same token, a 404 is a real answer (the login was deleted or
     // revoked): asking again would only put another card on the phone.

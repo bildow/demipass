@@ -183,6 +183,7 @@ export function apiHandler(state) {
       return send(200, { did: state.did, secrets, total: secrets.length });
     }
     if (p === '/api/blindkey/origins' && req.method === 'POST') {
+      if (state.failOrigins) return send(500, { error: 'origins update failed' }); // test switch
       const ref = body.ref || [...state.secrets].find(([, s]) => s.name === body.name)?.[0];
       const s = ref && state.secrets.get(ref);
       if (!s) return send(404, { error: 'secret not found' });
@@ -218,14 +219,24 @@ export function apiHandler(state) {
       // Contract: a carbon session is one access token (jti). A refreshed token gets 404.
       if (!f || f.jti !== a.jti) return send(404, { error: 'fill request not found' });
       if (f.status === 'redeemed') return send(410, { error: 'already_redeemed' });
-      if (f.expires < Date.now()) return send(410, { error: 'expired' });
+      if (f.expires < Date.now()) { if (f.status === 'pending' || f.status === 'approved') f.status = 'expired'; return send(410, { error: 'expired' }); }
       if (f.status === 'denied') return send(403, { error: 'denied' });
       if (f.status === 'pending') return send(428, { error: 'approval_pending' });
+      if (f.status !== 'approved') return send(410, { error: f.status }); // e.g. 'withdrawn'
       const s = state.secrets.get(f.ref);
       if (!s) return send(404, { error: 'the login was deleted or revoked since the request' });
       f.status = 'redeemed';
       meta.event = 'secret_filled';
       return send(200, { ok: true, value: s.value, username: s.login, origin: f.origin, name: s.name, ref: f.ref });
+    }
+    // dustforge fix/fill-withdraw-dead-names: the asking session gives up its own request.
+    if (p === '/api/blindkey/fill/withdraw' && req.method === 'POST') {
+      const f = typeof body.request_id === 'string' ? state.fills.get(body.request_id) : null;
+      meta.request_id = body.request_id;
+      if (!f || f.jti !== a.jti) return send(404, { error: 'fill request not found' });
+      const changed = f.status === 'pending' || f.status === 'approved';
+      if (changed) f.status = 'withdrawn';
+      return send(200, { ok: true, status: changed ? 'withdrawn' : f.status });
     }
     if (p === '/api/blindkey/fill/pending' && req.method === 'GET') {
       const requests = [...state.fills.values()].filter((f) => f.status === 'pending' && f.expires > Date.now())
@@ -313,6 +324,16 @@ function trickyPage(pathname, other) {
         pass.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
         document.querySelector('#login button').dispatchEvent(new MouseEvent('click', { bubbles: true })); };
       window.addEventListener('message', (e) => { if (e.data === 'forge') window.forge('iframe-chosen-value'); });</script>`);
+    // execCommand('insertText') makes trusted input events without a person; pmFill = another manager's fill
+    case '/forge2.html': return page(`${LOGIN_FORM}<script>
+      document.getElementById('login').addEventListener('submit', (e) => e.preventDefault());
+      window.forge2 = (v) => { user.value = 'victim@example.com'; pass.focus(); document.execCommand('insertText', false, v); document.getElementById('login').requestSubmit(); return pass.value; };
+      window.pmFill = (v) => { user.value = 'me@example.com'; pass.value = v; for (const t of ['input', 'change']) pass.dispatchEvent(new Event(t, { bubbles: true })); };
+      window.fakeGone = () => window.dispatchEvent(new Event('pagehide'));</script>`);
+    // show-password toggle: the field is type=text while the person types
+    case '/toggle.html': return page(`${LOGIN_FORM}<button id="eye" type="button">show</button><script>
+      document.getElementById('login').addEventListener('submit', (e) => e.preventDefault());
+      eye.onclick = () => { pass.type = pass.type === 'password' ? 'text' : 'password'; };</script>`);
     // top login page (stays put on submit) embedding a cross-origin frame that forges a capture
     case '/top-frame.html': return page(`${LOGIN_FORM}<iframe id="f" src="${other}/forge.html"></iframe><script>
       document.getElementById('login').addEventListener('submit', (e) => e.preventDefault());

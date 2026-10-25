@@ -132,6 +132,8 @@ export async function launchGecko({ xpi, addonId, binary, geckodriver, work, lab
         await cmd('POST', `/element/${id}/clear`, {});
         await cmd('POST', `/element/${id}/value`, { text: value });
       },
+      // WebDriver Element Send Keys already types key by key.
+      type(sel, value) { return this.fill(sel, value); },
       async click(sel) {
         await waitVisible(handle, sel);
         const id = await find(handle, sel);

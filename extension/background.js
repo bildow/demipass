@@ -343,25 +343,38 @@ const fills = new Map();
 
 // Is the recorded document still there, the same document, on the same origin?
 // Asked in the frame itself (isolated world) before every redeem.
-async function documentAlive(tabId, rec) {
+// -> 'alive' | 'changed' (another document / origin there now) | 'no_access' (cannot script it)
+async function documentState(tabId, rec) {
+  let res;
   try {
-    const [res] = await ext.scripting.executeScript({
+    [res] = await ext.scripting.executeScript({
       target: injectionTarget(tabId, rec),
       func: (nonce, origin) => globalThis.__demipassDoc === nonce && location.origin === origin,
       args: [rec.nonce, rec.origin],
     });
-    return !!(res && res.result === true);
-  } catch {
-    return false; // gone, navigated, or no longer scriptable
+  } catch (e) {
+    // A gone document (documentIds) also throws; tell it apart by the message.
+    return /permission|cannot access|missing host|host permission/i.test(String(e && e.message)) ? 'no_access' : 'changed';
   }
+  return res && res.result === true ? 'alive' : 'changed';
+}
+const documentAlive = async (tabId, rec) => (await documentState(tabId, rec)) === 'alive';
+
+function noAccessText(rec) {
+  let host = rec.origin;
+  try { host = new URL(rec.origin).host; } catch {}
+  return rec.frameId === 0
+    ? `DemiPass has no access to ${host} in this tab, so it cannot fill there. Open DemiPass from its toolbar button on this page, or use Allow on this site. Nothing was sent to your phone.`
+    : `This login form is in a frame from ${host}, and DemiPass has no access to that site. Allow DemiPass on ${host} (or on all sites), then try again. Nothing was sent to your phone.`;
 }
 
-// A request this extension stopped waiting for is withdrawn, so its card
-// leaves the phone instead of piling up toward the 20-waiting limit.
-function withdraw(job, origin) {
+// A request this extension stopped waiting for is withdrawn by its
+// request_id (only this session can), so its card leaves the phone and it
+// can no longer be redeemed. Another tab's request is never touched.
+function withdraw(job) {
   if (!job.request || job.request.withdrawn) return;
   job.request.withdrawn = true;
-  client.withdrawFill({ ref: job.ref, origin }).catch(() => {});
+  client.withdrawFill(job.request.request_id).catch(() => {});
 }
 
 // injectedFill (lib/compat.js) runs inside the target frame, in the
@@ -379,7 +392,7 @@ function startFill(tabId, docKey, ref) {
     const f = fillError(e);
     job.state = f.state;
     job.error = f.error;
-    if (job.origin) withdraw(job, job.origin);
+    withdraw(job);
   });
   return fillId;
 }
@@ -390,6 +403,11 @@ async function runFill(job, tabId, docKey, ref) {
   if (!rec || !rec.origin) { job.state = 'error'; job.error = 'That page is gone or cannot be filled.'; return; }
   const origin = rec.origin; // set by the browser (MessageSender.origin), never by the page
   job.origin = origin;
+
+  // No phone card for a frame DemiPass could not fill anyway.
+  const before = await documentState(tabId, rec);
+  if (before === 'no_access') { job.state = 'refused'; job.error = noAccessText(rec); return; }
+  if (before !== 'alive') { job.state = 'refused'; job.error = 'The page changed; nothing was sent to your phone.'; return; }
 
   // Stop polling (and never redeem) once the document is gone or changed origin.
   const docGone = () => frames.get(tabId)?.get(docKey)?.nonce !== rec.nonce;
@@ -404,18 +422,19 @@ async function runFill(job, tabId, docKey, ref) {
   } catch (e) {
     const f = fillError(e, origin);
     job.state = f.state; job.error = f.error;
-    withdraw(job, origin);
+    withdraw(job);
     return;
   }
   if (r.state === 'cancelled') {
-    withdraw(job, origin);
+    withdraw(job);
     if (!job.cancelled) { job.state = 'refused'; job.error = 'The page changed before the fill; nothing was filled.'; }
     else job.state = 'cancelled';
     return;
   }
   if (r.state === 'lost') { job.state = 'error'; job.error = 'The approval request was lost twice. Try again.'; return; }
   if (r.state === 'gone') { job.state = 'refused'; job.error = r.error ? `DemiPass said: ${r.error}` : 'That login is no longer available.'; return; }
-  if (r.state !== 'approved') { if (r.state === 'expired') withdraw(job, origin); job.state = r.state; return; }
+  // An expired request is over on the server already: nothing to withdraw.
+  if (r.state !== 'approved') { job.state = r.state; return; }
 
   let fill = r.fill;
   r.fill = null;
@@ -506,7 +525,12 @@ async function saveEntry(entry, replaceConfirmed) {
   const origins = entry.origins || [];
   delete entry.origins;
   const out = await storeEntry(entry);
-  if (origins.length) await client.addOrigins(out.name || entry.name, origins);
+  if (origins.length) {
+    try { await client.addOrigins(out.name || entry.name, origins); } catch {
+      // The value is replaced already; only the binding step failed. Say exactly that.
+      return { ok: false, partial: true, name: out.name, error: `Password replaced in “${out.name || entry.name}”, but this site wasn't added to it. Try again.` };
+    }
+  }
   return { ...out, replaced: true };
 }
 

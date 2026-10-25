@@ -43,6 +43,8 @@ export async function launchChromium({ extDir, work, executablePath, label }) {
       url: () => page.url(),
       goto: (url) => page.goto(url),
       fill: (sel, value) => page.fill(sel, value),
+      // Real key presses (keydown/keyup per character), as a person typing.
+      type: async (sel, value) => { await page.fill(sel, ''); await page.locator(sel).pressSequentially(value); },
       click: (sel) => page.click(sel),
       clickAndWaitUrl: (sel, re) => Promise.all([page.waitForURL(re), page.click(sel)]),
       eval: (fn, arg) => page.evaluate(fn, arg),

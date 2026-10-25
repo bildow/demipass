@@ -31,15 +31,34 @@
     send({ type: 'dp:frame', hasLogin: has });
   }
 
-  // A save is offered only for a password the person put in the field: the
-  // value must be the one left by their own last input event (typing, paste,
-  // the browser's autofill — isTrusted). A page that sets .value from script,
-  // dispatches synthetic events, or calls requestSubmit() on its own gets no
-  // SAVE prompt, and neither does a value DemiPass filled.
-  const typed = new WeakMap(); // password input -> value after its last trusted input event
+  // A save is offered only for a password the person entered themselves.
+  // An input event counts only when all of these hold:
+  //  - it is trusted (not dispatchEvent);
+  //  - the page has transient user activation (navigator.userActivation);
+  //  - a trusted keydown, paste, drop or compositionend (IMEs) hit that same
+  //    field within the last second. execCommand('insertText') makes trusted
+  //    input events with no person involved; it makes none of those.
+  // At capture the field must still hold the value from its last counted
+  // input. So a page that sets .value, dispatches events, calls
+  // execCommand() or requestSubmit() on its own gets no SAVE prompt, and
+  // neither does a value DemiPass (or another password manager, or the
+  // browser's own autofill) put there; for those, "Add for this site".
+  // Every input field is tracked, not only type=password, so typing while a
+  // show-password toggle has made it type=text still counts.
+  const GESTURE_MS = 1000;
+  const gesture = new WeakMap(); // input -> time of the last trusted keydown / paste / drop on it
+  const typed = new WeakMap(); // input -> value after its last counted input event
+  const noteGesture = (e) => {
+    if (e.isTrusted && e.target instanceof HTMLInputElement) gesture.set(e.target, Date.now());
+  };
+  for (const ev of ['keydown', 'paste', 'drop', 'compositionend']) window.addEventListener(ev, noteGesture, true);
+  const activated = () => !navigator.userActivation || navigator.userActivation.isActive;
   window.addEventListener('input', (e) => {
     const t = e.target;
-    if (e.isTrusted && t instanceof HTMLInputElement && t.type === 'password') typed.set(t, t.value);
+    if (!e.isTrusted || !(t instanceof HTMLInputElement)) return;
+    const g = gesture.get(t);
+    if (g && Date.now() - g <= GESTURE_MS && activated()) typed.set(t, t.value);
+    else typed.delete(t);
   }, true);
 
   let lastCapture = 0;
@@ -89,8 +108,8 @@
   // This document is going away (navigation, reload, removed iframe): drop
   // its record now, so a fill waiting for it stops and is withdrawn. Coming
   // back from the back/forward cache, announce again.
-  window.addEventListener('pagehide', () => { send({ type: 'dp:gone' }); }, true);
-  window.addEventListener('pageshow', (e) => { if (e.persisted) announce(true); }, true);
+  window.addEventListener('pagehide', (e) => { if (e.isTrusted) send({ type: 'dp:gone' }); }, true);
+  window.addEventListener('pageshow', (e) => { if (e.isTrusted && e.persisted) announce(true); }, true);
 
   announce(true);
   let t = null;

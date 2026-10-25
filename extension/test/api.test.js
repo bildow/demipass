@@ -493,33 +493,22 @@ test('a refresh that finished before sign-out is revoked by sign-out', async () 
 
 // ---- withdrawing an abandoned fill request ---------------------------------------
 
-test('withdrawFill denies this session\'s one matching pending request by its wallet id', async () => {
+test('withdrawFill withdraws by request_id (never a lookup by ref + origin)', async () => {
   const at = jwt({ exp: future(), jti: 'j' });
-  const fetch = scripted({
-    'GET /api/blindkey/fill/pending': [[200, { ok: true, requests: [
-      { id: 7, ref: 'DP-1', origin: 'https://a.test', own_session: false },
-      { id: 9, ref: 'DP-1', origin: 'https://a.test', own_session: true },
-      { id: 10, ref: 'DP-1', origin: 'https://b.test', own_session: true },
-    ] }]],
-    'POST /api/blindkey/fill/9/deny': [[200, { ok: true, id: 9, status: 'denied' }]],
-  });
+  const fetch = scripted({ 'POST /api/blindkey/fill/withdraw': [[200, { ok: true, status: 'withdrawn' }]] });
   const c = new ApiClient({ base: 'https://api.test', fetch, tokens: memTokens({ access: at, refresh: 'r' }) });
-  assert.deepEqual(await c.withdrawFill({ ref: 'DP-1', origin: 'https://a.test' }), { denied: true, id: 9 });
+  assert.deepEqual(await c.withdrawFill('dpf_1'), { withdrawn: true, status: 'withdrawn' });
+  assert.deepEqual(fetch.calls.map((x) => [x.key, x.body]), [['POST /api/blindkey/fill/withdraw', { request_id: 'dpf_1' }]]);
 });
 
-test('withdrawFill leaves ambiguous or foreign requests alone', async () => {
+test('redeem 410 withdrawn is its own state', async () => {
   const at = jwt({ exp: future(), jti: 'j' });
-  const two = [{ id: 1, ref: 'DP-1', origin: 'https://a.test', own_session: true }, { id: 2, ref: 'DP-1', origin: 'https://a.test', own_session: true }];
-  let fetch = scripted({ 'GET /api/blindkey/fill/pending': [[200, { ok: true, requests: two }]] });
-  let c = new ApiClient({ base: 'https://api.test', fetch, tokens: memTokens({ access: at, refresh: 'r' }) });
-  assert.deepEqual(await c.withdrawFill({ ref: 'DP-1', origin: 'https://a.test' }), { denied: false, reason: 'ambiguous' });
-  fetch = scripted({ 'GET /api/blindkey/fill/pending': [[200, { ok: true, requests: [{ id: 3, ref: 'DP-1', origin: 'https://a.test', own_session: false }] }]] });
-  c = new ApiClient({ base: 'https://api.test', fetch, tokens: memTokens({ access: at, refresh: 'r' }) });
-  assert.deepEqual(await c.withdrawFill({ ref: 'DP-1', origin: 'https://a.test' }), { denied: false, reason: 'not_found' });
-  assert.equal(fetch.calls.some((x) => x.key.endsWith('/deny')), false);
+  const fetch = scripted({ 'POST /api/blindkey/fill/redeem': [[410, { error: 'withdrawn' }]] });
+  const c = new ApiClient({ base: 'https://api.test', fetch, tokens: memTokens({ access: at, refresh: 'r' }) });
+  assert.deepEqual(await c.redeemOnce('dpf_1', 'j'), { state: 'withdrawn' });
 });
 
-test('against the mock: withdrawFill takes the card off the phone', async (t) => {
+test('against the mock: withdraw takes only this request off the phone; a sibling request with the same ref + origin stays (audit N5)', async (t) => {
   const m = await startMock({ state: createMockState() });
   t.after(() => m.close());
   const { state } = m;
@@ -527,11 +516,19 @@ test('against the mock: withdrawFill takes the card off the phone', async (t) =>
   const c = new ApiClient({ base: m.apiBase, fetch, tokens: memTokens({ access: s.token, refresh: s.refresh_token }) });
   await c.store({ name: 'w', value: 'pw', secret_type: 'password', origins: ['https://a.test'] });
   const ref = [...state.secrets.keys()][0];
-  const req = await c.requestFill(ref, 'https://a.test', 'x');
-  assert.equal(state.fills.get(req.request_id).status, 'pending');
-  assert.equal((await c.withdrawFill({ ref, origin: 'https://a.test' })).denied, true);
-  assert.equal(state.fills.get(req.request_id).status, 'denied');
+  const tab1 = await c.requestFill(ref, 'https://a.test', 'x');
+  const tab2 = await c.requestFill(ref, 'https://a.test', 'x');
+  assert.deepEqual(await c.withdrawFill(tab1.request_id), { withdrawn: true, status: 'withdrawn' });
+  assert.equal(state.fills.get(tab1.request_id).status, 'withdrawn');
+  assert.equal(state.fills.get(tab2.request_id).status, 'pending', 'the sibling is untouched');
+  assert.deepEqual(await c.redeemOnce(tab1.request_id, tab1.jti), { state: 'withdrawn' });
+  // Another session cannot withdraw it.
+  const other = (await import('./mock-server.js')).mintSession(state);
+  const c2 = new ApiClient({ base: m.apiBase, fetch, tokens: memTokens({ access: other.token, refresh: other.refresh_token }) });
+  assert.deepEqual(await c2.withdrawFill(tab2.request_id), { withdrawn: false, status: 'not_found' });
+  assert.equal(state.fills.get(tab2.request_id).status, 'pending');
 });
+
 
 test('sign-out does not hang on a refresh that never answers; the late answer is still discarded', async () => {
   const { gate, release } = gated();

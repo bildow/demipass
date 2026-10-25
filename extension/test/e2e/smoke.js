@@ -292,9 +292,8 @@ async function scenario(d, mock, step) {
   async function assertWithdrawn(reqId) {
     const end = Date.now() + 8000;
     while (state.fills.get(reqId).status === 'pending' && Date.now() < end) await sleep(100);
-    assert.equal(state.fills.get(reqId).status, 'denied', 'withdrawn from the phone');
-    const id = state.fills.get(reqId).id;
-    assert.ok(state.calls.some((c) => c.meta.fill_id === id && c.meta.decision === 'deny' && c.meta.own_session === true && c.status === 200), 'denied by the extension\'s own session');
+    assert.equal(state.fills.get(reqId).status, 'withdrawn', 'withdrawn from the phone');
+    assert.ok(state.calls.some((c) => c.path === '/api/blindkey/fill/withdraw' && c.meta.request_id === reqId && c.status === 200), 'withdrawn by request_id');
     assert.equal(state.calls.some((c) => c.path === '/api/blindkey/fill/redeem' && c.meta.request_id === reqId && c.status === 200), false, 'never redeemed');
   }
 
@@ -345,6 +344,42 @@ async function scenario(d, mock, step) {
       await pop.close(); await page.close();
     });
   }
+
+  await step('a page-dispatched (untrusted) pagehide does not stop a fill (audit N4)', async () => {
+    const page = await d.newPage(`${A}/forge2.html?p=${++seq}`);
+    const { pop } = await openPopupFor(page);
+    await pop.click(fillBtn());
+    await waitText(pop, '#fill-msg', /Approve on your phone/);
+    await page.eval(() => { window.fakeGone(); return true; });
+    await sleep(2500);
+    const [reqId] = [...state.fills].find(([, x]) => x.status === 'pending');
+    assert.equal(await phoneDecide(mock.apiBase, state, reqId, 'approve'), 200);
+    await waitText(pop, '#fill-msg', /^Filled\.$/);
+    await pop.close(); await page.close();
+  });
+
+  await step('two tabs ask for the same login; tab 1 expires -> tab 2\'s request is untouched and fills (audit N5)', async () => {
+    const p1 = await d.newPage(`${A}/stay.html?t=1&p=${++seq}`);
+    const p2 = await d.newPage(`${A}/stay.html?t=2&p=${++seq}`);
+    const { pop: pop1 } = await openPopupFor(p1);
+    await pop1.click(fillBtn());
+    await waitText(pop1, '#fill-msg', /Approve on your phone/);
+    const [r1] = [...state.fills].find(([, x]) => x.status === 'pending');
+    const { pop: pop2 } = await openPopupFor(p2);
+    await pop2.click(fillBtn());
+    await waitText(pop2, '#fill-msg', /Approve on your phone/);
+    const [r2] = [...state.fills].find(([k, x]) => x.status === 'pending' && k !== r1);
+    state.fills.get(r1).expires = Date.now() - 1; // the person let tab 1's card run out
+    await waitText(pop1, '#fill-msg', /expired/i);
+    await sleep(1500);
+    assert.equal(state.fills.get(r2).status, 'pending', 'tab 2 still waiting');
+    assert.equal(state.calls.some((c) => c.path === '/api/blindkey/fill/withdraw' && (c.meta.request_id === r2 || c.meta.request_id === r1)), false, 'an expired request is not withdrawn, and tab 2\'s never is');
+    assert.equal(await phoneDecide(mock.apiBase, state, r2, 'approve'), 200);
+    await waitText(pop2, '#fill-msg', /^Filled\.$/);
+    assert.equal(await inputValue(p2, '#pass'), SECRET_MANUAL);
+    assert.equal(await inputValue(p1, '#pass'), '');
+    await pop1.close(); await pop2.close(); await p1.close(); await p2.close();
+  });
 
   await step('fill into a cross-origin iframe (frame target, its own origin binding)', async () => {
     state.secrets.set('DP-PWD-frame-1', { name: 'frame-login', value: 'frame-secret-value', secret_type: 'password', login: 'f@example.com', origins: [B] });
@@ -402,6 +437,39 @@ async function scenario(d, mock, step) {
     await pop.close(); await page.close();
   });
 
+  await step('a name with surrounding spaces still matches the existing one: one Replace replaces (audit N6)', async () => {
+    const page = await d.newPage(login(A));
+    const { pop } = await openPopupFor(page);
+    await waitVisible(pop, '#add');
+    await pop.fill('#add-name', '  shared-login ');
+    await pop.fill('#add-password', 'newer-value');
+    await pop.click('#add-submit');
+    await waitText(pop, '#add-msg', /“shared-login” already exists/);
+    await pop.click('#add-submit');
+    await waitText(pop, '#add-msg', /Replaced “shared-login”/);
+    assert.equal(state.secrets.get('DP-PWD-shared-1').value, 'newer-value');
+    await pop.close(); await page.close();
+  });
+
+  await step('Replace stored the value but adding this site failed -> says exactly that', async () => {
+    const page = await d.newPage(`${B}/login.html?p=${++seq}`);
+    const { pop } = await openPopupFor(page);
+    await waitVisible(pop, '#add');
+    await pop.fill('#add-name', 'shared-login');
+    await pop.fill('#add-password', 'value-from-b');
+    await pop.click('#add-submit');
+    await waitText(pop, '#add-msg', /already exists/);
+    state.failOrigins = true;
+    try {
+      await pop.click('#add-submit');
+      await waitText(pop, '#add-msg', /Password replaced in “shared-login”, but this site wasn't added to it\. Try again\./);
+    } finally { state.failOrigins = false; }
+    const sec = state.secrets.get('DP-PWD-shared-1');
+    assert.equal(sec.value, 'value-from-b');
+    assert.equal(sec.origins.includes(B), false);
+    await pop.close(); await page.close();
+  });
+
   await step('a page-forged login (script value + requestSubmit, synthetic events) gets no SAVE prompt (audit P2)', async () => {
     const page = await d.newPage(`${A}/forge.html?p=${++seq}`);
     await sleep(500);
@@ -417,11 +485,41 @@ async function scenario(d, mock, step) {
     await pop.close(); await page.close();
   });
 
+  await step('execCommand(insertText) + requestSubmit, and another manager\'s script fill + a real click: no SAVE prompt (audit N1, N2)', async () => {
+    const page = await d.newPage(`${A}/forge2.html?p=${++seq}`);
+    await sleep(500);
+    const v = await page.eval(() => window.forge2('attacker-chosen-3'));
+    assert.equal(v, 'attacker-chosen-3', 'the forged value really is in the field');
+    await page.eval(() => { window.pmFill('pm-filled-value'); return true; });
+    await page.click('button[type=submit]'); // a real click on Sign in
+    await sleep(600);
+    const tabId = await tabIdOf(page);
+    const badge = await d.extEval(async (t) => (globalThis.browser ?? globalThis.chrome).action.getBadgeText({ tabId: t }), tabId);
+    assert.equal(badge, '');
+    await page.close();
+  });
+
+  await step('typed while a show-password toggle had the field as text, then hidden again: the save is offered (audit N3)', async () => {
+    const page = await d.newPage(`${A}/toggle.html?p=${++seq}`);
+    await sleep(500);
+    await page.type('#user', 'toggle@example.com');
+    await page.click('#eye');
+    await page.type('#pass', 'typed-while-visible');
+    await page.click('#eye');
+    await page.click('button[type=submit]');
+    await sleep(600);
+    const { pop } = await openPopupFor(page);
+    await waitVisible(pop, '#capture');
+    assert.equal(await text(pop, '#cap-user'), 'toggle@example.com');
+    await pop.click('#cap-dismiss');
+    await pop.close(); await page.close();
+  });
+
   await step('a cross-origin iframe cannot replace the top frame\'s pending save (audit P3)', async () => {
     const page = await d.newPage(`${A}/top-frame.html?p=${++seq}`);
     await sleep(800);
-    await page.fill('#user', 'alice@example.com');
-    await page.fill('#pass', 'typed-by-the-person');
+    await page.type('#user', 'alice@example.com');
+    await page.type('#pass', 'typed-by-the-person');
     await page.click('button[type=submit]'); // the page keeps the person here
     await sleep(500);
     await page.eval(() => { window.forgeInFrame(); return true; });
@@ -435,8 +533,8 @@ async function scenario(d, mock, step) {
   });
 
   async function saveOnSubmit(page, user, secret) {
-    await page.fill('#user', user);
-    await page.fill('#pass', secret);
+    await page.type('#user', user);
+    await page.type('#pass', secret);
     const storesBefore = state.calls.filter((c) => c.path === '/api/blindkey/store').length;
     await page.clickAndWaitUrl('button[type=submit]', /\/done$/);
     await sleep(300);
@@ -602,6 +700,24 @@ async function scenario(d, mock, step) {
     assert.equal(state.calls.filter((c) => c.path === '/api/identity/refresh' && c.status !== 200).length, 0, 'no failed refresh');
     state.accessTtlSec = 3600;
   });
+
+  if (gecko) {
+    await step('Firefox: site access revoked for a frame\'s origin -> fill refused with the reason, no phone card', async () => {
+      state.secrets.set('DP-PWD-frame-2', { name: 'frame-login-2', value: 'frame-secret-2', secret_type: 'password', login: 'g@example.com', origins: [B] });
+      const page = await d.newPage(`${A}/top-frame.html?p=${++seq}`);
+      await sleep(800);
+      const { pop } = await openPopupFor(page);
+      const btn = '#entry-list button[data-ref="DP-PWD-frame-2"]';
+      await waitVisible(pop, btn);
+      await d.extEval(async () => { await globalThis.browser.permissions.remove({ origins: ['<all_urls>', 'http://127.0.0.1/*'] }); return true; });
+      const requests = () => state.calls.filter((c) => c.path === '/api/blindkey/fill/request').length;
+      const before = requests();
+      await pop.click(btn);
+      await waitText(pop, '#fill-msg', /in a frame from 127\.0\.0\.1.*no access to that site.*Nothing was sent to your phone/);
+      assert.equal(requests(), before, 'no fill request, so no phone card');
+      await pop.close(); await page.close();
+    });
+  }
 
   await step('sign out revokes the refresh token', async () => {
     const pop = await d.newPage(ext('ui/popup.html'));
