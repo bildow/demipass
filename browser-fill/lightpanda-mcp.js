@@ -17,24 +17,27 @@
  *       → {filled: true, chars, origin, ...}
  *
  * After a fill, every result Lightpanda sends back (evaluate output, console logs, a GET form's URL, html with a
- * value attribute) and its stderr are scrubbed of the filled value and its URL/form/HTML encodings. That catches
- * accidents, not intent — see docs/agent-browser-fill.md.
+ * value attribute) and its stderr are scrubbed, best-effort, of the filled value as echoed verbatim or in the
+ * URL / form / HTML / markdown / JSON encodings listed in fill-core.js. That catches accidents, not intent, and
+ * not a value transformed any other way — see docs/agent-browser-fill.md.
  *
  * goose config (replaces the lightpanda extension's cmd/args):
  *   cmd: /usr/local/bin/demipass-lightpanda-mcp
  *   args: [--lightpanda, /usr/local/bin/lightpanda]          # anything after `--` goes to `lightpanda mcp`
- *   env:  DEMIPASS_FILL_TOKEN_FILE=/etc/agent/demipass-fill.token (or DEMIPASS_FILL_TOKEN / DEMIPASS_TOKEN), DEMIPASS_URL
+ *   env:  DEMIPASS_FILL_TOKEN_FILE=/etc/agent-fill/demipass-fill.token (or DEMIPASS_FILL_TOKEN), DEMIPASS_URL
+ *         A fill token variable that is set but unusable (file absent until provisioning, blank) makes the fill tools
+ *         answer no_fill_identity; the Lightpanda tools keep working. Neither set → DEMIPASS_TOKEN / credentials file.
+ *   No dotenv and no npm dependencies: runtime requires are ../index.js, ./fill-core.js, ./page-script.js + Node core.
  */
 
 const { spawn } = require('child_process');
 const crypto = require('crypto');
 const path = require('path');
-const { fillTokenFromEnv, FillError, normalizeOrigin, obtainFill, listCandidates, Redactor, failureResult, REDACTED } = require('./fill-core');
+const { resolveFillToken, fillIdentityConfigured, FillError, normalizeOrigin, obtainFill, listCandidates, Redactor, failureResult, REDACTED } = require('./fill-core');
 const { pageExpression } = require('./page-script');
 
 const TOOL_FILL = 'demipass_browser_fill';
 const TOOL_CANDIDATES = 'demipass_browser_fill_candidates';
-const INTERNAL_PREFIX = 'demipass-internal-';
 
 const FILL_TOOLS = [
   {
@@ -60,7 +63,7 @@ const FILL_TOOLS = [
   },
 ];
 
-const INSTRUCTIONS_NOTE = `\n\nDemiPass logins:\n- Never ask for, type or read back a password. To log in, open the login page, call \`${TOOL_CANDIDATES}\`, then \`${TOOL_FILL} {ref, submit: true}\`. The value goes from the vault into the page directly; results say {filled, chars, origin}.\n- Filled values are replaced by ${REDACTED} in every later result.\n`;
+const INSTRUCTIONS_NOTE = `\n\nDemiPass logins:\n- Never ask for, type or read back a password. To log in, open the login page, call \`${TOOL_CANDIDATES}\`, then \`${TOOL_FILL} {ref, submit: true}\`. The value goes from the vault into the page directly; results say {filled, chars, origin}.\n- Best-effort scrubbing: where a later result echoes a filled value as-is or in a common encoding (URL, form, HTML, markdown, JSON), that text is replaced by ${REDACTED}. A value the page or a script transforms any other way is not caught, so do not read login fields back.\n`;
 
 function parseArgs(argv) {
   const out = { lightpanda: process.env.LIGHTPANDA_BIN || '/usr/local/bin/lightpanda', extra: [] };
@@ -74,61 +77,95 @@ function parseArgs(argv) {
 }
 
 /**
- * The proxy. `io` = { stdin, stdout, stderr } (process streams by default); `api` = SDK-shaped fill API.
- * Exported for tests; `main()` wires it to the process.
+ * Split a utf8 stream into lines in linear time (a chunk is scanned once; a long line is joined once).
  */
-function createProxy({ lightpanda, extra = [], api, token, env = process.env, io = process, clientLabel }) {
+function lineSplitter(onLine) {
+  let parts = [];
+  return (chunk) => {
+    let start = 0;
+    let i;
+    while ((i = chunk.indexOf('\n', start)) >= 0) {
+      parts.push(chunk.slice(start, i));
+      const line = parts.length === 1 ? parts[0] : parts.join('');
+      parts = [];
+      start = i + 1;
+      onLine(line);
+    }
+    if (start < chunk.length) parts.push(chunk.slice(start));
+  };
+}
+
+/**
+ * The proxy. `io` = { stdin, stdout, stderr } (process streams by default); `api` = SDK-shaped fill API.
+ * `getToken()` supplies the fill token per call (may throw FillError('no_fill_identity')); `token` is the static
+ * shorthand. Exported for tests; `main()` wires it to the process.
+ *
+ * JSON-RPC ids: every request the child sees carries an id this proxy minted. Agent ids are rewritten on the way in
+ * and restored on the way out, internal calls (the fill's getUrl / evaluate / fill / click) use ids from the same
+ * counter, and a child reply whose id we did not mint for the agent is never forwarded. So no agent id can be taken
+ * for an internal reply, and no internal reply (Lightpanda's `fill` result echoes the value) can reach the agent.
+ *
+ * Holding: while a fill tool runs, and until every internal call has been answered (a call that timed out keeps its
+ * id registered until Lightpanda answers or exits), agent requests are held, so the page stays still.
+ */
+function createProxy({ lightpanda, extra = [], api, token, getToken, env = process.env, io = process, clientLabel, internalTimeoutMs = 30000 }) {
+  const tokenFor = typeof getToken === 'function' ? getToken : () => token;
   const redactor = new Redactor();
   const childEnv = { ...env, LIGHTPANDA_DISABLE_TELEMETRY: env.LIGHTPANDA_DISABLE_TELEMETRY || 'true' };
   // The DemiPass token is ours, not the browser's.
   for (const k of Object.keys(childEnv)) if (k.startsWith('DEMIPASS_')) delete childEnv[k];
   const child = spawn(lightpanda, ['mcp', ...extra], { stdio: ['pipe', 'pipe', 'pipe'], env: childEnv });
 
-  let internalSeq = 0;
-  const internal = new Map();     // internal id → resolve
-  let fillBusy = false;
-  const held = [];                // agent messages held while a fill runs (keeps the page still)
+  let seq = 0;                    // the only id space the child sees
+  const internal = new Map();     // child id → { done(msg) }   (our own calls)
+  const forAgent = new Map();     // child id → { id: the agent's id, kind, firstPage }
+  let running = false;            // a fill tool is running
+  let childGone = false;
+  const held = [];                // agent requests held while busy (keeps the page still)
+  const busy = () => running || internal.size > 0;
 
-  const write = (stream, obj) => stream.write(JSON.stringify(obj) + '\n');
+  const write = (stream, obj) => { try { stream.write(JSON.stringify(obj) + '\n'); } catch (_) { /* stream gone */ } };
   const toAgent = (obj) => write(io.stdout, redactor.scrubDeep(obj));
-  const toChild = (obj) => { try { write(child.stdin, obj); } catch (_) { /* child gone */ } };
+  const toChild = (obj) => { if (!childGone) write(child.stdin, obj); };
+  const agentError = (id, message, code = -32603) => toAgent({ jsonrpc: '2.0', id, error: { code, message } });
 
   // ── child → us ──
-  let cbuf = '';
   child.stdout.setEncoding('utf8');
-  child.stdout.on('data', (chunk) => {
-    cbuf += chunk;
-    let i;
-    while ((i = cbuf.indexOf('\n')) >= 0) {
-      const line = cbuf.slice(0, i); cbuf = cbuf.slice(i + 1);
-      if (!line.trim()) continue;
-      let msg;
-      try { msg = JSON.parse(line); } catch (_) { continue; } // never forward an unparseable (unscrubbable) line
-      if (typeof msg.id === 'string' && internal.has(msg.id)) { const r = internal.get(msg.id); internal.delete(msg.id); r(msg); continue; }
-      if (msg.id !== undefined && pendingInit.has(msg.id) && msg.result) {
-        pendingInit.delete(msg.id);
-        msg.result.instructions = String(msg.result.instructions || '') + INSTRUCTIONS_NOTE;
-      }
-      if (msg.id !== undefined && pendingList.has(msg.id) && msg.result && Array.isArray(msg.result.tools)) {
-        pendingList.delete(msg.id);
-        msg.result.tools = [...msg.result.tools.filter((t) => !t.name.startsWith('demipass_')), ...FILL_TOOLS];
-      }
-      toAgent(msg);
+  child.stdout.on('data', lineSplitter((line) => {
+    if (!line.trim()) return;
+    let msg;
+    try { msg = JSON.parse(line); } catch (_) { return; } // never forward an unparseable (unscrubbable) line
+    if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return; // we never send batches
+    const isReply = msg.method === undefined && ('result' in msg || 'error' in msg);
+    if (!isReply) { toAgent(msg); return; } // the child's own requests / notifications (its id space)
+    if (msg.id === null || msg.id === undefined) { toAgent(msg); return; } // id-less error (parse error)
+    const mine = internal.get(msg.id);
+    if (mine) { internal.delete(msg.id); mine.done(msg); drain(); return; }
+    const a = forAgent.get(msg.id);
+    if (!a) return; // a reply to nothing we sent for the agent: swallow
+    forAgent.delete(msg.id);
+    msg.id = a.id;
+    if (a.kind === 'initialize' && msg.result && typeof msg.result === 'object') {
+      msg.result.instructions = String(msg.result.instructions || '') + INSTRUCTIONS_NOTE;
     }
-  });
-  let ebuf = '';
+    if (a.kind === 'tools/list' && msg.result && Array.isArray(msg.result.tools)) {
+      const theirs = msg.result.tools.filter((t) => !(t && typeof t.name === 'string' && t.name.startsWith('demipass_')));
+      msg.result.tools = a.firstPage ? [...theirs, ...FILL_TOOLS] : theirs;
+    }
+    toAgent(msg);
+  }));
   child.stderr.setEncoding('utf8');
-  child.stderr.on('data', (chunk) => {
-    ebuf += chunk;
-    let i;
-    while ((i = ebuf.indexOf('\n')) >= 0) { const line = ebuf.slice(0, i + 1); ebuf = ebuf.slice(i + 1); io.stderr.write(redactor.scrub(line)); }
-  });
+  child.stderr.on('data', lineSplitter((line) => { try { io.stderr.write(redactor.scrub(line) + '\n'); } catch (_) {} }));
 
-  function callChild(name, args, timeoutMs = 30000) {
-    const id = INTERNAL_PREFIX + (++internalSeq);
+  function callChild(name, args) {
+    if (childGone) return Promise.reject(new FillError('browser_gone', 'the browser exited'));
+    const id = ++seq;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { internal.delete(id); reject(new FillError('browser_timeout', `browser ${name} timed out`)); }, timeoutMs);
-      internal.set(id, (msg) => { clearTimeout(timer); resolve(msg); });
+      const entry = { done: (m) => { clearTimeout(timer); resolve(m); } };
+      // On timeout the fill fails, but the id stays registered: Lightpanda may still be acting on the page, so agent
+      // requests stay held, and the late reply is swallowed when it comes.
+      const timer = setTimeout(() => { entry.done = () => {}; reject(new FillError('browser_timeout', `browser ${name} timed out`)); }, internalTimeoutMs);
+      internal.set(id, entry);
       toChild({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } });
     });
   }
@@ -149,18 +186,21 @@ function createProxy({ lightpanda, extra = [], api, token, env = process.env, io
     if (t === null || (m.result && m.result.isError)) throw new FillError('page_script_failed', 'the fill script failed in the page');
     try { return JSON.parse(t); } catch (_) { throw new FillError('page_script_failed', 'the fill script returned something unexpected'); }
   }
+  const failed = (r) => Boolean(r.error || (r.result && r.result.isError));
 
   async function doCandidates(args) {
+    const tok = tokenFor();
     let origin = args.origin;
     if (!origin) {
       const cur = await currentOrigin();
       if (!cur.origin) throw new FillError('origin_not_fillable', 'the current page is not fillable (https only; http only on localhost)', { origin: safeOrigin(cur.raw) });
       origin = cur.origin;
     }
-    return { ok: true, ...(await listCandidates(api, { origin, token })) };
+    return { ok: true, ...(await listCandidates(api, { origin, token: tok })) };
   }
 
   async function doFill(args) {
+    const tok = tokenFor(); // no fill identity → refuse before touching the page
     const mark = crypto.randomBytes(8).toString('hex');
     const sel = (k) => `[data-demipass-fill="${mark}:${k}"]`;
     const cur = await currentOrigin();
@@ -175,7 +215,7 @@ function createProxy({ lightpanda, extra = [], api, token, env = process.env, io
 
     let secret;
     try {
-      secret = await obtainFill(api, { ref: args.ref, origin: cur.origin, clientLabel, waitSeconds: args.wait_seconds, requestId: args.request_id, token });
+      secret = await obtainFill(api, { ref: args.ref, origin: cur.origin, clientLabel, waitSeconds: args.wait_seconds, requestId: args.request_id, token: tok });
       redactor.add(secret.value);
       // Lightpanda resolves `$LP_NAME` in tool string arguments from its environment. A value that contains such a
       // reference would be altered (and the variable's value typed instead) — refuse rather than guess.
@@ -185,22 +225,31 @@ function createProxy({ lightpanda, extra = [], api, token, env = process.env, io
       const again = await currentOrigin();
       if (again.origin !== secret.origin) throw new FillError('origin_changed', 'the page navigated away before the fill — nothing was filled', { origin: again.origin });
 
-      let usernameFilled = false;
+      let usernameTried = false;
       if (found.username_field && secret.username) {
         const r = await callChild('fill', { selector: sel('u'), value: secret.username });
-        if (r.error || (r.result && r.result.isError)) throw new FillError('fill_failed', 'the username field could not be filled (the page may have changed)');
-        usernameFilled = true;
+        if (failed(r)) throw new FillError('fill_failed', 'the username field could not be filled (the page may have changed)');
+        usernameTried = true;
       }
       const r = await callChild('fill', { selector: sel('p'), value: secret.value });
-      if (r.error || (r.result && r.result.isError)) throw new FillError('fill_failed', 'the password field could not be filled (the page may have changed)');
-      const chars = secret.value.length;
+      if (failed(r)) throw new FillError('fill_failed', 'the password field could not be filled (the page may have changed)');
+      // Verify what the field holds (length only), like the CDP path: maxlength handling or a page script can change it.
+      const chk = await evalPage({ mode: 'check', mark, expectedOrigin: secret.origin });
+      if (!chk.ok) throw new FillError(chk.code === 'origin_changed' ? 'origin_changed' : 'fill_failed', 'the password field is gone after the fill (the page changed)', { origin: secret.origin });
+      if (chk.password_chars !== secret.value.length) {
+        // Never leave a partial value in the page: a prefix of the password is not something the redactor knows.
+        await callChild('fill', { selector: sel('p'), value: '' }).catch(() => {});
+        throw new FillError('value_not_accepted', 'the password field did not accept the value (maxlength or a page script?) — the field was cleared', { origin: secret.origin });
+      }
+      const usernameFilled = usernameTried && chk.username_chars === secret.username.length;
+      const chars = chk.password_chars;
 
       let submitted = false, submitError;
       if (args.submit) {
         let s;
         if (found.has_submit) s = await callChild('click', { selector: sel('s') });
         else s = await callChild('press', { key: 'Enter', selector: sel('p') });
-        submitted = !(s.error || (s.result && s.result.isError));
+        submitted = !failed(s);
         if (!submitted) submitError = 'submit_failed';
       } else {
         await evalPage({ mode: 'unmark', mark }).catch(() => {});
@@ -221,7 +270,7 @@ function createProxy({ lightpanda, extra = [], api, token, env = process.env, io
     const { id, params } = msg;
     const name = params && params.name;
     const args = (params && params.arguments) || {};
-    fillBusy = true;
+    running = true;
     let result;
     try {
       const out = name === TOOL_FILL ? await doFill(args) : await doCandidates(args);
@@ -229,40 +278,58 @@ function createProxy({ lightpanda, extra = [], api, token, env = process.env, io
     } catch (err) {
       result = { content: [{ type: 'text', text: JSON.stringify(failureResult(err, redactor), null, 2) }], isError: true };
     } finally {
-      fillBusy = false;
+      running = false;
     }
-    toAgent({ jsonrpc: '2.0', id, result });
-    while (held.length && !fillBusy) onAgentMessage(held.shift());
+    if (id !== undefined) toAgent({ jsonrpc: '2.0', id, result });
+    drain();
   }
+  function drain() { while (held.length && !busy()) onAgentMessage(held.shift()); }
 
   // ── agent → us ──
-  const pendingInit = new Set();
-  const pendingList = new Set();
   function onAgentMessage(msg) {
-    if (fillBusy && msg.method) { held.push(msg); return; }
+    if (!msg || typeof msg !== 'object' || Array.isArray(msg)) {
+      agentError(null, Array.isArray(msg) ? 'JSON-RPC batches are not supported' : 'Invalid Request', -32600);
+      return;
+    }
+    if (msg.method === undefined) { toChild(msg); return; } // the agent's reply to a child request (child's ids)
+    if (busy()) { held.push(msg); return; }
     if (msg.method === 'tools/call' && msg.params && (msg.params.name === TOOL_FILL || msg.params.name === TOOL_CANDIDATES)) {
       runTool(msg);
       return;
     }
-    if (msg.method === 'initialize' && msg.id !== undefined) pendingInit.add(msg.id);
-    if (msg.method === 'tools/list' && msg.id !== undefined) pendingList.add(msg.id);
+    if (msg.id !== undefined && msg.id !== null) {
+      if (childGone) { agentError(msg.id, 'the browser exited'); return; }
+      const cid = ++seq;
+      forAgent.set(cid, { id: msg.id, kind: msg.method, firstPage: !(msg.params && msg.params.cursor) });
+      toChild({ ...msg, id: cid });
+      return;
+    }
+    if (msg.method === 'notifications/cancelled' && msg.params && msg.params.requestId !== undefined) {
+      for (const [cid, a] of forAgent) {
+        if (a.id === msg.params.requestId) { toChild({ ...msg, params: { ...msg.params, requestId: cid } }); return; }
+      }
+      return; // nothing of the agent's with that id is at the child (an internal id is never the agent's to cancel)
+    }
     toChild(msg);
   }
-  let abuf = '';
   io.stdin.setEncoding('utf8');
-  io.stdin.on('data', (chunk) => {
-    abuf += chunk;
-    let i;
-    while ((i = abuf.indexOf('\n')) >= 0) {
-      const line = abuf.slice(0, i); abuf = abuf.slice(i + 1);
-      if (!line.trim()) continue;
-      let msg;
-      try { msg = JSON.parse(line); } catch (_) { toAgent({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } }); continue; }
-      onAgentMessage(msg);
-    }
-  });
+  io.stdin.on('data', lineSplitter((line) => {
+    if (!line.trim()) return;
+    let msg;
+    try { msg = JSON.parse(line); } catch (_) { agentError(null, 'Parse error', -32700); return; }
+    onAgentMessage(msg);
+  }));
   io.stdin.on('end', () => { try { child.stdin.end(); } catch (_) {} });
-  child.on('exit', (code) => { if (io === process) process.exit(code == null ? 1 : code); });
+  child.stdin.on('error', () => { /* child gone; handled by 'exit' */ });
+  child.on('exit', (code) => {
+    childGone = true;
+    for (const e of internal.values()) e.done({ error: { code: -32603, message: 'browser exited' } });
+    internal.clear();
+    for (const a of forAgent.values()) agentError(a.id, 'the browser exited');
+    forAgent.clear();
+    while (held.length) { const m = held.shift(); if (m.id !== undefined && m.id !== null) agentError(m.id, 'the browser exited'); }
+    if (io === process) process.exit(code == null ? 1 : code);
+  });
   child.on('error', (e) => { io.stderr.write(`demipass-lightpanda-mcp: cannot start ${path.basename(String(lightpanda))}: ${e.code || 'error'}\n`); if (io === process) process.exit(1); });
 
   return { child, redactor };
@@ -287,14 +354,16 @@ function main() {
     process.stdout.write('usage: demipass-lightpanda-mcp [--lightpanda PATH] [-- lightpanda mcp args]\n');
     return;
   }
-  try { require('dotenv').config(); } catch {}
+  // No dotenv: it would resolve a `dotenv` module (and read a .env) from paths the agent's uid can write, and run
+  // that code inside the process that holds fill values. Configuration comes from the MCP client's env only.
   const demipass = require('../index.js');
   demipass.configure({ baseUrl: process.env.DEMIPASS_URL || 'https://api.dustforge.com' });
-  // A dedicated silicon token wins; otherwise the usual DemiPass bearer (credentials file, then DEMIPASS_TOKEN).
-  const fillToken = fillTokenFromEnv(process.env) || '';
-  if (!fillToken) demipass.loadBearerFromEnvironment();
+  // A configured fill identity (DEMIPASS_FILL_TOKEN / _FILE) is read per call and never falls back; with neither set,
+  // the usual DemiPass bearer (credentials file, then DEMIPASS_TOKEN) is used.
+  if (!fillIdentityConfigured(process.env)) demipass.loadBearerFromEnvironment();
   createProxy({
-    lightpanda: opts.lightpanda, extra: opts.extra, api: demipass, token: fillToken || undefined,
+    lightpanda: opts.lightpanda, extra: opts.extra, api: demipass,
+    getToken: () => resolveFillToken(process.env),
     clientLabel: `lightpanda-mcp@${require('os').hostname()}`.slice(0, 80),
   });
   process.stdout.on('error', () => process.exit(0));
@@ -302,4 +371,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { createProxy, parseArgs, FILL_TOOLS };
+module.exports = { createProxy, parseArgs, lineSplitter, FILL_TOOLS, INSTRUCTIONS_NOTE };

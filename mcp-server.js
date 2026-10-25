@@ -13,7 +13,9 @@
  *   DEMIPASS_TOKEN       — static bearer token (legacy; a device-login credentials file wins when present)
  *   DEMIPASS_CREDENTIALS — path of the device-login credentials file (default ~/.config/demipass/credentials.json)
  *   DEMIPASS_FILL_TOKEN  — optional silicon token (silicon:…) used only by the browser-fill tools
- *   DEMIPASS_FILL_TOKEN_FILE — or a file holding it (first line)
+ *   DEMIPASS_FILL_TOKEN_FILE — or a file holding it (first line). Either one set but unusable → the fill tools
+ *                          refuse (no_fill_identity); they never fall back to the bearer above.
+ *   DEMIPASS_CDP_URL     — DevTools endpoint the browser-fill tools attach to. Unset: the agent's cdp_url, loopback only.
  *
  * Authentication: run the demipass_login tool (device flow — operator approves on
  * https://demipass.com/device, phone included). Tokens land in the credentials file
@@ -39,8 +41,12 @@ demipass.ensureFreshToken().catch(() => {});
 const NO_REFRESH_TOOLS = new Set(['demipass_login', 'demipass_login_wait', 'demipass_login_status', 'demipass_logout', 'demipass_onboard', 'demipass_refresh', 'demipass_refresh_revoke']);
 // user_code -> in-flight device login (device_code stays in this process; the model only ever sees the user_code)
 const PENDING_LOGINS = new Map();
-// Browser fill can run on a separate silicon token (action:browser_fill grants are per silicon); else the bearer above.
-const FILL_TOKEN = require('./browser-fill/fill-core.js').fillTokenFromEnv(process.env);
+// Browser fill runs on a separate silicon token when one is configured (action:browser_fill grants are per silicon),
+// read at call time; configured but unusable → the fill tools refuse. Neither variable set → the bearer above.
+const { resolveFillToken } = require('./browser-fill/fill-core.js');
+const fillToken = () => resolveFillToken(process.env);
+// The DevTools endpoint is operator config, not a tool argument, when set (see browser-fill/cdp-fill.js).
+const CDP_URL = process.env.DEMIPASS_CDP_URL || '';
 
 // ---------------------------------------------------------------------------
 // Tool definitions — each entry becomes a tool Claude Code can invoke
@@ -343,7 +349,7 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        cdp_url:   { type: 'string', description: 'DevTools endpoint of the browser you drive (http://127.0.0.1:9222 or its ws:// URL). Used to read the page origin when origin is not given.' },
+        cdp_url:   { type: 'string', description: 'DevTools endpoint of the browser you drive, on loopback (http://127.0.0.1:9222 or its ws:// URL). Omit when the operator set DEMIPASS_CDP_URL. Used to read the page origin when origin is not given.' },
         target_id: { type: 'string', description: 'CDP target id of the page when several are open.' },
         origin:    { type: 'string', description: 'Origin to look up (https://host[:port]) instead of reading it from the browser.' },
       },
@@ -356,7 +362,7 @@ const TOOLS = [
       type: 'object',
       properties: {
         ref:               { type: 'string', description: 'DemiPass ref code of the login (see demipass_browser_fill_candidates).' },
-        cdp_url:           { type: 'string', description: 'DevTools endpoint of the browser (http://127.0.0.1:9222 or a ws:// URL).' },
+        cdp_url:           { type: 'string', description: 'DevTools endpoint of the browser, on loopback (http://127.0.0.1:9222 or a ws:// URL). Omit when the operator set DEMIPASS_CDP_URL (then it is the only endpoint allowed).' },
         target_id:         { type: 'string', description: 'CDP target id of the page; required when several pages are open.' },
         username_selector: { type: 'string', description: 'CSS selector of the username/email field. Default: detected.' },
         password_selector: { type: 'string', description: 'CSS selector of the password field. Default: the one visible password field.' },
@@ -364,7 +370,7 @@ const TOOLS = [
         request_id:        { type: 'string', description: 'Resume an earlier request that was waiting for approval (approval_pending).' },
         wait_seconds:      { type: 'integer', description: 'Wait up to this long (max 120) for a person to approve in the DemiPass wallet — carbon tokens only; silicon grants are approved at once. Default 0.' },
       },
-      required: ['ref', 'cdp_url'],
+      required: ['ref'],
     },
   },
   {
@@ -578,17 +584,17 @@ const HANDLERS = {
     return await demipass.explainDenial(args);
   },
   async demipass_browser_fill_candidates(args) {
-    const r = await browserFill.candidatesViaCdp({ cdpUrl: args.cdp_url, targetId: args.target_id, origin: args.origin, api: demipass, token: FILL_TOKEN });
+    const r = await browserFill.candidatesViaCdp({ cdpUrl: args.cdp_url, configuredCdpUrl: CDP_URL, targetId: args.target_id, origin: args.origin, api: demipass, getToken: fillToken });
     if (!r.ok) throw new Error(JSON.stringify(r));
     return r;
   },
   async demipass_browser_fill(args) {
     // The value goes vault → page inside fillViaCdp; what comes back is value-free (and scrubbed again there).
     const r = await browserFill.fillViaCdp({
-      cdpUrl: args.cdp_url, targetId: args.target_id, ref: args.ref,
+      cdpUrl: args.cdp_url, configuredCdpUrl: CDP_URL, targetId: args.target_id, ref: args.ref,
       usernameSelector: args.username_selector, passwordSelector: args.password_selector, submit: args.submit === true,
       requestId: args.request_id, waitSeconds: args.wait_seconds,
-      api: demipass, token: FILL_TOKEN, clientLabel: `demipass-mcp@${os.hostname()}`.slice(0, 80),
+      api: demipass, getToken: fillToken, clientLabel: `demipass-mcp@${os.hostname()}`.slice(0, 80),
     });
     if (!r.filled) throw new Error(JSON.stringify(r));
     return r;

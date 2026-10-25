@@ -7,6 +7,7 @@
  *   mode 'find'    locate the login fields (no secret involved); with `mark`, tag them data-demipass-fill="<mark>:u|p|s"
  *   mode 'fill'    origin re-check, then set the fields the way a typing user would (input + change), optional submit
  *   mode 'submit'  submit the form around the marked password field
+ *   mode 'check'   lengths (never values) of the marked fields — verifies what a field accepted after a fill
  *   mode 'unmark'  remove the tags
  */
 
@@ -46,6 +47,12 @@ function dpBrowserFill(a) {
     var tagged = document.querySelectorAll('[' + ATTR + ']');
     for (var t = 0; t < tagged.length; t++) if (String(tagged[t].getAttribute(ATTR)).indexOf(a.mark + ':') === 0) tagged[t].removeAttribute(ATTR);
     return { ok: true };
+  }
+  if (a.mode === 'check') {
+    var cp = document.querySelector('[' + ATTR + '="' + a.mark + ':p"]');
+    if (!cp) return fail('field_gone', 'password');
+    var cu = document.querySelector('[' + ATTR + '="' + a.mark + ':u"]');
+    return { ok: true, password_chars: String(cp.value).length, username_chars: cu ? String(cu.value).length : null };
   }
   if (a.mode === 'submit') {
     var marked = document.querySelector('[' + ATTR + '="' + a.mark + ':p"]');
@@ -129,7 +136,8 @@ function dpBrowserFill(a) {
   var userFilled = false;
   if (user && typeof a.username === 'string' && a.username.length > 0) userFilled = setValue(user, a.username);
   var pwFilled = setValue(pw, a.password);
-  if (!pwFilled) return fail('value_not_accepted', 'password');
+  // A field that kept only part of the value is cleared: a prefix of the password is not something the redactor knows.
+  if (!pwFilled) { setValue(pw, ''); return fail('value_not_accepted', 'password'); }
   var out = { ok: true, username_filled: userFilled, password_filled: true, chars: a.password.length, submitted: false };
   if (a.submit) {
     var s = doSubmit(pw);

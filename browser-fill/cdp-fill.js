@@ -2,8 +2,11 @@
 /**
  * DemiPass browser fill over the Chrome DevTools Protocol.
  *
- *   fillViaCdp({ cdpUrl, ref, ... })   attach to a browser the agent drives (Chromium with --remote-debugging-port,
- *                                      Playwright/puppeteer launched browsers), find the page, fill it, detach.
+ *   fillViaCdp({ cdpUrl, configuredCdpUrl, ref, ... })
+ *                                      attach to a browser the agent drives (Chromium with --remote-debugging-port,
+ *                                      Playwright/puppeteer launched browsers), find the page, fill it, detach. The
+ *                                      endpoint is operator config (DEMIPASS_CDP_URL) or, unset, the agent's cdp_url
+ *                                      on loopback only: whoever answers on it decides which origin gets approved.
  *   fillOnSession(send, { ref, ... })  the same fill on a CDP session the caller already holds. Needed where a
  *                                      second CDP connection cannot see the agent's page — Lightpanda `serve` gives
  *                                      every connection its own browser — so the fill must ride the driver's own
@@ -24,25 +27,68 @@ const DEFAULT_TIMEOUT_MS = 15000;
 
 // ── a minimal CDP client ──────────────────────────────────────────────────────────────────────────────────────
 
-async function resolveWsUrl(cdpUrl) {
+// Loopback by literal name or address only (no DNS answer decides it).
+function isLoopbackHost(hostname) {
+  const h = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (h === 'localhost' || h === '::1') return true;
+  if (/^127(\.\d{1,3}){3}$/.test(h)) return true;
+  const m = h.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  return Boolean(m && /^127\./.test(m[1]));
+}
+
+/**
+ * Which DevTools endpoint a fill may attach to. The page origin — and so which login the server releases — is
+ * whatever that endpoint reports, so the endpoint must not be the agent's choice:
+ *
+ *   configured (DEMIPASS_CDP_URL, operator config)  the only endpoint; an agent cdp_url that differs is refused
+ *   not configured                                  the agent's cdp_url, loopback only
+ *
+ * Either way resolveWsUrl() then requires the advertised webSocketDebuggerUrl to stay on that host (loopback when
+ * agent-supplied). A same-uid process listening on loopback can still pose as the browser — see the doc.
+ */
+function chooseCdpEndpoint(agentUrl, configuredUrl) {
+  const configured = typeof configuredUrl === 'string' && configuredUrl.trim() ? configuredUrl.trim() : null;
+  if (configured) {
+    if (agentUrl && String(agentUrl).trim() !== configured) {
+      throw new FillError('cdp_url_not_allowed', 'cdp_url is fixed by the operator (DEMIPASS_CDP_URL) — omit cdp_url');
+    }
+    return { url: configured, loopbackOnly: false };
+  }
+  if (typeof agentUrl !== 'string' || !agentUrl) throw new FillError('bad_args', 'cdp_url is required (http://127.0.0.1:9222 or a ws:// URL on loopback)');
+  let u;
+  try { u = new URL(agentUrl); } catch (_) { throw new FillError('bad_args', 'cdp_url is not a URL'); }
+  if (!isLoopbackHost(u.hostname)) throw new FillError('cdp_not_loopback', 'cdp_url must be a loopback DevTools endpoint (127.0.0.1, ::1, localhost); a remote browser needs DEMIPASS_CDP_URL set by the operator');
+  return { url: agentUrl, loopbackOnly: true };
+}
+
+async function resolveWsUrl(cdpUrl, { loopbackOnly = true } = {}) {
   if (typeof cdpUrl !== 'string' || !cdpUrl) throw new FillError('bad_args', 'cdp_url is required (http://127.0.0.1:9222 or a ws:// URL)');
   let u;
   try { u = new URL(cdpUrl); } catch (_) { throw new FillError('bad_args', 'cdp_url is not a URL'); }
+  if (loopbackOnly && !isLoopbackHost(u.hostname)) throw new FillError('cdp_not_loopback', 'cdp_url must be a loopback DevTools endpoint');
   if (u.protocol === 'ws:' || u.protocol === 'wss:') return cdpUrl;
   if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new FillError('bad_args', 'cdp_url must be http(s):// or ws(s)://');
   let res;
-  try { res = await fetch(new URL('/json/version', u), { signal: AbortSignal.timeout(5000) }); }
+  // redirect: 'error' — a redirect would let the endpoint send us somewhere else.
+  try { res = await fetch(new URL('/json/version', u), { signal: AbortSignal.timeout(5000), redirect: 'error' }); }
   catch (e) { throw new FillError('cdp_unreachable', `no DevTools endpoint at ${u.origin}`); }
   if (!res.ok) throw new FillError('cdp_unreachable', `DevTools endpoint at ${u.origin} answered HTTP ${res.status}`);
   let info;
   try { info = await res.json(); } catch (_) { throw new FillError('cdp_unreachable', 'DevTools /json/version is not JSON'); }
   if (!info || typeof info.webSocketDebuggerUrl !== 'string') throw new FillError('cdp_unreachable', 'DevTools endpoint advertises no webSocketDebuggerUrl');
+  let w;
+  try { w = new URL(info.webSocketDebuggerUrl); } catch (_) { throw new FillError('cdp_unreachable', 'DevTools endpoint advertises an invalid webSocketDebuggerUrl'); }
+  if (w.protocol !== 'ws:' && w.protocol !== 'wss:') throw new FillError('cdp_unreachable', 'DevTools webSocketDebuggerUrl is not ws(s)://');
+  const sameHost = w.hostname.toLowerCase() === u.hostname.toLowerCase();
+  if (loopbackOnly ? !isLoopbackHost(w.hostname) : !(sameHost || isLoopbackHost(w.hostname))) {
+    throw new FillError('cdp_not_loopback', 'the DevTools endpoint points its WebSocket at another host — refused');
+  }
   return info.webSocketDebuggerUrl;
 }
 
-async function connect(cdpUrl, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+async function connect(cdpUrl, { timeoutMs = DEFAULT_TIMEOUT_MS, loopbackOnly = true } = {}) {
   if (typeof WebSocket !== 'function') throw new FillError('runtime', 'this Node has no global WebSocket (need Node >= 22)');
-  const wsUrl = await resolveWsUrl(cdpUrl);
+  const wsUrl = await resolveWsUrl(cdpUrl, { loopbackOnly });
   const ws = new WebSocket(wsUrl);
   await new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new FillError('cdp_unreachable', 'DevTools WebSocket did not open')), 5000);
@@ -130,7 +176,7 @@ function pageFailure(v, origin) {
     selector_not_found: `no element matches the ${v.field}_selector`,
     bad_selector: `the ${v.field}_selector is not valid CSS`,
     field_not_usable: `the ${v.field} field is hidden, disabled or read-only`,
-    value_not_accepted: 'the password field did not accept the value (maxlength or a page script?)',
+    value_not_accepted: 'the password field did not accept the value (maxlength or a page script?) — the field was cleared',
   };
   return new FillError(v.code || 'page_script_failed', msgs[v.code] || 'the fill could not be completed in the page', { origin, ...(v.count ? { count: v.count } : {}) });
 }
@@ -170,12 +216,18 @@ async function fillOnSession(send, opts) {
   }
 }
 
-/** Attach to `cdpUrl`, fill the chosen page, detach. Always resolves a value-free object. */
+/**
+ * Attach to the DevTools endpoint (`configuredCdpUrl` from operator config wins; else the agent's `cdpUrl`, loopback
+ * only), fill the chosen page, detach. `getToken()` (optional) supplies the fill token at call time and may throw
+ * FillError('no_fill_identity'). Always resolves a value-free object.
+ */
 async function fillViaCdp(opts) {
   const redactor = new Redactor();
   let conn;
   try {
-    conn = await connect(opts.cdpUrl, { timeoutMs: opts.timeoutMs });
+    const token = opts.getToken ? opts.getToken() : opts.token;
+    const ep = chooseCdpEndpoint(opts.cdpUrl, opts.configuredCdpUrl);
+    conn = await connect(ep.url, { timeoutMs: opts.timeoutMs, loopbackOnly: ep.loopbackOnly });
     const page = choosePage(await listPages(conn), opts.targetId);
     const { sessionId } = await conn.send('Target.attachToTarget', { targetId: page.targetId, flatten: true });
     if (!sessionId) throw new FillError('cdp_error', 'could not attach to the page');
@@ -186,7 +238,7 @@ async function fillViaCdp(opts) {
         fillRequest: (x) => opts.api.fillRequest(x),
         fillRedeem: async (x) => { const r = await opts.api.fillRedeem(x); if (r && r.data && typeof r.data.value === 'string') redactor.add(r.data.value); return r; },
       };
-      const out = await fillOnSession(send, { ...opts, api });
+      const out = await fillOnSession(send, { ...opts, token, api });
       return redactor.scrubDeep({ ...out, target_id: page.targetId });
     } finally {
       try { await conn.send('Target.detachFromTarget', { sessionId }); } catch (_) { /* gone */ }
@@ -199,12 +251,14 @@ async function fillViaCdp(opts) {
 }
 
 /** Candidates for the page at `cdpUrl` (or an explicit origin). Value-free. */
-async function candidatesViaCdp({ cdpUrl, targetId, origin, api, token }) {
+async function candidatesViaCdp({ cdpUrl, configuredCdpUrl, targetId, origin, api, token, getToken }) {
   try {
+    if (getToken) token = getToken();
     let want = origin;
     let pages;
     if (!want) {
-      const conn = await connect(cdpUrl);
+      const ep = chooseCdpEndpoint(cdpUrl, configuredCdpUrl);
+      const conn = await connect(ep.url, { loopbackOnly: ep.loopbackOnly });
       try {
         const all = await listPages(conn);
         pages = all.map(pageSummary);
@@ -218,4 +272,4 @@ async function candidatesViaCdp({ cdpUrl, targetId, origin, api, token }) {
   }
 }
 
-module.exports = { connect, fillViaCdp, fillOnSession, candidatesViaCdp, listPages, newMark: () => crypto.randomBytes(8).toString('hex') };
+module.exports = { connect, chooseCdpEndpoint, isLoopbackHost, resolveWsUrl, fillViaCdp, fillOnSession, candidatesViaCdp, listPages, newMark: () => crypto.randomBytes(8).toString('hex') };
