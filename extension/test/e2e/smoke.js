@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
-import { startMock, createMockState, approveDevice, phoneDecide } from '../mock-server.js';
+import { startMock, createMockState, approveDevice, phoneDecide, expireAccessTokens } from '../mock-server.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const extSrc = path.resolve(here, '../..');
@@ -46,9 +46,7 @@ const manifest = JSON.parse(readFileSync(path.join(extDir, 'manifest.json'), 'ut
 manifest.host_permissions.push('http://localhost/*', 'http://127.0.0.1/*');
 writeFileSync(path.join(extDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
 
-// 30 s access tokens sit inside the client's 60 s refresh skew, so every
-// authenticated call in this run rotates the refresh token.
-const mock = await startMock({ state: createMockState({ accessTtlSec: 30 }) });
+const mock = await startMock({ state: createMockState({ accessTtlSec: 3600 }) });
 const { state } = mock;
 const A = `http://localhost:${mock.sitePort}`;
 const B = `http://127.0.0.1:${mock.sitePort}`;
@@ -243,10 +241,65 @@ try {
     }
   });
 
-  await step('refresh rotated on every call without losing the session', async () => {
-    const rotations = state.calls.filter((c) => c.path === '/api/identity/refresh' && c.status === 200).length;
-    assert.ok(rotations >= 5, 'rotations: ' + rotations);
+  const pendingFills = () => [...state.fills].filter(([, x]) => x.status === 'pending');
+
+  await step('token expiring within 5 minutes is refreshed before fill/request', async () => {
+    state.accessTtlSec = 200; // outside the 60 s skew, inside the 5 min fill window
+    expireAccessTokens(state); // next call refreshes and gets a 200 s token
+    const page = await context.newPage();
+    await page.goto(A + '/login.html');
+    const { pop } = await openPopupFor(page);
+    await pop.waitForSelector(`#entry-list button[data-ref="${ref}"]`);
+    const mark = state.calls.length;
+    await pop.click(`#entry-list button[data-ref="${ref}"]`);
+    await waitText(pop, '#fill-msg', /Approve on your phone/);
+    const seq = state.calls.slice(mark).map((c) => `${c.path} ${c.status}`);
+    const iReq = seq.indexOf('/api/blindkey/fill/request 201');
+    assert.ok(iReq > 0 && seq[iReq - 1] === '/api/identity/refresh 200', seq.join(' | '));
+    state.accessTtlSec = 3600;
+    const [reqId] = pendingFills()[0];
+    await phoneDecide(mock.apiBase, state, reqId, 'approve');
+    await waitText(pop, '#fill-msg', /^Filled\.$/);
+    assert.equal(await page.inputValue('#pass'), SECRET_MANUAL);
+    await pop.close(); await page.close();
+  });
+
+  await step('refresh while waiting orphans the request (404): extension asks again, shows "Approve on your phone…", fills', async () => {
+    const page = await context.newPage();
+    await page.goto(A + '/login.html');
+    const { pop } = await openPopupFor(page);
+    await pop.click(`#entry-list button[data-ref="${ref}"]`);
+    await waitText(pop, '#fill-msg', /Approve on your phone/);
+    const [firstId] = pendingFills()[0];
+    const mark = state.calls.length;
+    expireAccessTokens(state); // the asking token dies mid-wait: 401 -> refresh -> redeem 404
+    await waitText(pop, '#fill-msg', /Approve on your phone… \(new request/);
+    const seq = state.calls.slice(mark).map((c) => `${c.path} ${c.status}`);
+    assert.ok(seq.includes('/api/identity/refresh 200'), seq.join(' | '));
+    assert.ok(seq.includes('/api/blindkey/fill/redeem 404'), seq.join(' | '));
+    const second = pendingFills().find(([id]) => id !== firstId);
+    assert.ok(second, 'a second fill request was made');
+    assert.equal(await page.inputValue('#pass'), '', 'nothing filled yet');
+    await phoneDecide(mock.apiBase, state, second[0], 'approve');
+    await waitText(pop, '#fill-msg', /^Filled\.$/);
+    assert.equal(await page.inputValue('#pass'), SECRET_MANUAL);
+    assert.equal(state.fills.get(firstId).status, 'pending', 'the orphaned request was never redeemed');
+    await pop.close(); await page.close();
+  });
+
+  await step('refresh rotation: short-lived tokens rotate on each call without losing the session', async () => {
+    state.accessTtlSec = 30; // inside the 60 s skew: every call refreshes
+    expireAccessTokens(state);
+    const before = state.calls.filter((c) => c.path === '/api/identity/refresh' && c.status === 200).length;
+    for (let i = 0; i < 4; i++) {
+      const { pop } = await openPopupFor(pageA);
+      await pop.waitForSelector(`#entry-list button[data-ref="${ref}"]`);
+      await pop.close();
+    }
+    const rotations = state.calls.filter((c) => c.path === '/api/identity/refresh' && c.status === 200).length - before;
+    assert.ok(rotations >= 4, 'rotations: ' + rotations);
     assert.equal(state.calls.filter((c) => c.path === '/api/identity/refresh' && c.status !== 200).length, 0, 'no failed refresh');
+    state.accessTtlSec = 3600;
   });
 
   await step('sign out revokes the refresh token', async () => {

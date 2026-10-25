@@ -59,6 +59,11 @@ they are, use the local mock (below).
   - Refresh rotates the pair. It is single-flight, because the refresh token
     is single-use, and the new refresh token is persisted before the new
     access token is used.
+  - A carbon fill request belongs to the one access token (`jti`) that made
+    it; a refreshed token gets 404 on redeem. So before `/fill/request` the
+    worker refreshes if the access token expires within 5 minutes. If a
+    refresh happens anyway while the request waits (or redeem answers 404),
+    it asks once more and the popup shows "Approve on your phone…" again.
   - A 401, or dustforge's 403 `admin access or Bearer token required` (what
     `getDemiPassActor` returns for a bad bearer when `ADMIN_API_KEY` is set),
     triggers one refresh and one retry. A 403 `denied` from redeem does not.

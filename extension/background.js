@@ -5,7 +5,7 @@
 // in the in-memory `pending` map with a TTL) and nowhere else. It is never
 // logged, stored, put in a badge/title/notification, or sent to UI pages.
 
-import { ApiClient, ApiError, NotPairedError, waitForFill, waitForPairing } from './lib/api.js';
+import { ApiClient, ApiError, NotPairedError, requestAndWaitForFill, waitForPairing } from './lib/api.js';
 import { normalizeOrigin, normalizeApiBase, DEFAULT_API_BASE, suggestLoginName } from './lib/origin.js';
 import { chromeTokenStore } from './lib/token-store.js';
 
@@ -303,9 +303,16 @@ async function runFill(job, tabId, documentId, ref) {
   const origin = rec.origin; // set by the browser (MessageSender.origin), never by the page
   job.origin = origin;
 
-  let req;
+  // Stop polling (and never redeem) once the document is gone or changed origin.
+  const docGone = () => frames.get(tabId)?.get(documentId)?.origin !== origin;
+  let r;
   try {
-    req = await client.requestFill(ref, origin, CLIENT_LABEL);
+    // Asks once more if a token refresh orphans the first request (redeem 404).
+    r = await requestAndWaitForFill(client, {
+      ref, origin, clientLabel: CLIENT_LABEL,
+      onAsk: (req, ask) => { job.state = req.status === 'approved' ? 'approved' : 'pending'; job.asks = ask; },
+      isCancelled: () => job.cancelled || docGone(),
+    });
   } catch (e) {
     if (e instanceof ApiError && e.status === 403) {
       job.state = 'refused';
@@ -314,17 +321,10 @@ async function runFill(job, tabId, documentId, ref) {
     }
     throw e;
   }
-  job.state = req.status === 'approved' ? 'approved' : 'pending';
-
-  // Stop polling (and never redeem) once the document is gone or changed origin.
-  const docGone = () => frames.get(tabId)?.get(documentId)?.origin !== origin;
-  const r = await waitForFill(client, req.request_id, {
-    expiresIn: req.expires_in,
-    isCancelled: () => job.cancelled || docGone(),
-  });
   if (r.state === 'cancelled' && !job.cancelled) {
     job.state = 'refused'; job.error = 'The page changed before the fill; nothing was filled.'; return;
   }
+  if (r.state === 'lost') { job.state = 'error'; job.error = 'The approval request was lost twice. Try again.'; return; }
   if (r.state !== 'approved') { job.state = r.state; return; }
 
   let fill = r.fill;
@@ -454,7 +454,7 @@ async function handleUi(msg) {
     case 'ui:fillStatus': {
       const j = fills.get(msg.fillId);
       if (!j) return { ok: false, error: 'Unknown fill.' };
-      return { ok: true, state: j.state, origin: j.origin, name: j.name, error: j.error, filledUsername: !!j.filledUsername };
+      return { ok: true, state: j.state, origin: j.origin, name: j.name, error: j.error, filledUsername: !!j.filledUsername, asks: j.asks || 0 };
     }
     case 'ui:fillCancel': {
       const j = fills.get(msg.fillId);

@@ -136,7 +136,8 @@ async function fill(documentId, ref, btn) {
   fillTimer = setInterval(async () => {
     const s = await send({ type: 'ui:fillStatus', fillId: r.fillId });
     if (!s || !s.ok) { setMsg(msg, 'Fill failed.', 'err'); done(); return; }
-    const text = s.error || FILL_TEXT[s.state] || s.state;
+    let text = s.error || FILL_TEXT[s.state] || s.state;
+    if (s.state === 'pending' && s.asks > 1) text += ' (new request: the first one ended with a token refresh)';
     const terminal = !['requesting', 'pending', 'approved', 'filling'].includes(s.state);
     setMsg(msg, text, s.state === 'done' ? 'ok' : (terminal ? 'err' : 'muted'));
     if (terminal) done();

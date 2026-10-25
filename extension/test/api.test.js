@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ApiClient, ApiError, NotPairedError, jwtClaims, waitForFill, waitForPairing } from '../lib/api.js';
-import { startMock, createMockState, approveDevice, phoneDecide } from './mock-server.js';
+import { ApiClient, ApiError, NotPairedError, jwtClaims, waitForFill, waitForPairing, requestAndWaitForFill } from '../lib/api.js';
+import { startMock, createMockState, approveDevice, phoneDecide, expireAccessTokens } from './mock-server.js';
 
 const b64u = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
 const jwt = (claims) => `${b64u({ alg: 'none' })}.${b64u(claims)}.sig`;
@@ -105,7 +105,7 @@ test('fill request: 201 pending; 403 carries bound_origins and no refresh', asyn
     ],
   });
   const c = new ApiClient({ base: 'https://api.test', fetch, tokens: memTokens({ access: at, refresh: 'r' }) });
-  assert.deepEqual(await c.requestFill('DP-1', 'https://example.com', 'x'), { request_id: 'dpf_a', status: 'pending', expires_in: 120 });
+  assert.deepEqual(await c.requestFill('DP-1', 'https://example.com', 'x'), { request_id: 'dpf_a', status: 'pending', expires_in: 120, jti: null });
   await assert.rejects(c.requestFill('DP-1', 'https://evil.test', 'x'), (e) => e.status === 403 && e.boundOrigins[0] === 'https://example.com');
   assert.equal(fetch.calls.filter((x) => x.key === 'POST /api/identity/refresh').length, 0);
 });
@@ -242,8 +242,8 @@ test('store sends login + origins (contract field names)', async () => {
 
 // ---- the same client against the mock over real HTTP ----------------------
 
-test('end to end against the mock: pair, store, candidates, fill approved on the phone, refresh survives', async (t) => {
-  const state = createMockState({ accessTtlSec: 30 }); // inside the 60 s skew: every call refreshes
+test('end to end against the mock: pair, store, candidates, fill approved / denied on the phone, sign out', async (t) => {
+  const state = createMockState();
   const m = await startMock({ state });
   t.after(() => m.close());
   const tokens = memTokens();
@@ -279,4 +279,110 @@ test('end to end against the mock: pair, store, candidates, fill approved on the
   const out = await c.signOut();
   assert.equal(out.refreshRevoked, true);
   assert.equal(await c.isPaired(), false);
+});
+
+// ---- fill requests are bound to the asking token (jti) ---------------------
+
+const fillRoutes = (extra = {}) => ({
+  'POST /api/blindkey/fill/request': [[201, { ok: true, request_id: 'dpf_a', status: 'pending', expires_in: 120 }]],
+  ...extra,
+});
+
+test('requestFill refreshes first when the access token expires within 5 minutes', async () => {
+  const soon = jwt({ exp: Math.floor(Date.now() / 1000) + 240, jti: 'old' }); // 4 min: outside the 60 s skew
+  const fresh = jwt({ exp: future(), jti: 'new' });
+  const fetch = scripted(fillRoutes({ 'POST /api/identity/refresh': [[200, { ok: true, token: fresh, refresh_token: 'r2' }]] }));
+  const c = new ApiClient({ base: 'https://api.test', fetch, tokens: memTokens({ access: soon, refresh: 'r1' }) });
+  const req = await c.requestFill('DP-1', 'https://example.com', 'x');
+  assert.deepEqual(fetch.calls.map((x) => x.key), ['POST /api/identity/refresh', 'POST /api/blindkey/fill/request']);
+  assert.equal(fetch.calls[1].auth, 'Bearer ' + fresh);
+  assert.equal(req.jti, 'new');
+});
+
+test('requestFill does not refresh when the token has more than 5 minutes left', async () => {
+  const ok = jwt({ exp: Math.floor(Date.now() / 1000) + 400, jti: 'cur' });
+  const fetch = scripted(fillRoutes());
+  const c = new ApiClient({ base: 'https://api.test', fetch, tokens: memTokens({ access: ok, refresh: 'r1' }) });
+  const req = await c.requestFill('DP-1', 'https://example.com', 'x');
+  assert.deepEqual(fetch.calls.map((x) => x.key), ['POST /api/blindkey/fill/request']);
+  assert.equal(req.jti, 'cur');
+});
+
+test('redeem 404 means the request was lost to a refresh', async () => {
+  const at = jwt({ exp: future(), jti: 'j' });
+  const fetch = scripted({ 'POST /api/blindkey/fill/redeem': [[404, { error: 'fill request not found' }]] });
+  const c = new ApiClient({ base: 'https://api.test', fetch, tokens: memTokens({ access: at, refresh: 'r' }) });
+  assert.deepEqual(await c.redeemOnce('dpf_a'), { state: 'lost' });
+});
+
+test('waitForFill reports lost without a redeem once the jti has changed', async () => {
+  const fetch = scripted({});
+  const c = new ApiClient({ base: 'https://api.test', fetch, tokens: memTokens({ access: jwt({ exp: future(), jti: 'new' }), refresh: 'r' }) });
+  const r = await waitForFill(c, 'dpf_a', { jti: 'old', sleep: noSleep });
+  assert.equal(r.state, 'lost');
+  assert.equal(fetch.calls.length, 0);
+});
+
+test('requestAndWaitForFill asks again once after a lost request, then succeeds', async () => {
+  const at = jwt({ exp: future(), jti: 'j' });
+  const fetch = scripted({
+    'POST /api/blindkey/fill/request': [
+      [201, { ok: true, request_id: 'dpf_1', status: 'pending', expires_in: 120 }],
+      [201, { ok: true, request_id: 'dpf_2', status: 'pending', expires_in: 120 }],
+    ],
+    'POST /api/blindkey/fill/redeem': [
+      [428, { error: 'approval_pending' }],
+      [404, { error: 'fill request not found' }],
+      [428, { error: 'approval_pending' }],
+      [200, { ok: true, value: 'v', username: 'u', origin: 'https://example.com', name: 'n', ref: 'DP-1' }],
+    ],
+  });
+  const c = new ApiClient({ base: 'https://api.test', fetch, tokens: memTokens({ access: at, refresh: 'r' }) });
+  const asks = [];
+  const r = await requestAndWaitForFill(c, { ref: 'DP-1', origin: 'https://example.com', clientLabel: 'x', sleep: noSleep, onAsk: (req, n) => asks.push([req.request_id, n]) });
+  assert.equal(r.state, 'approved');
+  assert.equal(r.asks, 2);
+  assert.deepEqual(asks, [['dpf_1', 1], ['dpf_2', 2]]);
+  assert.equal(fetch.calls.filter((x) => x.key === 'POST /api/blindkey/fill/redeem')[3].body.request_id, 'dpf_2');
+});
+
+test('requestAndWaitForFill gives up after the second lost request', async () => {
+  const at = jwt({ exp: future(), jti: 'j' });
+  const fetch = scripted({
+    'POST /api/blindkey/fill/request': [[201, { ok: true, request_id: 'dpf_x', status: 'pending', expires_in: 120 }]],
+    'POST /api/blindkey/fill/redeem': [[404, { error: 'fill request not found' }]],
+  });
+  const c = new ApiClient({ base: 'https://api.test', fetch, tokens: memTokens({ access: at, refresh: 'r' }) });
+  const r = await requestAndWaitForFill(c, { ref: 'DP-1', origin: 'https://example.com', clientLabel: 'x', sleep: noSleep });
+  assert.equal(r.state, 'lost');
+  assert.equal(fetch.calls.filter((x) => x.key === 'POST /api/blindkey/fill/request').length, 2);
+});
+
+test('against the mock: a refresh while waiting orphans the request (404); the re-ask is approved', async (t) => {
+  const state = createMockState();
+  const m = await startMock({ state });
+  t.after(() => m.close());
+  const c = new ApiClient({ base: m.apiBase, fetch, tokens: memTokens() });
+  const p = await c.startPairing('node test');
+  await approveDevice(state, p.user_code);
+  await waitForPairing(c, p.device_code, { interval: 0, sleep: noSleep });
+  await c.store({ name: 'site', value: 'hunter2', secret_type: 'password', login: 'me', origins: ['https://example.com'] });
+  const ref = (await c.candidates('https://example.com'))[0].ref;
+
+  const asks = [];
+  let expired = false;
+  const r = await requestAndWaitForFill(c, {
+    ref, origin: 'https://example.com', clientLabel: 't', intervalMs: 0,
+    sleep: async () => {
+      if (asks.length === 1 && !expired) { expired = true; expireAccessTokens(state); } // token dies mid-wait
+      else if (asks.length === 2) await phoneDecide(m.apiBase, state, asks[1], 'approve');
+    },
+    onAsk: (req) => asks.push(req.request_id),
+  });
+  assert.equal(r.state, 'approved');
+  assert.equal(r.fill.value, 'hunter2');
+  assert.equal(r.asks, 2);
+  const redeems = state.calls.filter((x) => x.path === '/api/blindkey/fill/redeem').map((x) => x.status);
+  assert.ok(redeems.includes(404), 'old request answered 404 for the refreshed token: ' + redeems);
+  assert.equal(state.fills.get(asks[0]).status, 'pending', 'first request never redeemed');
 });

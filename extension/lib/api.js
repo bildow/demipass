@@ -126,6 +126,18 @@ export class ApiClient {
     return at;
   }
 
+  // Refresh now if the access token expires within minValidMs. One refresh
+  // at most: whatever the server returns is used.
+  async ensureFresh(minValidMs) {
+    const at = await this.tokens.getAccess();
+    const exp = jwtClaims(at)?.exp;
+    if (!at || (typeof exp === 'number' && exp * 1000 - this.now() < minValidMs)) await this.refresh();
+  }
+
+  async currentJti() {
+    return jwtClaims(await this.tokens.getAccess())?.jti || null;
+  }
+
   // Authenticated call. Refreshes ahead of expiry, and once more if the
   // server rejects the bearer (401, or the 403 text above).
   async call(method, path, body) {
@@ -222,23 +234,30 @@ export class ApiClient {
     return { name: r.body.name, ref: r.body.ref, secret_type: r.body.secret_type };
   }
 
+  // A carbon fill request belongs to the one access token (jti) that made it:
+  // a refreshed token gets 404 on redeem. So make sure the token outlives the
+  // approval window before asking.
   async requestFill(ref, origin, clientLabel) {
+    await this.ensureFresh(FILL_MIN_TOKEN_MS);
     const r = await this.call('POST', '/api/blindkey/fill/request', { ref, origin, client_label: clientLabel });
     if (r.status === 201 && r.body && r.body.request_id) {
-      return { request_id: String(r.body.request_id), status: r.body.status, expires_in: Number(r.body.expires_in) || 120 };
+      return { request_id: String(r.body.request_id), status: r.body.status, expires_in: Number(r.body.expires_in) || 120, jti: await this.currentJti() };
     }
     throw new ApiError(r.status, errCode(r.body) || 'fill_request_failed', r.body);
   }
 
   // One redeem attempt.
   // -> { state: 'pending' } | { state: 'denied' } | { state: 'expired' } |
-  //    { state: 'already_redeemed' } | { state: 'approved', fill: {...value} }
+  //    { state: 'already_redeemed' } | { state: 'lost' } (404: request bound to an older token) |
+  //    { state: 'approved', fill: {...value} }
   async redeemOnce(requestId) {
     const r = await this.call('POST', '/api/blindkey/fill/redeem', { request_id: requestId });
     const code = errCode(r.body);
     if (r.status === 428) return { state: 'pending' };
     if (r.status === 403 && code === 'denied') return { state: 'denied' };
     if (r.status === 410) return { state: code === 'already_redeemed' ? 'already_redeemed' : 'expired' };
+    // The request is bound to the token that asked; after a refresh it is gone.
+    if (r.status === 404) return { state: 'lost' };
     if (r.status === 200 && r.body && r.body.ok && typeof r.body.value === 'string') {
       const b = r.body;
       return {
@@ -250,20 +269,39 @@ export class ApiClient {
   }
 }
 
+export const FILL_MIN_TOKEN_MS = 5 * 60 * 1000;
+
 const realSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Polls redeem until a terminal state. The deadline is the server's
 // expires_in plus a little slack; the server stays authoritative.
-export async function waitForFill(client, requestId, { expiresIn = 120, intervalMs = 2000, sleep = realSleep, now = () => Date.now(), isCancelled = () => false, onPending } = {}) {
+export async function waitForFill(client, requestId, { expiresIn = 120, intervalMs = 2000, sleep = realSleep, now = () => Date.now(), isCancelled = () => false, onPending, jti = null } = {}) {
   const deadline = now() + expiresIn * 1000 + 5000;
   for (;;) {
     if (isCancelled()) return { state: 'cancelled' };
+    // A refresh since the request was made means the server will answer 404;
+    // skip the wasted round trip.
+    if (jti && (await client.currentJti()) !== jti) return { state: 'lost' };
     const r = await client.redeemOnce(requestId);
     if (r.state !== 'pending') return r;
     if (onPending) onPending();
     if (now() >= deadline) return { state: 'expired' };
     await sleep(intervalMs);
   }
+}
+
+// Request a fill and wait for the phone. If the request is lost to a token
+// refresh (redeem 404, or the jti changed), ask once more; onAsk runs for
+// each request so the UI can show "Approve on your phone…" again.
+export async function requestAndWaitForFill(client, { ref, origin, clientLabel, onAsk, isCancelled, sleep, now, intervalMs, maxAsks = 2 }) {
+  let last = { state: 'lost' };
+  for (let ask = 1; ask <= maxAsks; ask++) {
+    const req = await client.requestFill(ref, origin, clientLabel);
+    if (onAsk) onAsk(req, ask);
+    last = await waitForFill(client, req.request_id, { expiresIn: req.expires_in, jti: req.jti, isCancelled, sleep, now, intervalMs });
+    if (last.state !== 'lost') return { ...last, asks: ask };
+  }
+  return { ...last, asks: maxAsks };
 }
 
 export async function waitForPairing(client, deviceCode, { interval = 5, expiresIn = 600, sleep = realSleep, now = () => Date.now(), isCancelled = () => false } = {}) {

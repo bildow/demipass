@@ -33,7 +33,7 @@ export function createMockState({ accessTtlSec = 3600, pin = '1234', authReject4
     refresh: new Map(), // raw -> { sid, scope, revoked }
     device: new Map(), // device_code -> { user_code, scope, status, expires }
     secrets: new Map(), // ref -> { name, value, secret_type, login, origins }
-    fills: new Map(), // id -> { ref, origin, sid, status, expires, client_label, created }
+    fills: new Map(), // id -> { ref, origin, jti, status, expires, client_label, created } — bound to the asking token
     proofs: new Map(), // sid -> intent with a fresh PIN proof
     calls: [], // { method, path, status, meta } — never values
   };
@@ -203,13 +203,14 @@ export function apiHandler(state) {
       if (!s) return send(404, { error: 'secret not found' });
       if (!origin || !s.origins.includes(origin)) return send(403, { error: 'origin not bound to this secret', bound_origins: s.origins });
       const id = rand('dpf_', 12);
-      state.fills.set(id, { ref: body.ref, origin, sid: a.sid, status: 'pending', expires: Date.now() + 120_000, client_label: String(body.client_label || ''), created: new Date().toISOString() });
+      state.fills.set(id, { ref: body.ref, origin, jti: a.jti, status: 'pending', expires: Date.now() + 120_000, client_label: String(body.client_label || ''), created: new Date().toISOString() });
       return send(201, { ok: true, request_id: id, status: 'pending', expires_in: 120 });
     }
     if (p === '/api/blindkey/fill/redeem' && req.method === 'POST') {
       const f = state.fills.get(body.request_id);
       meta.request_id = body.request_id;
-      if (!f || f.sid !== a.sid) return send(404, { error: 'not found' });
+      // Contract: a carbon session is one access token (jti). A refreshed token gets 404.
+      if (!f || f.jti !== a.jti) return send(404, { error: 'fill request not found' });
       if (f.status === 'redeemed') return send(410, { error: 'already_redeemed' });
       if (f.expires < Date.now()) return send(410, { error: 'expired' });
       if (f.status === 'denied') return send(403, { error: 'denied' });
@@ -228,7 +229,7 @@ export function apiHandler(state) {
     if (m && req.method === 'POST') {
       const f = state.fills.get(m[1]);
       if (!f || f.status !== 'pending') return send(404, { error: 'no pending request' });
-      if (f.sid === a.sid) return send(409, { error: 'the requesting session cannot approve its own fill' });
+      if (f.jti === a.jti) return send(409, { error: 'the requesting session cannot approve its own fill' });
       if (m[2] === 'deny') { f.status = 'denied'; return send(200, { ok: true, status: 'denied' }); }
       if (state.proofs.get(a.sid) !== 'fill:' + m[1]) return send(403, { error: 'pin proof required', gate: 'pin', intent: 'fill:' + m[1] });
       state.proofs.delete(a.sid); // spent
@@ -244,6 +245,14 @@ export function apiHandler(state) {
 export async function approveDevice(state, userCode) {
   for (const row of state.device.values()) if (row.user_code === userCode && row.status === 'pending') { row.status = 'approved'; return true; }
   return false;
+}
+
+// Revokes every non-phone access token, as if it expired: the extension's next
+// call gets 401, refreshes, and its pending fill request is orphaned (404).
+export function expireAccessTokens(state) {
+  let n = 0;
+  for (const rec of state.access.values()) if (rec.sid !== 'sid_phone' && !rec.revoked) { rec.revoked = true; n++; }
+  return n;
 }
 
 export async function phoneDecide(apiBase, state, requestId, decision = 'approve') {
