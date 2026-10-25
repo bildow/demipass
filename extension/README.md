@@ -65,9 +65,10 @@ Build first: `npm run package:extension` (from the repo root). It writes
 |---|---|
 | Pair | Popup → **Pair with DemiPass** → device flow with `scope: 'transact'`. The popup shows the user code and a link to `https://demipass.com/device`. |
 | Store selected text | Right-click a selection → **Store in DemiPass**. The browser hands the selection to the background worker. A small extension window asks for a name and type (`api_key`, `oauth_token`, `password`, `other`) and can optionally bind it to the page's origin. |
-| Save a login on submit | The content script sees a login form submit and passes the username and password straight to the worker, but only for a password the person put in the field themselves (see the security model). The worker holds them in memory for 3 minutes, one per frame, and shows **SAVE** on the toolbar badge. The popup offers **Save to DemiPass**: `secret_type: 'password'`, `login`, `origins: [page origin]`. Nothing is stored unless the person clicks Save. |
+| Save a login on submit | When the person sends a login form (their own click or Enter), the content script passes the username and password straight to the worker, but only for a password the person put in the field themselves (see the security model). The worker holds them in memory for 3 minutes, one per frame, and shows **SAVE** on the toolbar badge. The popup offers **Save to DemiPass**: `secret_type: 'password'`, `login`, `origins: [page origin]`. Nothing is stored unless the person clicks Save. |
 | Fill | The popup lists the vault entries bound to the page's origin (`/fill/candidates`). **Fill** → `/fill/request` → "Approve on your phone…" → polls `/fill/redeem` (428/403/410/200). On 200 the worker re-checks the frame, injects the fill into that exact document, then drops the value. |
 | Add for this site | Popup form (name, username, password), stored bound to the origin the popup showed. It is refused if the tab is on another origin by the time of Add. |
+| Rotated name | If the server answers 409 because the name was rotated ("…the current version is 'X_v2' — store under that name"), the whole message is kept. The captured value stays pending, and the button becomes **Save to “X_v2”**, which replaces the current version and adds this site to its origins. |
 | Same name | Every save path checks `/api/blindkey/list` first, comparing the trimmed name. If the name exists, nothing is stored. The button turns into **Replace** and says what would be replaced. A confirmed replace stores without `origins`, which keeps the existing binding, then adds this page's origin with `/api/blindkey/origins` `mode: 'add'`. If that second step fails, the popup says exactly that: "Password replaced in “X”, but this site wasn't added to it. Try again." |
 | Sign out | Revokes the refresh token (`/api/identity/refresh/revoke`), revokes the access token by `jti` (best effort), and clears both from storage. |
 
@@ -124,26 +125,57 @@ Build first: `npm run package:extension` (from the repo root). It writes
      check and the fill. A reload or a navigation gives a new document,
      with a new nonce or none, and is refused ("The page changed before the
      fill; nothing was filled").
-- **Save prompts come from the person's own typing.** The content script
-  counts an `input` event on a field only when three things hold:
-  - it is trusted;
-  - the page has transient user activation (`navigator.userActivation.isActive`);
-  - a trusted `keydown`, `paste`, `drop` or `compositionend` hit that same
-    field within the last second.
+- **Save prompts come from the person's own typing and their own send.**
+  The rules, in `content/content.js`:
+  1. **One gesture, one edit.** A trusted keydown, paste or drop on a field
+     issues one token for that field, valid until the end of the current
+     task. The keydown must be a character, Backspace or Delete, without
+     Ctrl/Meta. The next trusted `input` event on that field spends the
+     token, and it counts only if it is the edit that gesture makes:
+     - a character key K gives `inputType: 'insertText'` with `data === K`;
+     - Backspace/Delete gives a delete;
+     - paste gives `insertFromPaste`, and drop gives `insertFromDrop`.
 
-  A capture is sent only if the password field still holds the value from
-  its last counted input, and only on a trusted submit, click or Enter.
-  `execCommand('insertText')` does make trusted input events without a
-  person, but it makes no keydown or paste, so it does not count. Neither
-  do script `.value` writes, dispatched events or `requestSubmit()`. Every
-  input is tracked, whatever its type, so typing while a show-password
-  toggle has the field as `type=text` still counts when it is hidden again.
-  Pending saves are kept per (tab, frame): a cross-origin iframe can
-  neither replace the top frame's save nor be offered ahead of it.
+     IME input counts while a trusted composition is open on the field. The
+     page must also have transient user activation.
+     `execCommand('insertText')` therefore never counts: not on its own, not
+     from a timer, and not nested inside the person's own keystroke, where
+     the token is already spent. Synthetic events and `.value` writes do not
+     count either. An input that does not count marks the field as not the
+     person's until they type in it again.
+  2. **The value sent is the one the person left.** It is the field's value
+     after its last counted input. If the page changed it since (swapped it
+     before submit), nothing is offered.
+  3. **Capture happens only on the person's own send.** That is a trusted
+     click on the form's submit control or on a sign-in button, or a
+     trusted Enter in a field of that form (or in a form-less password
+     field). `submit` events are not used, so `requestSubmit()` and
+     `form.submit()` from page script offer nothing.
+  4. **The password field must be usable.** It must be at least 16x8 CSS px
+     and visible: not hidden by CSS, `display` or opacity
+     (`checkVisibility`). A 1-pixel field that grabbed focus while the
+     person typed elsewhere is ignored.
 
-  What this does not catch: a page script can still change the value while
-  the person is typing in that field (inside the one-second window). The
-  person still has to click Save, and the card shows the site and the
+  Every input is tracked whatever its type, so typing while a
+  show-password toggle has the field as `type=text` still counts when it is
+  hidden again. Pending saves are kept per (tab, frame): a cross-origin
+  iframe can neither replace the top frame's save nor be offered ahead of
+  it.
+
+  What this still does not catch:
+  - **A visible decoy.** A page can move focus into a normal-sized password
+    field while the person is typing elsewhere. Their own keystrokes then
+    land there and count. If they then press Enter or click that form's
+    submit control, those keystrokes are offered as a password.
+  - **Which field the keys reach.** Nothing here stops a page from moving
+    focus between fields while the person types, so a password can be split
+    or merged across fields. Each character still is one the person typed.
+  - **The audit's N8b case** (the page swaps the typed password after the
+    person typed and before they submit) could be offered in the build
+    audited at 875acea. It is no longer: the swap is an input that does not
+    count, so nothing is offered.
+
+  The person still has to click Save, and the card shows the site and the
   username.
 - **Values:** never logged, never written to storage, never put in a badge,
   title, notification or error message, and never sent to the popup. A
@@ -255,14 +287,20 @@ browsing history" warning.
   the session from another DemiPass session. `runtime.setUninstallURL` is
   not used: it could only open a web page, and that page has no token to
   revoke.
-- **Logins entered by something other than the person's own keystrokes or
-  paste are not offered for saving.** That includes another password
-  manager's fill, the browser's own autofill, DemiPass's own fill, and
-  input methods that send no key, paste or composition events (some
-  dictation tools). This is deliberate: those look the same as a page
+- **Logins not entered by the person's own keys, paste, drop or IME
+  composition are not offered for saving.** That covers:
+  - another password manager's fill;
+  - the browser's own autofill;
+  - DemiPass's own fill;
+  - text committed with none of those events, which includes dictation and
+    some on-screen or mobile keyboards that insert text directly.
+
+  This is deliberate: to the content script they look the same as a page
   forging a value. Use **Add for this site** for them.
-- The submit capture covers native submits, clicks on sign-in buttons, and
-  Enter in a form-less password field. Multi-step logins that ask for the
+- The capture covers a click on a form's submit control or a sign-in
+  button, and Enter in a login form's field or a form-less password field.
+  A login sent only by page script (for example after a timer) is not
+  offered. Multi-step logins that ask for the
   username and password on separate pages capture only the password page's
   fields, so the username may be empty. The person can still save.
 - Selection text is whatever the browser reports as `selectionText`, trimmed.

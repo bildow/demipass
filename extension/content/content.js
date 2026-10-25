@@ -2,8 +2,9 @@
 //
 // It holds no token and never receives a value. It does two things:
 //  1. Tells the background whether this frame has a login form (no values).
-//  2. On login submit, hands the typed username + password straight to the
-//     background with runtime.sendMessage. The background keeps it in
+//  2. When the person sends a login form (their own click or Enter), hands
+//     the username + the password they typed straight to the background
+//     with runtime.sendMessage (rules below). The background keeps it in
 //     memory for a few minutes and stores it only if the person clicks Save in
 //     the extension popup. Nothing is injected into the page's DOM.
 (function () {
@@ -31,35 +32,89 @@
     send({ type: 'dp:frame', hasLogin: has });
   }
 
-  // A save is offered only for a password the person entered themselves.
-  // An input event counts only when all of these hold:
-  //  - it is trusted (not dispatchEvent);
-  //  - the page has transient user activation (navigator.userActivation);
-  //  - a trusted keydown, paste, drop or compositionend (IMEs) hit that same
-  //    field within the last second. execCommand('insertText') makes trusted
-  //    input events with no person involved; it makes none of those.
-  // At capture the field must still hold the value from its last counted
-  // input. So a page that sets .value, dispatches events, calls
-  // execCommand() or requestSubmit() on its own gets no SAVE prompt, and
-  // neither does a value DemiPass (or another password manager, or the
-  // browser's own autofill) put there; for those, "Add for this site".
-  // Every input field is tracked, not only type=password, so typing while a
-  // show-password toggle has made it type=text still counts.
-  const GESTURE_MS = 1000;
-  const gesture = new WeakMap(); // input -> time of the last trusted keydown / paste / drop on it
+  // ---- what counts as the person's own password --------------------------
+  // A save is offered only for a password the person entered themselves, at
+  // the moment they themselves sent the form. The rules:
+  //
+  //  1. One gesture, one edit. A trusted keydown (a character, Backspace or
+  //     Delete, without Ctrl/Meta), paste or drop on a field issues one
+  //     token for that field. The token lives until the end of the current
+  //     task. The next trusted input event on that field must spend it, and
+  //     must be the edit that gesture makes:
+  //       - a key K must give inputType 'insertText' with data === K;
+  //       - Backspace/Delete must give a delete;
+  //       - paste must give 'insertFromPaste', and drop 'insertFromDrop'.
+  //     Composition (IME) input counts while a trusted composition is open
+  //     on that field. The page must also have transient user activation.
+  //     So execCommand('insertText') counts never: not on its own, not from
+  //     a timer, and not nested inside the person's own keystroke, where the
+  //     token is already spent. Synthetic events and .value writes do not
+  //     count either. An input that does not count makes the field
+  //     "not the person's" until they type in it again.
+  //  2. The value sent is the one left by the field's last counted input.
+  //     If the page changed it since (a swap before submit), nothing is
+  //     offered.
+  //  3. Capture happens only on the person's own send: a trusted click on
+  //     the form's submit control or on a sign-in button, or a trusted
+  //     Enter in a field of that form (or in a form-less password field).
+  //     submit events are not used, so requestSubmit() and form.submit()
+  //     from page script offer nothing.
+  //  4. The password field must be rendered and visible at a usable size
+  //     (at least 16x8 CSS px, not hidden by CSS, display or opacity), so a
+  //     1px field that grabbed focus while the person typed elsewhere is
+  //     ignored.
+  // Every input field is tracked, whatever its type, so typing while a
+  // show-password toggle has made the field type=text still counts.
+  // Not offered, on purpose: another password manager's fill, the browser's
+  // autofill, DemiPass's own fill, and text committed with no key, paste,
+  // drop or composition (some dictation tools and on-screen keyboards). For
+  // those, "Add for this site".
+  const tokens = new WeakMap(); // input -> { kind, key }, valid for the current task only
+  const composing = new WeakSet(); // inputs with an open trusted composition
   const typed = new WeakMap(); // input -> value after its last counted input event
-  const noteGesture = (e) => {
-    if (e.isTrusted && e.target instanceof HTMLInputElement) gesture.set(e.target, Date.now());
+  const issue = (el, tok) => {
+    tokens.set(el, tok);
+    setTimeout(() => { if (tokens.get(el) === tok) tokens.delete(el); }, 0);
   };
-  for (const ev of ['keydown', 'paste', 'drop', 'compositionend']) window.addEventListener(ev, noteGesture, true);
+  window.addEventListener('keydown', (e) => {
+    const t = e.target;
+    if (!e.isTrusted || !(t instanceof HTMLInputElement) || e.ctrlKey || e.metaKey) return;
+    if (e.key.length === 1 || e.key === 'Backspace' || e.key === 'Delete') issue(t, { kind: 'key', key: e.key });
+  }, true);
+  window.addEventListener('paste', (e) => { if (e.isTrusted && e.target instanceof HTMLInputElement) issue(e.target, { kind: 'paste' }); }, true);
+  window.addEventListener('drop', (e) => { if (e.isTrusted && e.target instanceof HTMLInputElement) issue(e.target, { kind: 'drop' }); }, true);
+  window.addEventListener('compositionstart', (e) => { if (e.isTrusted && e.target instanceof HTMLInputElement) composing.add(e.target); }, true);
+  window.addEventListener('compositionend', (e) => {
+    if (!e.isTrusted || !(e.target instanceof HTMLInputElement)) return;
+    composing.delete(e.target);
+    issue(e.target, { kind: 'commit' }); // some browsers send the committing input after compositionend
+  }, true);
   const activated = () => !navigator.userActivation || navigator.userActivation.isActive;
+  function matches(tok, e) {
+    const it = e.inputType || '';
+    if (tok.kind === 'paste') return it === 'insertFromPaste';
+    if (tok.kind === 'drop') return it === 'insertFromDrop';
+    if (tok.kind === 'commit') return it === 'insertCompositionText' || it === 'insertFromComposition' || it === 'insertText';
+    if (tok.key === 'Backspace' || tok.key === 'Delete') return it.startsWith('delete');
+    return it === 'insertText' && e.data === tok.key;
+  }
   window.addEventListener('input', (e) => {
     const t = e.target;
     if (!e.isTrusted || !(t instanceof HTMLInputElement)) return;
-    const g = gesture.get(t);
-    if (g && Date.now() - g <= GESTURE_MS && activated()) typed.set(t, t.value);
+    const tok = tokens.get(t);
+    tokens.delete(t); // spent either way
+    const ime = composing.has(t) && (e.isComposing || /Composition/.test(e.inputType || ''));
+    if (activated() && (ime || (tok && matches(tok, e)))) typed.set(t, t.value);
     else typed.delete(t);
   }, true);
+
+  function usable(el) {
+    const r = el.getBoundingClientRect();
+    if (r.width < 16 || r.height < 8) return false;
+    if (typeof el.checkVisibility === 'function') return el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true, opacityProperty: true, visibilityProperty: true });
+    const cs = getComputedStyle(el);
+    return cs.visibility !== 'hidden' && Number(cs.opacity) > 0.05;
+  }
 
   let lastCapture = 0;
   function capture(form) {
@@ -68,36 +123,31 @@
     if (!f || !f.password) return;
     const pwEl = f.newPassword || f.password;
     const password = pwEl.value;
-    if (!password || typed.get(pwEl) !== password) return;
+    if (!password || typed.get(pwEl) !== password || !usable(pwEl)) return;
     const now = Date.now();
-    if (now - lastCapture < 800) return; // submit + click on the same action
+    if (now - lastCapture < 800) return; // one action, one capture
     lastCapture = now;
     const login = f.username ? String(f.username.value || '').trim() : '';
     send({ type: 'dp:capture', login, password });
   }
 
-  // Native form submit.
-  window.addEventListener('submit', (e) => {
-    if (!e.isTrusted) return; // dispatchEvent(new Event('submit'))
-    const form = e.target instanceof HTMLFormElement ? e.target : null;
-    capture(form);
-  }, true);
-
-  // Script-driven logins that never fire submit: a click on a submit-ish
-  // button, or Enter in a password field.
+  // The person's own send: a click on a submit control or a sign-in button.
   window.addEventListener('click', (e) => {
     if (!e.isTrusted) return; // element.click() / dispatched clicks
-    const t = e.target instanceof Element ? e.target.closest('button, input[type=submit], input[type=button], [role=button]') : null;
+    const t = e.target instanceof Element ? e.target.closest('button, input[type=submit], input[type=image], input[type=button], [role=button]') : null;
     if (!t) return;
-    if (t.form && t.type === 'submit') return; // the submit listener handles it
+    if (t.form && (t.type === 'submit' || t.type === 'image')) { capture(t.form); return; }
     const label = (t.textContent || t.value || '').toLowerCase();
     if (/log\s*in|sign\s*in|continue|submit|next|enter/.test(label)) capture(t.form || null);
   }, true);
 
+  // ... or Enter in a field of a login form, or in a form-less password field.
   window.addEventListener('keydown', (e) => {
-    if (!e.isTrusted || e.key !== 'Enter') return;
+    if (!e.isTrusted || e.key !== 'Enter' || e.isComposing) return;
     const t = e.target;
-    if (t instanceof HTMLInputElement && t.type === 'password' && !t.form) capture(null);
+    if (!(t instanceof HTMLInputElement)) return;
+    if (t.form) capture(t.form);
+    else if (t.type === 'password') capture(null);
   }, true);
 
   ext.runtime.onMessage.addListener((msg, _sender, sendResponse) => {

@@ -499,6 +499,36 @@ async function scenario(d, mock, step) {
     await page.close();
   });
 
+  const noBadge = async (page) => {
+    const tabId = await tabIdOf(page);
+    return d.extEval(async (t) => (globalThis.browser ?? globalThis.chrome).action.getBadgeText({ tabId: t }), tabId);
+  };
+
+  await step('typing in a search box while a 1px password field steals focus, then execCommand + requestSubmit: no SAVE prompt (audit N8)', async () => {
+    const page = await d.newPage(`${A}/piggy.html?p=${++seq}`);
+    await sleep(500);
+    await page.type('#q', 'weather tomorrow');
+    await sleep(600);
+    assert.equal(await page.eval(() => window.result), 'attacker-chosen', 'the page did run its swap + submit');
+    assert.equal(await noBadge(page), '');
+    await page.close();
+  });
+
+  for (const [what, pathName] of [['on a timer', '/swap.html'], ['nested inside the person\'s own keystroke', '/swap-sync.html']]) {
+    await step(`the page swaps the typed password (execCommand ${what}) before the person submits: nothing offered (audit N8b)`, async () => {
+      const page = await d.newPage(`${A}${pathName}?p=${++seq}`);
+      await sleep(500);
+      await page.type('#user', 'me@example.com');
+      await page.type('#pass', 'my-real-password');
+      await sleep(300);
+      assert.notEqual(await inputValue(page, '#pass'), 'my-real-password', 'the page did swap it');
+      await page.click('button[type=submit]');
+      await sleep(600);
+      assert.equal(await noBadge(page), '');
+      await page.close();
+    });
+  }
+
   await step('typed while a show-password toggle had the field as text, then hidden again: the save is offered (audit N3)', async () => {
     const page = await d.newPage(`${A}/toggle.html?p=${++seq}`);
     await sleep(500);
@@ -581,6 +611,32 @@ async function scenario(d, mock, step) {
     assert.equal(sec.value, 'new-multi-value');
     assert.deepEqual(sec.origins.sort(), [A, 'https://other.example'].sort());
     await pop.close(); await page.close();
+  });
+
+  await step('saving under a rotated name: the server\'s 409 is shown in full, the capture is kept, "Save to <current>" saves there (audit round 3)', async () => {
+    const user = 'rot@example.com';
+    const oldName = `localhost:${mock.sitePort} (${user})`;
+    const current = oldName + '_v2';
+    state.rotated = new Map([[oldName, current]]);
+    state.secrets.set('DP-PWD-rot-2', { name: current, value: 'old-rotated', secret_type: 'password', login: user, origins: ['https://other.example'] });
+    try {
+      const page = await d.newPage(login(A));
+      await saveOnSubmit(page, user, 'new-after-rotation');
+      const { pop } = await openPopupFor(page);
+      await waitVisible(pop, '#capture');
+      assert.equal(await inputValue(pop, '#cap-name'), oldName);
+      await pop.click('#cap-save');
+      await waitText(pop, '#cap-msg', new RegExp(`its current version is “${current.replace(/[().]/g, '\\$&')}”`));
+      assert.equal(await inputValue(pop, '#cap-name'), current);
+      assert.equal(await text(pop, '#cap-save'), `Save to “${current}”`);
+      assert.equal(state.secrets.get('DP-PWD-rot-2').value, 'old-rotated', 'nothing stored yet');
+      await pop.click('#cap-save'); // the pending capture is still there
+      await waitText(pop, '#cap-msg', /Saved as/);
+      const sec = state.secrets.get('DP-PWD-rot-2');
+      assert.equal(sec.value, 'new-after-rotation');
+      assert.deepEqual(sec.origins.sort(), [A, 'https://other.example'].sort());
+      await pop.close(); await page.close();
+    } finally { state.rotated = null; }
   });
 
   await step('an API base written to storage.local is ignored after a background restart; no request goes there (audit P5)', async () => {

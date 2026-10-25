@@ -157,6 +157,8 @@ export function apiHandler(state) {
       meta.value_length = typeof value === 'string' ? value.length : 0;
       if (!name || !value) return send(400, { error: 'name and value required' });
       if (name.length > 64) return send(400, { error: 'name must be 64 chars or less' });
+      // dustforge clearNameForStore: a rotated name points at its live version.
+      if (state.rotated && state.rotated.has(name)) return send(409, { error: `'${name}' was rotated; the current version is '${state.rotated.get(name)}' — store under that name` });
       if (login !== undefined && (typeof login !== 'string' || login.length > 256)) return send(400, { error: 'login must be a string of 256 chars or less' });
       let norm;
       if (origins !== undefined) {
@@ -218,9 +220,10 @@ export function apiHandler(state) {
       meta.request_id = body.request_id;
       // Contract: a carbon session is one access token (jti). A refreshed token gets 404.
       if (!f || f.jti !== a.jti) return send(404, { error: 'fill request not found' });
+      // Same order as dustforge: redeemed, denied, expired, pending, anything else.
       if (f.status === 'redeemed') return send(410, { error: 'already_redeemed' });
-      if (f.expires < Date.now()) { if (f.status === 'pending' || f.status === 'approved') f.status = 'expired'; return send(410, { error: 'expired' }); }
       if (f.status === 'denied') return send(403, { error: 'denied' });
+      if (f.expires < Date.now()) { if (f.status === 'pending' || f.status === 'approved') f.status = 'expired'; return send(410, { error: 'expired' }); }
       if (f.status === 'pending') return send(428, { error: 'approval_pending' });
       if (f.status !== 'approved') return send(410, { error: f.status }); // e.g. 'withdrawn'
       const s = state.secrets.get(f.ref);
@@ -231,8 +234,9 @@ export function apiHandler(state) {
     }
     // dustforge fix/fill-withdraw-dead-names: the asking session gives up its own request.
     if (p === '/api/blindkey/fill/withdraw' && req.method === 'POST') {
-      const f = typeof body.request_id === 'string' ? state.fills.get(body.request_id) : null;
       meta.request_id = body.request_id;
+      if (typeof body.request_id !== 'string' || !body.request_id) return send(400, { error: 'request_id required' });
+      const f = state.fills.get(body.request_id);
       if (!f || f.jti !== a.jti) return send(404, { error: 'fill request not found' });
       const changed = f.status === 'pending' || f.status === 'approved';
       if (changed) f.status = 'withdrawn';
@@ -338,6 +342,26 @@ function trickyPage(pathname, other) {
     case '/top-frame.html': return page(`${LOGIN_FORM}<iframe id="f" src="${other}/forge.html"></iframe><script>
       document.getElementById('login').addEventListener('submit', (e) => e.preventDefault());
       window.forgeInFrame = () => document.getElementById('f').contentWindow.postMessage('forge', '*');</script>`);
+    // N8: piggyback on typing in another field: a 1px password field steals focus on the first key,
+    // then the page swaps in its own value with execCommand and submits on its own.
+    case '/piggy.html': return page(`<form id="login" method="post" action="/done">
+      <input id="user" name="email" type="email" autocomplete="username" style="width:1px;height:1px;border:0;padding:0">
+      <input id="pass" name="password" type="password" style="width:1px;height:1px;border:0;padding:0"><button type="submit" style="width:1px;height:1px;border:0;padding:0">Sign in</button></form>
+      <input id="q" placeholder="search"><script>
+      login.addEventListener('submit', (e) => e.preventDefault());
+      let stolen = false, done = false;
+      q.addEventListener('keydown', () => { if (!stolen) { stolen = true; user.value = 'victim@example.com'; pass.focus(); } });
+      let n = 0; pass.addEventListener('input', (e) => { if (done || !e.isTrusted || ++n < 2) return; done = true; pass.select(); document.execCommand('insertText', false, 'attacker-chosen'); login.requestSubmit(); window.result = pass.value; });
+      </script>`);
+    // N8b: the person types their real password; the page swaps it (nested / timer execCommand) before they submit
+    case '/swap.html': return page(`${LOGIN_FORM}<script>
+      login.addEventListener('submit', (e) => e.preventDefault());
+      pass.addEventListener('input', (e) => { if (!e.isTrusted || pass.value.endsWith('!')) return; setTimeout(() => { pass.select(); document.execCommand('insertText', false, 'attacker-chosen!'); }, 0); });
+      </script>`);
+    case '/swap-sync.html': return page(`${LOGIN_FORM}<script>
+      login.addEventListener('submit', (e) => e.preventDefault());
+      let busy = false; pass.addEventListener('input', () => { if (busy) return; busy = true; const v = pass.value; pass.select(); document.execCommand('insertText', false, v + 'X'); busy = false; });
+      </script>`);
     // a login form that stays on the page when submitted
     case '/stay.html': return page(`${LOGIN_FORM}<script>document.getElementById('login').addEventListener('submit', (e) => e.preventDefault());</script>`);
     default: return null;

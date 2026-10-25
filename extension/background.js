@@ -7,7 +7,7 @@
 // in the in-memory `pending` map with a TTL) and nowhere else. It is never
 // logged, stored, put in a badge/title/notification, or sent to UI pages.
 
-import { ApiClient, ApiError, NotPairedError, requestAndWaitForFill, waitForPairing } from './lib/api.js';
+import { ApiClient, ApiError, NotPairedError, requestAndWaitForFill, waitForPairing, rotatedTo } from './lib/api.js';
 import { normalizeOrigin, normalizeApiBase, DEFAULT_API_BASE, suggestLoginName } from './lib/origin.js';
 import { extensionTokenStore, openSession } from './lib/token-store.js';
 import { ext, isGecko } from './lib/browser.js';
@@ -116,15 +116,6 @@ function dropPending(id) {
   p.value = null;
   pending.delete(id);
   if (p.kind === 'login') setSaveBadge(p.tabId, !!pendingLoginFor(p.tabId));
-}
-
-function takePending(id) {
-  const p = pending.get(id);
-  if (!p || p.expiresAt < Date.now()) { dropPending(id); return null; }
-  const value = p.value;
-  const meta = { kind: p.kind, login: p.login, origin: p.origin, tabId: p.tabId };
-  dropPending(id);
-  return { value, ...meta };
 }
 
 // The pending login save to offer for a tab: the top frame's if there is
@@ -512,6 +503,18 @@ async function nameConflict(name, replace) {
 // `origins`, which keeps the ones it has, and this page's origin is then
 // added with /origins mode 'add', so replacing a password never unbinds the
 // other sites it was bound to.
+// dustforge answers 409 when the name was rotated and points at the live
+// version ("store under that name"). That is not an error to swallow: the UI
+// offers "Save to <current>".
+async function storeOrRotated(entry) {
+  const name = entry.name;
+  try { return await storeEntry(entry); } catch (e) {
+    const current = e instanceof ApiError && e.status === 409 ? rotatedTo(e.code) : null;
+    if (current) return { ok: false, rotated: { name, current }, error: `“${name}” was rotated; its current version is “${current}”.` };
+    throw e;
+  }
+}
+
 async function saveEntry(entry, replaceConfirmed) {
   await ready;
   let existing;
@@ -521,10 +524,11 @@ async function saveEntry(entry, replaceConfirmed) {
     entry.value = null;
     return { ok: false, conflict: { name: entry.name, secret_type: existing.secret_type } };
   }
-  if (!existing) return storeEntry(entry);
+  if (!existing) return storeOrRotated(entry);
   const origins = entry.origins || [];
   delete entry.origins;
-  const out = await storeEntry(entry);
+  const out = await storeOrRotated(entry);
+  if (!out.ok) return out;
   if (origins.length) {
     try { await client.addOrigins(out.name || entry.name, origins); } catch {
       // The value is replaced already; only the binding step failed. Say exactly that.
@@ -651,18 +655,18 @@ async function handleUi(msg) {
     case 'ui:savePending': {
       const name = cleanName(msg.name);
       const types = new Set(['api_key', 'oauth_token', 'password', 'other']);
-      const p0 = pending.get(msg.id);
-      if (!p0 || p0.expiresAt < Date.now()) throw new UserError('This save has expired.');
-      // Check the name before taking the value, so a "replace?" answer can come back for it.
+      const p = pending.get(msg.id);
+      if (!p || p.expiresAt < Date.now()) throw new UserError('This save has expired.');
+      // The pending value stays until the store succeeds, so a conflict, a
+      // rotated-name 409 or any error can be retried (under another name).
       const conflict = await nameConflict(name, msg.replace === true);
       if (conflict) return conflict;
-      const p = takePending(msg.id);
-      if (!p) throw new UserError('This save has expired.');
       const entry = { name, value: p.value, secret_type: p.kind === 'login' ? 'password' : (types.has(msg.secret_type) ? msg.secret_type : 'api_key') };
       if (p.kind === 'login') { entry.login = p.login; entry.origins = [p.origin]; }
       else if (msg.bindOrigin && p.origin) entry.origins = [p.origin];
-      p.value = null;
-      return saveEntry(entry, true);
+      const out = await saveEntry(entry, true);
+      if (out.ok || out.partial) dropPending(msg.id); // stored (a partial one too): the value is in the vault now
+      return out;
     }
     case 'ui:dismissPending':
       dropPending(msg.id);

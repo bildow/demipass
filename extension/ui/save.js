@@ -40,6 +40,15 @@ $('form').addEventListener('submit', async (e) => {
     if (btn) btn.disabled = false;
     return;
   }
+  if (r && r.rotated) {
+    $('name').value = r.rotated.current;
+    replaceName = r.rotated.current;
+    $('store').textContent = `Store as “${r.rotated.current}”`;
+    $('msg').textContent = `“${r.rotated.name}” was rotated; its current version is “${r.rotated.current}”. Store there instead?`;
+    $('msg').className = 'err';
+    if (btn) btn.disabled = false;
+    return;
+  }
   if (r && r.ok) {
     $('form').hidden = true;
     $('msg').textContent = `Stored as “${r.name}” (${r.ref}).`;

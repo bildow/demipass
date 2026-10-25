@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ApiClient, ApiError, NotPairedError, jwtClaims, waitForFill, waitForPairing, requestAndWaitForFill } from '../lib/api.js';
+import { ApiClient, ApiError, NotPairedError, jwtClaims, waitForFill, waitForPairing, requestAndWaitForFill, rotatedTo } from '../lib/api.js';
 import { startMock, createMockState, approveDevice, phoneDecide, expireAccessTokens } from './mock-server.js';
 
 const b64u = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
@@ -559,4 +559,32 @@ test('a sign-out landing between the generation check and the write still wins',
   await assert.rejects(c.persist(c.generation, 'rt-new', jwt({ exp: future(), jti: 'n' })), NotPairedError);
   assert.equal(tokens.refresh, null);
   assert.equal(tokens.access, null);
+});
+
+// ---- rotated names (audit round 3) -------------------------------------------------
+
+test("a 409 for a rotated name keeps the server's whole message, and rotatedTo finds the current version", async () => {
+  const name = 'accounts.example.com (alice.longer.address@example.com)';
+  const msg = `'${name}' was rotated; the current version is '${name}_v2' — store under that name`;
+  assert.ok(msg.length > 120);
+  const fetch = scripted({ 'POST /api/blindkey/store': [[409, { error: msg }]] });
+  const c = new ApiClient({ base: 'https://api.test', fetch, tokens: memTokens({ access: jwt({ exp: future(), jti: 'j' }), refresh: 'r' }) });
+  await assert.rejects(c.store({ name, value: 'v', secret_type: 'password' }), (e) => e instanceof ApiError && e.status === 409 && e.code === msg);
+  assert.equal(rotatedTo(msg), `${name}_v2`);
+  assert.equal(rotatedTo("'x' is being rotated; store under its new version"), null);
+  assert.equal(rotatedTo(null), null);
+});
+
+test('against the mock: withdraw without a request_id is 400; a denied request stays denied after it expires', async (t) => {
+  const m = await startMock({ state: createMockState() });
+  t.after(() => m.close());
+  const { state } = m;
+  const s = (await import('./mock-server.js')).mintSession(state);
+  const c = new ApiClient({ base: m.apiBase, fetch, tokens: memTokens({ access: s.token, refresh: s.refresh_token }) });
+  assert.equal((await c.call('POST', '/api/blindkey/fill/withdraw', {})).status, 400);
+  await c.store({ name: 'd', value: 'pw', secret_type: 'password', origins: ['https://a.test'] });
+  const req = await c.requestFill([...state.secrets.keys()][0], 'https://a.test', 'x');
+  await phoneDecide(m.apiBase, state, req.request_id, 'deny');
+  state.fills.get(req.request_id).expires = Date.now() - 1;
+  assert.deepEqual(await c.redeemOnce(req.request_id, req.jti), { state: 'denied' });
 });

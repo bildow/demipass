@@ -31,7 +31,9 @@ export class NotPairedError extends Error {
 const AUTH_REJECT_403 = new Set(['admin access or Bearer token required']);
 
 function errCode(body) {
-  return body && typeof body.error === 'string' ? body.error.slice(0, 120) : null;
+  // Long enough for every server message the person needs to act on (a 409
+  // for a rotated name quotes two 64-character names).
+  return body && typeof body.error === 'string' ? body.error.slice(0, 400) : null;
 }
 
 // exp (seconds) from a JWT payload, or null. Not a verification — only used
@@ -360,6 +362,13 @@ export class ApiClient {
     }
     throw new ApiError(r.status, code || 'redeem_failed');
   }
+}
+
+// dustforge's 409 for a rotated name: "'X' was rotated; the current version
+// is 'X_v2' — store under that name". -> 'X_v2', or null.
+export function rotatedTo(code) {
+  const m = /was rotated; the current version is '(.{1,64})' — store under that name/.exec(String(code || ''));
+  return m ? m[1] : null;
 }
 
 export const FILL_MIN_TOKEN_MS = 5 * 60 * 1000;

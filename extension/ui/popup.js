@@ -218,6 +218,15 @@ const TYPE_TEXT = { password: 'password', api_key: 'API key', oauth_token: 'toke
 function conflictText(c) {
   return `“${c.name}” already exists in your vault (${TYPE_TEXT[c.secret_type] || c.secret_type || 'secret'}). Saving replaces its value. Click Replace to do that, or change the name.`;
 }
+// The server said the name was rotated and named its current version: put
+// that name in the box and make the button "Save to <current>", which
+// replaces the current version (keeping its origins, adding this one).
+function offerRotated(rot, nameId, btnId, msgId, setReplace) {
+  $(nameId).value = rot.current;
+  setReplace(rot.current);
+  $(btnId).textContent = `Save to “${rot.current}”`;
+  setMsg($(msgId), `“${rot.name}” was rotated; its current version is “${rot.current}”. Save there instead?`, 'err');
+}
 let capReplace = null;
 let addReplace = null;
 $('cap-name').addEventListener('input', () => { capReplace = null; $('cap-save').textContent = 'Save to DemiPass'; });
@@ -233,6 +242,7 @@ $('cap-save').addEventListener('click', async () => {
   $('cap-save').disabled = false;
   if (r && r.ok) { setMsg($('cap-msg'), `Saved as “${r.name}”.`, 'ok'); $('cap-name').value = ''; capReplace = null; setTimeout(refresh, 600); }
   else if (r && r.conflict) { capReplace = r.conflict.name; $('cap-save').textContent = 'Replace'; setMsg($('cap-msg'), conflictText(r.conflict), 'err'); }
+  else if (r && r.rotated) offerRotated(r.rotated, 'cap-name', 'cap-save', 'cap-msg', (n) => { capReplace = n; });
   else setMsg($('cap-msg'), (r && r.error) || 'Save failed.', 'err');
 });
 
@@ -249,6 +259,7 @@ $('add-form').addEventListener('submit', async (e) => {
   // origin: what this popup showed; the background refuses if the tab has moved on.
   const r = await send({ type: 'ui:addManual', tabId, origin: ctx && ctx.topOrigin, name, login: $('add-login').value, password: pw.value, replace: addReplace === name });
   if (r && r.conflict) { addReplace = r.conflict.name; $('add-submit').textContent = 'Replace'; setMsg($('add-msg'), conflictText(r.conflict), 'err'); return; }
+  if (r && r.rotated) { offerRotated(r.rotated, 'add-name', 'add-submit', 'add-msg', (n) => { addReplace = n; }); return; }
   pw.value = '';
   addReplace = null; $('add-submit').textContent = 'Add';
   if (r && r.ok) { setMsg($('add-msg'), `${r.replaced ? 'Replaced' : 'Added'} “${r.name}”.`, 'ok'); $('add-name').value = ''; $('add-login').value = ''; await refresh(); }

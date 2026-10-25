@@ -44,7 +44,13 @@ export async function launchChromium({ extDir, work, executablePath, label }) {
       goto: (url) => page.goto(url),
       fill: (sel, value) => page.fill(sel, value),
       // Real key presses (keydown/keyup per character), as a person typing.
-      type: async (sel, value) => { await page.fill(sel, ''); await page.locator(sel).pressSequentially(value); },
+      // Keys go to whatever has focus after the first one, as for a person.
+      // (Cleared first only if it holds something: clearing sends key events of its own.)
+      type: async (sel, value) => {
+        if (await page.inputValue(sel)) await page.fill(sel, '');
+        await page.focus(sel);
+        await page.keyboard.type(value, { delay: 10 });
+      },
       click: (sel) => page.click(sel),
       clickAndWaitUrl: (sel, re) => Promise.all([page.waitForURL(re), page.click(sel)]),
       eval: (fn, arg) => page.evaluate(fn, arg),
