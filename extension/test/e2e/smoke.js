@@ -25,6 +25,7 @@
 // Nothing else is changed.
 
 import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import http from 'node:http';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
@@ -286,7 +287,18 @@ async function scenario(d, mock, step) {
     await pop.close(); await pageB.close();
   });
 
-  await step('page navigates to another origin while waiting: request is never redeemed, nothing filled', async () => {
+  // The abandoned request is withdrawn (denied by this session), so the
+  // phone does not keep a dead card and the 20-waiting limit is not eaten.
+  async function assertWithdrawn(reqId) {
+    const end = Date.now() + 8000;
+    while (state.fills.get(reqId).status === 'pending' && Date.now() < end) await sleep(100);
+    assert.equal(state.fills.get(reqId).status, 'denied', 'withdrawn from the phone');
+    const id = state.fills.get(reqId).id;
+    assert.ok(state.calls.some((c) => c.meta.fill_id === id && c.meta.decision === 'deny' && c.meta.own_session === true && c.status === 200), 'denied by the extension\'s own session');
+    assert.equal(state.calls.some((c) => c.path === '/api/blindkey/fill/redeem' && c.meta.request_id === reqId && c.status === 200), false, 'never redeemed');
+  }
+
+  await step('page navigates to another origin while waiting: nothing filled, request withdrawn from the phone', async () => {
     const page = await d.newPage(login(A));
     const { pop } = await openPopupFor(page);
     await pop.click(fillBtn());
@@ -294,14 +306,12 @@ async function scenario(d, mock, step) {
     const [reqId] = [...state.fills].find(([, x]) => x.status === 'pending');
     await page.goto(login(B));
     await waitText(pop, '#fill-msg', /page changed/);
-    await phoneDecide(mock.apiBase, state, reqId, 'approve');
-    await sleep(2500);
-    assert.equal(state.fills.get(reqId).status, 'approved', 'approved but never redeemed');
+    await assertWithdrawn(reqId);
     assert.equal(await inputValue(page, '#pass'), '');
     await pop.close(); await page.close();
   });
 
-  await step('page reloads (same origin, new document) while waiting: nothing filled', async () => {
+  await step('page reloads (same origin, new document) while waiting: nothing filled, request withdrawn', async () => {
     const page = await d.newPage(login(A));
     const { pop } = await openPopupFor(page);
     await pop.click(fillBtn());
@@ -309,10 +319,118 @@ async function scenario(d, mock, step) {
     const [reqId] = [...state.fills].find(([, x]) => x.status === 'pending');
     await page.goto(await page.url()); // same URL, same origin: a new document
     await waitText(pop, '#fill-msg', /page changed/);
-    await phoneDecide(mock.apiBase, state, reqId, 'approve');
-    await sleep(2500);
-    assert.notEqual(state.fills.get(reqId).status, 'redeemed');
+    await assertWithdrawn(reqId);
     assert.equal(await inputValue(page, '#pass'), '');
+    await pop.close(); await page.close();
+  });
+
+  // Audit P1: same document, so an approved fill must still land.
+  const sameDocCases = [
+    ['pushState', '/spa.html', (pg) => pg.eval(() => { window.pushNow(); return true; })],
+    ['location.hash change', '/spa.html', (pg) => pg.eval(() => { location.hash = 'step2'; return true; })],
+    ['a cross-origin ad iframe reloading', '/ads.html', (pg) => pg.eval(() => { window.rotate(); return true; })],
+  ];
+  for (const [what, pathName, during] of sameDocCases) {
+    await step(`${what} while waiting (same document): the approved fill still lands`, async () => {
+      const page = await d.newPage(`${A}${pathName}?p=${++seq}`);
+      const { pop } = await openPopupFor(page);
+      await pop.click(fillBtn());
+      await waitText(pop, '#fill-msg', /Approve on your phone/);
+      await during(page);
+      await sleep(2500); // a few polls (and liveness checks) while it happens
+      const [reqId] = [...state.fills].find(([, x]) => x.status === 'pending');
+      assert.equal(await phoneDecide(mock.apiBase, state, reqId, 'approve'), 200);
+      await waitText(pop, '#fill-msg', /^Filled\.$/);
+      assert.equal(await inputValue(page, '#pass'), SECRET_MANUAL);
+      await pop.close(); await page.close();
+    });
+  }
+
+  await step('fill into a cross-origin iframe (frame target, its own origin binding)', async () => {
+    state.secrets.set('DP-PWD-frame-1', { name: 'frame-login', value: 'frame-secret-value', secret_type: 'password', login: 'f@example.com', origins: [B] });
+    const page = await d.newPage(`${A}/top-frame.html?p=${++seq}`);
+    await sleep(800);
+    const { pop } = await openPopupFor(page);
+    const btn = '#entry-list button[data-ref="DP-PWD-frame-1"]';
+    await waitVisible(pop, btn);
+    assert.match(await pop.eval(() => document.querySelector('#entry-list').textContent), /in frame http:\/\/127\.0\.0\.1/);
+    await pop.click(btn);
+    await waitText(pop, '#fill-msg', /Approve on your phone/);
+    const [reqId, f] = [...state.fills].find(([, x]) => x.status === 'pending');
+    assert.equal(f.origin, B, 'requested for the frame\'s origin');
+    await phoneDecide(mock.apiBase, state, reqId, 'approve');
+    await waitText(pop, '#fill-msg', /^Filled\.$/);
+    assert.equal(await inputValue(page, '#pass'), '', 'the top frame is untouched');
+    const inFrame = await d.frameInputValue(page, '#f', '#pass');
+    assert.equal(inFrame, 'frame-secret-value');
+    await pop.close(); await page.close();
+  });
+
+  await step('"Add for this site": the tab moved to another origin before Add -> refused, nothing stored (audit P4)', async () => {
+    const page = await d.newPage(login(A));
+    const { pop } = await openPopupFor(page);
+    await waitVisible(pop, '#add');
+    await pop.fill('#add-name', 'race-probe');
+    await pop.fill('#add-login', 'me@example.com');
+    await pop.fill('#add-password', 'typed-for-site-A');
+    await page.goto(login(B));
+    await sleep(800);
+    await pop.click('#add-form button[type=submit]');
+    await waitText(pop, '#add-msg', /not the site shown/);
+    assert.equal([...state.secrets.values()].some((x) => x.name === 'race-probe'), false);
+    await pop.close(); await page.close();
+  });
+
+  await step('"Add for this site" under an existing name asks first; Replace keeps its other bound origins', async () => {
+    state.secrets.set('DP-PWD-shared-1', { name: 'shared-login', value: 'old-value', secret_type: 'password', login: 'me@example.com', origins: ['https://other.example'] });
+    const page = await d.newPage(login(A));
+    const { pop } = await openPopupFor(page);
+    await waitVisible(pop, '#add');
+    await pop.fill('#add-name', 'shared-login');
+    await pop.fill('#add-password', 'new-value');
+    const stores = () => state.calls.filter((c) => c.path === '/api/blindkey/store').length;
+    const before = stores();
+    await pop.click('#add-form button[type=submit]');
+    await waitText(pop, '#add-msg', /already exists in your vault/);
+    assert.equal(await text(pop, '#add-submit'), 'Replace');
+    assert.equal(stores(), before, 'nothing stored before Replace');
+    await pop.click('#add-form button[type=submit]');
+    await waitText(pop, '#add-msg', /Replaced/);
+    const sec = state.secrets.get('DP-PWD-shared-1');
+    assert.equal(sec.value, 'new-value');
+    assert.deepEqual(sec.origins.sort(), [A, 'https://other.example'].sort(), 'origins merged, not replaced');
+    await pop.close(); await page.close();
+  });
+
+  await step('a page-forged login (script value + requestSubmit, synthetic events) gets no SAVE prompt (audit P2)', async () => {
+    const page = await d.newPage(`${A}/forge.html?p=${++seq}`);
+    await sleep(500);
+    await page.eval(() => { window.forge('attacker-chosen-1'); return true; });
+    await page.eval(() => { window.forgeEvents('attacker-chosen-2'); return true; });
+    await sleep(500);
+    const tabId = await tabIdOf(page);
+    const badge = await d.extEval(async (t) => (globalThis.browser ?? globalThis.chrome).action.getBadgeText({ tabId: t }), tabId);
+    assert.equal(badge, '');
+    const { pop } = await openPopupFor(page);
+    await waitVisible(pop, '#add');
+    assert.equal(await isVisible(pop, '#capture'), false);
+    await pop.close(); await page.close();
+  });
+
+  await step('a cross-origin iframe cannot replace the top frame\'s pending save (audit P3)', async () => {
+    const page = await d.newPage(`${A}/top-frame.html?p=${++seq}`);
+    await sleep(800);
+    await page.fill('#user', 'alice@example.com');
+    await page.fill('#pass', 'typed-by-the-person');
+    await page.click('button[type=submit]'); // the page keeps the person here
+    await sleep(500);
+    await page.eval(() => { window.forgeInFrame(); return true; });
+    await sleep(800);
+    const { pop } = await openPopupFor(page);
+    await waitVisible(pop, '#capture');
+    assert.equal(await text(pop, '#cap-origin'), A);
+    assert.equal(await text(pop, '#cap-user'), 'alice@example.com');
+    await pop.click('#cap-dismiss');
     await pop.close(); await page.close();
   });
 
@@ -349,6 +467,41 @@ async function scenario(d, mock, step) {
     await saveOnSubmit(page, 'typed@example.com', SECRET_TYPED);
     await saveFromPopup(page, 'typed@example.com', SECRET_TYPED);
     await page.close();
+  });
+
+  await step('save on submit replacing a saved login keeps every origin it was bound to (audit: capture path)', async () => {
+    state.secrets.set('DP-PWD-multi-1', { name: 'multi-site', value: 'old-multi', secret_type: 'password', login: 'multi@example.com', origins: [A, 'https://other.example'] });
+    const page = await d.newPage(login(A));
+    await saveOnSubmit(page, 'multi@example.com', 'new-multi-value');
+    const { pop } = await openPopupFor(page);
+    await waitVisible(pop, '#capture');
+    assert.match(await text(pop, '#cap-existing'), /Replaces the saved password in “multi-site”/);
+    assert.equal(await inputValue(pop, '#cap-name'), 'multi-site');
+    await pop.click('#cap-save');
+    await waitText(pop, '#cap-msg', /Saved as “multi-site”/);
+    const sec = state.secrets.get('DP-PWD-multi-1');
+    assert.equal(sec.value, 'new-multi-value');
+    assert.deepEqual(sec.origins.sort(), [A, 'https://other.example'].sort());
+    await pop.close(); await page.close();
+  });
+
+  await step('an API base written to storage.local is ignored after a background restart; no request goes there (audit P5)', async () => {
+    const seen = [];
+    const evil = await new Promise((r) => { const sv = http.createServer((req, res) => { seen.push(req.url); req.resume(); res.writeHead(500, { 'Access-Control-Allow-Origin': '*' }); res.end('{}'); }); sv.listen(0, '127.0.0.1', () => r(sv)); });
+    try {
+      const EVIL = `http://127.0.0.1:${evil.address().port}`;
+      // storage.local is what a content script (or a compromised renderer) can write.
+      await d.extEval(async (u) => { await (globalThis.browser ?? globalThis.chrome).storage.local.set({ dp_api_base: u }); return true; }, EVIL);
+      await d.restartBackground();
+      await sleep(500);
+      const { pop } = await openPopupFor(pageA);
+      await waitVisible(pop, fillBtn()); // still paired, still talking to the mock
+      assert.equal(await text(pop, '#dev'), `Dev server: ${mock.apiBase}`);
+      await pop.close();
+      assert.deepEqual(seen, [], 'nothing was sent to the base from storage.local');
+      const local = (await storageDump()).local;
+      assert.equal('dp_api_base' in local, false, 'the stray key is deleted');
+    } finally { evil.close(); }
   });
 
   if (d.supportsIdleControl) {

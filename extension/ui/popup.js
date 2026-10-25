@@ -208,13 +208,31 @@ $('signout').addEventListener('click', async () => {
   await refresh();
 });
 
+// A save under a name that already exists replaces that secret's value. The
+// background answers { conflict } instead of saving; the button then turns
+// into "Replace" for that exact name, and only a second click sends replace.
+// The capture card's "Replaces the saved password in X" line is that warning
+// already, so saving under that shown name counts as confirmed.
+const TYPE_TEXT = { password: 'password', api_key: 'API key', oauth_token: 'token', other: 'secret' };
+function conflictText(c) {
+  return `“${c.name}” already exists in your vault (${TYPE_TEXT[c.secret_type] || c.secret_type || 'secret'}). Saving replaces its value. Click Replace to do that, or change the name.`;
+}
+let capReplace = null;
+let addReplace = null;
+$('cap-name').addEventListener('input', () => { capReplace = null; $('cap-save').textContent = 'Save to DemiPass'; });
+$('add-name').addEventListener('input', () => { addReplace = null; $('add-submit').textContent = 'Add'; });
+
 $('cap-save').addEventListener('click', async () => {
   const pl = ctx && ctx.pendingLogin;
   if (!pl) return;
+  const name = $('cap-name').value;
+  const replace = capReplace === name || (!!pl.existing && name === pl.existing);
   $('cap-save').disabled = true;
-  const r = await send({ type: 'ui:savePending', id: pl.id, name: $('cap-name').value });
-  if (r && r.ok) { setMsg($('cap-msg'), `Saved as “${r.name}”.`, 'ok'); $('cap-name').value = ''; setTimeout(refresh, 600); }
-  else { setMsg($('cap-msg'), (r && r.error) || 'Save failed.', 'err'); $('cap-save').disabled = false; }
+  const r = await send({ type: 'ui:savePending', id: pl.id, name, replace });
+  $('cap-save').disabled = false;
+  if (r && r.ok) { setMsg($('cap-msg'), `Saved as “${r.name}”.`, 'ok'); $('cap-name').value = ''; capReplace = null; setTimeout(refresh, 600); }
+  else if (r && r.conflict) { capReplace = r.conflict.name; $('cap-save').textContent = 'Replace'; setMsg($('cap-msg'), conflictText(r.conflict), 'err'); }
+  else setMsg($('cap-msg'), (r && r.error) || 'Save failed.', 'err');
 });
 
 $('cap-dismiss').addEventListener('click', async () => {
@@ -226,9 +244,13 @@ $('cap-dismiss').addEventListener('click', async () => {
 $('add-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const pw = $('add-password');
-  const r = await send({ type: 'ui:addManual', tabId, name: $('add-name').value, login: $('add-login').value, password: pw.value });
+  const name = $('add-name').value;
+  // origin: what this popup showed; the background refuses if the tab has moved on.
+  const r = await send({ type: 'ui:addManual', tabId, origin: ctx && ctx.topOrigin, name, login: $('add-login').value, password: pw.value, replace: addReplace === name });
+  if (r && r.conflict) { addReplace = r.conflict.name; $('add-submit').textContent = 'Replace'; setMsg($('add-msg'), conflictText(r.conflict), 'err'); return; }
   pw.value = '';
-  if (r && r.ok) { setMsg($('add-msg'), `Added “${r.name}”.`, 'ok'); $('add-name').value = ''; $('add-login').value = ''; await refresh(); }
+  addReplace = null; $('add-submit').textContent = 'Add';
+  if (r && r.ok) { setMsg($('add-msg'), `${r.replaced ? 'Replaced' : 'Added'} “${r.name}”.`, 'ok'); $('add-name').value = ''; $('add-login').value = ''; await refresh(); }
   else setMsg($('add-msg'), (r && r.error) || 'Add failed.', 'err');
 });
 

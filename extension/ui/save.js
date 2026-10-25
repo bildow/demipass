@@ -21,11 +21,25 @@ const send = (msg) => ext.runtime.sendMessage(msg);
   $('name').focus();
 })();
 
+// Storing under an existing name replaces it: the first answer is a
+// conflict, and only a second click on "Replace" (same name) sends replace.
+let replaceName = null;
+$('name').addEventListener('input', () => { replaceName = null; $('store').textContent = 'Store'; });
+
 $('form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const btn = e.submitter;
   if (btn) btn.disabled = true;
-  const r = await send({ type: 'ui:savePending', id, name: $('name').value, secret_type: $('type').value, bindOrigin: $('bind').checked });
+  const name = $('name').value;
+  const r = await send({ type: 'ui:savePending', id, name, secret_type: $('type').value, bindOrigin: $('bind').checked, replace: replaceName === name });
+  if (r && r.conflict) {
+    replaceName = r.conflict.name;
+    $('store').textContent = 'Replace';
+    $('msg').textContent = `“${r.conflict.name}” already exists in your vault (${r.conflict.secret_type || 'secret'}). Storing replaces its value. Click Replace to do that, or change the name.`;
+    $('msg').className = 'err';
+    if (btn) btn.disabled = false;
+    return;
+  }
   if (r && r.ok) {
     $('form').hidden = true;
     $('msg').textContent = `Stored as “${r.name}” (${r.ref}).`;

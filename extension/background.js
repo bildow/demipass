@@ -9,7 +9,7 @@
 
 import { ApiClient, ApiError, NotPairedError, requestAndWaitForFill, waitForPairing } from './lib/api.js';
 import { normalizeOrigin, normalizeApiBase, DEFAULT_API_BASE, suggestLoginName } from './lib/origin.js';
-import { extensionTokenStore } from './lib/token-store.js';
+import { extensionTokenStore, openSession } from './lib/token-store.js';
 import { ext, isGecko } from './lib/browser.js';
 import { senderFrame, injectionTarget, injectedFill, sitePermissionPattern, originsCover, coversAllSites } from './lib/compat.js';
 
@@ -23,13 +23,17 @@ const tokens = extensionTokenStore(ext);
 let apiBase = DEFAULT_API_BASE;
 let client = new ApiClient({ base: apiBase, fetch: (...a) => fetch(...a), tokens });
 
+// The API base comes from the extension's IndexedDB, never from storage.local
+// (content scripts can write that), and the stored session must have been
+// issued by it; see openSession() in lib/token-store.js.
 const ready = (async () => {
-  const r = await ext.storage.local.get('dp_api_base');
-  const base = normalizeApiBase(r.dp_api_base);
-  if (base && base !== apiBase) {
-    apiBase = base;
-    client = new ApiClient({ base, fetch: (...a) => fetch(...a), tokens });
-  }
+  const { base } = await openSession(tokens, ext, {
+    normalize: normalizeApiBase,
+    defaultBase: DEFAULT_API_BASE,
+    revoke: (issuer, rt) => new ApiClient({ base: issuer, fetch: (...a) => fetch(...a), tokens }).raw('POST', '/api/identity/refresh/revoke', { refresh_token: rt }),
+  });
+  apiBase = base;
+  client = new ApiClient({ base, fetch: (...a) => fetch(...a), tokens });
 })();
 
 // ---- keepalive ---------------------------------------------------------------
@@ -67,13 +71,24 @@ function recordFrame(f, hasLogin) {
   m.set(f.key, { frameId: f.frameId, documentId: f.documentId, nonce: f.nonce, origin: f.origin, hasLogin: !!hasLogin });
 }
 
+// A document that is going away (navigation, reload, iframe removed) says so
+// from pagehide; its record goes. Same-document changes (pushState, hash)
+// fire no pagehide and keep the record. A missed pagehide is caught by the
+// liveness check before every redeem and by documentIds/nonce at injection.
+function forgetFrame(f) {
+  const m = frames.get(f.tabId);
+  if (m) m.delete(f.key);
+}
+
 ext.tabs.onRemoved.addListener((tabId) => {
   frames.delete(tabId);
   for (const [id, p] of pending) if (p.tabId === tabId) dropPending(id);
 });
 
 // ---- pending ingress (memory only, short TTL) -------------------------------
-// id -> { kind: 'login' | 'selection', value, login, origin, tabId, expiresAt, timer }
+// id -> { kind: 'login' | 'selection', value, login, origin, tabId, frameId, expiresAt, timer }
+// A login save is kept per (tab, frame): a frame can only replace its own
+// pending save, and the popup offers the top frame's first.
 const pending = new Map();
 
 function newId() {
@@ -82,7 +97,7 @@ function newId() {
 
 function addPending(item) {
   if (item.kind === 'login') {
-    for (const [id, p] of pending) if (p.kind === 'login' && p.tabId === item.tabId) dropPending(id);
+    for (const [id, p] of pending) if (p.kind === 'login' && p.tabId === item.tabId && p.frameId === item.frameId) dropPending(id);
   }
   while (pending.size >= MAX_PENDING) dropPending(pending.keys().next().value);
   const id = newId();
@@ -100,7 +115,7 @@ function dropPending(id) {
   clearTimeout(p.timer);
   p.value = null;
   pending.delete(id);
-  if (p.kind === 'login') setSaveBadge(p.tabId, false);
+  if (p.kind === 'login') setSaveBadge(p.tabId, !!pendingLoginFor(p.tabId));
 }
 
 function takePending(id) {
@@ -112,11 +127,16 @@ function takePending(id) {
   return { value, ...meta };
 }
 
+// The pending login save to offer for a tab: the top frame's if there is
+// one, else the most recent from a subframe.
 function pendingLoginFor(tabId) {
+  let best = null;
   for (const [id, p] of pending) {
-    if (p.kind === 'login' && p.tabId === tabId && p.expiresAt > Date.now()) return { id, origin: p.origin, login: p.login };
+    if (p.kind !== 'login' || p.tabId !== tabId || p.expiresAt <= Date.now()) continue;
+    const cand = { id, origin: p.origin, login: p.login, frameId: p.frameId, at: p.expiresAt };
+    if (!best || (cand.frameId === 0) > (best.frameId === 0) || ((cand.frameId === 0) === (best.frameId === 0) && cand.at > best.at)) best = cand;
   }
-  return null;
+  return best && { id: best.id, origin: best.origin, login: best.login, frameId: best.frameId };
 }
 
 function setSaveBadge(tabId, on) {
@@ -125,10 +145,11 @@ function setSaveBadge(tabId, on) {
   if (on) ext.action.setBadgeBackgroundColor({ tabId, color: '#2563eb' }).catch(() => {});
 }
 
+// No frame records are dropped on status 'loading': Chromium reports it for
+// pushState, hash changes and subframe loads too, which would refuse a fill
+// the person already approved. Documents leave the map through pagehide
+// (forgetFrame), replacement by frameId (recordFrame) and tab close.
 ext.tabs.onUpdated.addListener((tabId, info) => {
-  // A top-level navigation replaces every document in the tab; the new ones
-  // announce themselves again. An in-flight fill for an old document is refused.
-  if (info.status === 'loading') frames.delete(tabId);
   if (info.status === 'complete' && pendingLoginFor(tabId)) setSaveBadge(tabId, true);
 });
 
@@ -317,8 +338,31 @@ async function pageContext(tabId) {
 }
 
 // ---- fill ------------------------------------------------------------------
-// fillId -> { state, origin, name, error, cancelled }
+// fillId -> { state, origin, name, error, cancelled, ref, request }
 const fills = new Map();
+
+// Is the recorded document still there, the same document, on the same origin?
+// Asked in the frame itself (isolated world) before every redeem.
+async function documentAlive(tabId, rec) {
+  try {
+    const [res] = await ext.scripting.executeScript({
+      target: injectionTarget(tabId, rec),
+      func: (nonce, origin) => globalThis.__demipassDoc === nonce && location.origin === origin,
+      args: [rec.nonce, rec.origin],
+    });
+    return !!(res && res.result === true);
+  } catch {
+    return false; // gone, navigated, or no longer scriptable
+  }
+}
+
+// A request this extension stopped waiting for is withdrawn, so its card
+// leaves the phone instead of piling up toward the 20-waiting limit.
+function withdraw(job, origin) {
+  if (!job.request || job.request.withdrawn) return;
+  job.request.withdrawn = true;
+  client.withdrawFill({ ref: job.ref, origin }).catch(() => {});
+}
 
 // injectedFill (lib/compat.js) runs inside the target frame, in the
 // extension's isolated world. Its origin and document-nonce checks run in the
@@ -327,13 +371,15 @@ const fills = new Map();
 
 function startFill(tabId, docKey, ref) {
   const fillId = newId();
-  const job = { state: 'requesting', origin: null, name: null, error: null, cancelled: false };
+  const job = { state: 'requesting', origin: null, name: null, error: null, cancelled: false, ref, request: null };
   fills.set(fillId, job);
   keepAlive();
   setTimeout(() => fills.delete(fillId), 10 * 60 * 1000);
   runFill(job, tabId, docKey, ref).catch((e) => {
-    job.state = e instanceof NotPairedError ? 'unpaired' : 'error';
-    job.error = safeError(e);
+    const f = fillError(e);
+    job.state = f.state;
+    job.error = f.error;
+    if (job.origin) withdraw(job, job.origin);
   });
   return fillId;
 }
@@ -346,28 +392,30 @@ async function runFill(job, tabId, docKey, ref) {
   job.origin = origin;
 
   // Stop polling (and never redeem) once the document is gone or changed origin.
-  const docGone = () => frames.get(tabId)?.get(docKey)?.origin !== origin;
+  const docGone = () => frames.get(tabId)?.get(docKey)?.nonce !== rec.nonce;
   let r;
   try {
     // Asks once more if a token refresh orphans the first request (redeem 404).
     r = await requestAndWaitForFill(client, {
       ref, origin, clientLabel: CLIENT_LABEL,
-      onAsk: (req, ask) => { job.state = req.status === 'approved' ? 'approved' : 'pending'; job.asks = ask; },
-      isCancelled: () => job.cancelled || docGone(),
+      onAsk: (req, ask) => { job.request = req; job.state = req.status === 'approved' ? 'approved' : 'pending'; job.asks = ask; },
+      isCancelled: async () => job.cancelled || docGone() || !(await documentAlive(tabId, rec)),
     });
   } catch (e) {
-    if (e instanceof ApiError && e.status === 403) {
-      job.state = 'refused';
-      job.error = `This entry is not bound to ${origin}.`;
-      return;
-    }
-    throw e;
+    const f = fillError(e, origin);
+    job.state = f.state; job.error = f.error;
+    withdraw(job, origin);
+    return;
   }
-  if (r.state === 'cancelled' && !job.cancelled) {
-    job.state = 'refused'; job.error = 'The page changed before the fill; nothing was filled.'; return;
+  if (r.state === 'cancelled') {
+    withdraw(job, origin);
+    if (!job.cancelled) { job.state = 'refused'; job.error = 'The page changed before the fill; nothing was filled.'; }
+    else job.state = 'cancelled';
+    return;
   }
   if (r.state === 'lost') { job.state = 'error'; job.error = 'The approval request was lost twice. Try again.'; return; }
-  if (r.state !== 'approved') { job.state = r.state; return; }
+  if (r.state === 'gone') { job.state = 'refused'; job.error = r.error ? `DemiPass said: ${r.error}` : 'That login is no longer available.'; return; }
+  if (r.state !== 'approved') { if (r.state === 'expired') withdraw(job, origin); job.state = r.state; return; }
 
   let fill = r.fill;
   r.fill = null;
@@ -398,6 +446,20 @@ async function runFill(job, tabId, docKey, ref) {
   }
 }
 
+// What a failed fill request / redeem means for the person.
+//  - 403 with bound_origins: the entry is not bound to this page's origin.
+//  - "this token cannot hold a fill request", worker tokens, a dead session:
+//    the session is not usable for fills -> sign in again.
+//  - anything else: the server's own short text.
+function fillError(e, origin) {
+  if (e instanceof NotPairedError) return { state: 'unpaired', error: 'Not paired with DemiPass. Pair again.' };
+  if (e instanceof ApiError) {
+    if (e.status === 403 && e.boundOrigins) return { state: 'refused', error: `This entry is not bound to ${origin}.` };
+    if (/cannot hold a fill request|worker tokens cannot/i.test(e.code || '')) return { state: 'unpaired', error: 'This DemiPass session cannot fill. Sign out and pair again.' };
+  }
+  return { state: 'error', error: safeError(e) };
+}
+
 function fillErrorText(code) {
   if (code === 'origin_changed' || code === 'document_changed') return 'The page changed before the fill; nothing was filled.';
   if (code === 'no_login_form') return 'No login form found on the page.';
@@ -414,6 +476,38 @@ async function storeEntry(entry) {
   } finally {
     entry.value = null;
   }
+}
+
+// Storing under an existing name replaces that secret's value (and type).
+// -> null when the name is free or the person already said "replace";
+//    else { ok: false, conflict: { name, secret_type } } for the UI to ask.
+async function nameConflict(name, replace) {
+  await ready;
+  const existing = (await client.listSecrets()).find((x) => x.name === name);
+  if (!existing || replace) return null;
+  return { ok: false, conflict: { name, secret_type: existing.secret_type } };
+}
+
+// Every save path goes through here. A new name is stored with its origins.
+// An existing name (the person confirmed the replace) is stored without
+// `origins`, which keeps the ones it has, and this page's origin is then
+// added with /origins mode 'add', so replacing a password never unbinds the
+// other sites it was bound to.
+async function saveEntry(entry, replaceConfirmed) {
+  await ready;
+  let existing;
+  try { existing = (await client.listSecrets()).find((x) => x.name === entry.name); }
+  catch (e) { entry.value = null; throw e; }
+  if (existing && !replaceConfirmed) {
+    entry.value = null;
+    return { ok: false, conflict: { name: entry.name, secret_type: existing.secret_type } };
+  }
+  if (!existing) return storeEntry(entry);
+  const origins = entry.origins || [];
+  delete entry.origins;
+  const out = await storeEntry(entry);
+  if (origins.length) await client.addOrigins(out.name || entry.name, origins);
+  return { ...out, replaced: true };
 }
 
 function cleanName(name) {
@@ -472,13 +566,17 @@ async function handleContent(msg, sender) {
     recordFrame(f, msg.hasLogin);
     return { ok: true };
   }
+  if (msg.type === 'dp:gone') {
+    forgetFrame(f);
+    return { ok: true };
+  }
   if (msg.type === 'dp:capture') {
     const origin = f.origin;
     const password = typeof msg.password === 'string' ? msg.password : '';
     const login = typeof msg.login === 'string' ? msg.login.slice(0, 256) : '';
     if (!origin || !password || password.length > MAX_VALUE) return { ok: false };
     recordFrame(f, true);
-    addPending({ kind: 'login', value: password, login, origin, tabId: f.tabId });
+    addPending({ kind: 'login', value: password, login, origin, tabId: f.tabId, frameId: f.frameId });
     return { ok: true };
   }
   return { ok: false };
@@ -514,10 +612,12 @@ async function handleUi(msg) {
     case 'ui:addManual': {
       const origin = await topOrigin(msg.tabId);
       if (!origin) throw new UserError('This page cannot hold a DemiPass login (https only, or http on localhost).');
+      // Bind to the origin the person saw in the popup, and only if the tab is still there.
+      if (typeof msg.origin !== 'string' || msg.origin !== origin) throw new UserError(`The page is now ${origin}, not the site shown. Nothing was added; reopen DemiPass.`);
       const value = typeof msg.password === 'string' ? msg.password : '';
       if (!value || value.length > MAX_VALUE) throw new UserError('Password is required.');
       const login = String(msg.login || '').trim().slice(0, 256);
-      return storeEntry({ name: cleanName(msg.name), value, secret_type: 'password', login, origins: [origin] });
+      return saveEntry({ name: cleanName(msg.name), value, secret_type: 'password', login, origins: [origin] }, msg.replace === true);
     }
     case 'ui:pendingInfo': {
       const p = pending.get(msg.id);
@@ -527,13 +627,18 @@ async function handleUi(msg) {
     case 'ui:savePending': {
       const name = cleanName(msg.name);
       const types = new Set(['api_key', 'oauth_token', 'password', 'other']);
+      const p0 = pending.get(msg.id);
+      if (!p0 || p0.expiresAt < Date.now()) throw new UserError('This save has expired.');
+      // Check the name before taking the value, so a "replace?" answer can come back for it.
+      const conflict = await nameConflict(name, msg.replace === true);
+      if (conflict) return conflict;
       const p = takePending(msg.id);
       if (!p) throw new UserError('This save has expired.');
       const entry = { name, value: p.value, secret_type: p.kind === 'login' ? 'password' : (types.has(msg.secret_type) ? msg.secret_type : 'api_key') };
       if (p.kind === 'login') { entry.login = p.login; entry.origins = [p.origin]; }
       else if (msg.bindOrigin && p.origin) entry.origins = [p.origin];
       p.value = null;
-      return storeEntry(entry);
+      return saveEntry(entry, true);
     }
     case 'ui:dismissPending':
       dropPending(msg.id);
@@ -547,10 +652,11 @@ async function handleUi(msg) {
       if (!base) throw new UserError('Only https://api.dustforge.com or a localhost / 127.0.0.1 dev server.');
       if (base !== apiBase) {
         cancelPairing();
-        await client.signOut().catch(() => {});
+        await client.signOut().catch(() => {}); // waits out an in-flight refresh first
+        await tokens.saveBase(base); // IndexedDB: content scripts cannot write it
+        tokens.bindBase(base);
         apiBase = base;
         client = new ApiClient({ base, fetch: (...a) => fetch(...a), tokens });
-        await ext.storage.local.set({ dp_api_base: base });
       }
       return { ok: true, apiBase };
     }

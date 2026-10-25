@@ -197,6 +197,32 @@ export async function launchGecko({ xpi, addonId, binary, geckodriver, work, lab
     }
   }
 
+  // Value of an input inside the iframe element matched by frameSel (WebDriver Switch To Frame).
+  async function frameInputValue(page, frameSel, sel) {
+    const el = await find(page.handle, frameSel);
+    await cmd('POST', '/frame', { id: { [ELEMENT]: el } });
+    try {
+      return await cmd('POST', '/execute/sync', { script: 'return document.querySelector(arguments[0]).value;', args: [sel] });
+    } finally {
+      await cmd('POST', '/frame/parent', {});
+    }
+  }
+
+  // Stop the event page now, as the idle timeout would.
+  async function restartBackground() {
+    await cmd('POST', '/moz/context', { context: 'chrome' });
+    try {
+      await cmd('POST', '/execute/async', {
+        script: `const done = arguments[arguments.length - 1];
+          WebExtensionPolicy.getByID(arguments[0]).extension.terminateBackground({ ignoreDevToolsAttached: true, disableResetIdleForTest: true })
+            .then(() => done(true), (e) => done(String(e)));`,
+        args: [addonId],
+      });
+    } finally {
+      await cmd('POST', '/moz/context', { context: 'content' });
+    }
+  }
+
   async function newPage(url) {
     if (url && url.startsWith('moz-extension:')) return openExtensionTab(url);
     const { handle } = await cmd('POST', '/window/new', { type: 'tab' });
@@ -214,6 +240,8 @@ export async function launchGecko({ xpi, addonId, binary, geckodriver, work, lab
     idleTimeoutMs,
     newPage,
     grantActiveTab,
+    restartBackground,
+    frameInputValue,
     // fn runs in an extension page (Firefox has no handle on the event page
     // itself); the page is closed afterwards so it does not keep anything alive.
     async extEval(fn, arg) {

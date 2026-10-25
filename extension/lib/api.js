@@ -60,6 +60,39 @@ export class ApiClient {
     this.now = now;
     this.skewMs = skewMs;
     this.refreshing = null;
+    // Sign-out bumps the generation. An operation that started under an older
+    // generation (a refresh, a pairing poll) never persists what it got back:
+    // it revokes it instead, so a sign-out cannot be undone by a late answer.
+    this.generation = 0;
+    this.inflight = new Set();
+  }
+
+  // Runs a token-writing operation so signOut() can wait for it.
+  track(promise) {
+    this.inflight.add(promise);
+    promise.finally(() => this.inflight.delete(promise)).catch(() => {});
+    return promise;
+  }
+
+  // Writes a new pair, unless a sign-out happened meanwhile. A sign-out that
+  // lands between the check and the write is caught by the check after it:
+  // the pair is taken back out (only if it is still the stored one) and revoked.
+  async persist(gen, refreshToken, accessToken) {
+    if (gen !== this.generation) { await this.discard(refreshToken, accessToken); throw new NotPairedError('signed out'); }
+    await this.tokens.setRefresh(refreshToken);
+    await this.tokens.setAccess(accessToken);
+    if (gen !== this.generation) {
+      if ((await this.tokens.getRefresh()) === refreshToken) await this.tokens.clear();
+      await this.discard(refreshToken, accessToken);
+      throw new NotPairedError('signed out');
+    }
+  }
+
+  // Best-effort revoke of a token pair this client must not keep.
+  async discard(refreshToken, accessToken) {
+    if (refreshToken) { try { await this.raw('POST', '/api/identity/refresh/revoke', { refresh_token: refreshToken }); } catch {} }
+    const jti = jwtClaims(accessToken)?.jti;
+    if (accessToken && jti) { try { await this.raw('POST', '/api/identity/tokens/revoke', { jti }, accessToken); } catch {} }
   }
 
   async raw(method, path, body, accessToken) {
@@ -98,19 +131,21 @@ export class ApiClient {
   // would revoke the session, so every caller shares one in-flight promise.
   refresh() {
     if (!this.refreshing) {
-      this.refreshing = this.doRefresh().finally(() => { this.refreshing = null; });
+      const gen = this.generation;
+      this.refreshing = this.track(this.doRefresh(gen).finally(() => { this.refreshing = null; }));
     }
     return this.refreshing;
   }
 
-  async doRefresh() {
+  async doRefresh(gen) {
     const rt = await this.tokens.getRefresh();
-    if (!rt) throw new NotPairedError();
+    if (!rt || gen !== this.generation) throw new NotPairedError();
     const r = await this.raw('POST', '/api/identity/refresh', { refresh_token: rt });
     if (r.status === 200 && r.body && r.body.token && r.body.refresh_token) {
       // Persist the rotated refresh token first: the old one is already spent.
-      await this.tokens.setRefresh(r.body.refresh_token);
-      await this.tokens.setAccess(r.body.token);
+      // If a sign-out (or a server switch) happened while this was in flight,
+      // persist() revokes the new pair instead.
+      await this.persist(gen, r.body.refresh_token, r.body.token);
       return r.body.token;
     }
     if (r.status === 401 || r.status === 404 || r.status === 400) {
@@ -170,13 +205,19 @@ export class ApiClient {
   }
 
   // One poll. -> { state: 'pending' | 'paired' | 'denied' | 'expired' }
-  async pollPairing(deviceCode) {
+  pollPairing(deviceCode) {
+    return this.track(this.doPollPairing(deviceCode, this.generation));
+  }
+
+  async doPollPairing(deviceCode, gen) {
     const r = await this.raw('POST', '/api/identity/device/token', { device_code: deviceCode });
     const code = errCode(r.body);
     if (r.status === 428) return { state: 'pending' };
     if (r.status === 200 && r.body && r.body.token && r.body.refresh_token) {
-      await this.tokens.setRefresh(r.body.refresh_token);
-      await this.tokens.setAccess(r.body.token);
+      try { await this.persist(gen, r.body.refresh_token, r.body.token); } catch (e) {
+        if (e instanceof NotPairedError) return { state: 'cancelled' };
+        throw e;
+      }
       return { state: 'paired', scope: r.body.scope || null, email: r.body.email || null };
     }
     if (r.status === 403) return { state: 'denied' };
@@ -186,23 +227,41 @@ export class ApiClient {
     throw new ApiError(r.status, code || 'pairing_poll_failed');
   }
 
+  // Ends the session for good. Bumps the generation before and after clearing
+  // so that a refresh or pairing poll in flight at either point discards (and
+  // revokes) what it gets back, waits for those, then clears once more and
+  // revokes every token it saw.
   async signOut() {
-    const rt = await this.tokens.getRefresh();
-    const at = await this.tokens.getAccess();
-    await this.tokens.clear();
+    const refreshes = new Set();
+    const accesses = new Set();
+    const grab = async () => {
+      const rt = await this.tokens.getRefresh();
+      const at = await this.tokens.getAccess();
+      if (rt) refreshes.add(rt);
+      if (at) accesses.add(at);
+      await this.tokens.clear();
+    };
+    this.generation++;
+    await grab();
+    this.generation++;
+    // Give in-flight refreshes / polls a moment to land (they discard and
+    // revoke what they get, see persist()); do not hang sign-out on the network.
+    await Promise.race([Promise.allSettled([...this.inflight]), new Promise((r) => setTimeout(r, SIGNOUT_WAIT_MS))]);
+    await grab();
     const out = { refreshRevoked: false, accessRevoked: false };
-    if (rt) {
+    for (const rt of refreshes) {
       try {
         const r = await this.raw('POST', '/api/identity/refresh/revoke', { refresh_token: rt });
-        out.refreshRevoked = r.status === 200;
+        if (r.status === 200) out.refreshRevoked = true;
       } catch {}
     }
     // Best effort: kill the live access token too, so it does not outlive sign-out.
-    const jti = jwtClaims(at)?.jti;
-    if (at && jti) {
+    for (const at of accesses) {
+      const jti = jwtClaims(at)?.jti;
+      if (!jti) continue;
       try {
         const r = await this.raw('POST', '/api/identity/tokens/revoke', { jti }, at);
-        out.accessRevoked = r.status === 200;
+        if (r.status === 200) out.accessRevoked = true;
       } catch {}
     }
     return out;
@@ -221,6 +280,36 @@ export class ApiClient {
       username: c.username == null ? '' : String(c.username),
       secret_type: String(c.secret_type || ''),
     }));
+  }
+
+  // Names and types of the owner's secrets (never values), for name-collision checks.
+  async listSecrets() {
+    const r = await this.call('GET', '/api/blindkey/list');
+    if (r.status !== 200 || !r.body || !Array.isArray(r.body.secrets)) throw new ApiError(r.status, errCode(r.body) || 'list_failed');
+    return r.body.secrets.map((x) => ({ name: String(x.name || ''), ref: String(x.ref_code || ''), secret_type: String(x.secret_type || '') }));
+  }
+
+  // Adds origins to an existing secret's binding (mode 'add' keeps the ones it has).
+  async addOrigins(name, origins) {
+    const r = await this.call('POST', '/api/blindkey/origins', { name, origins, mode: 'add' });
+    if (r.status !== 200 || !r.body || !r.body.ok) throw new ApiError(r.status, errCode(r.body) || 'origins_failed');
+    return { ref: String(r.body.ref || ''), origins: Array.isArray(r.body.origins) ? r.body.origins.map(String) : [] };
+  }
+
+  // Withdraws a fill request this session made and no longer wants, so its
+  // card leaves the phone (and does not count toward the 20-waiting limit).
+  // The deny route takes the wallet's numeric id, which only /fill/pending
+  // shows; the request is found there as this session's (own_session) only
+  // pending request for that ref + origin. Anything else is left to expire.
+  async withdrawFill({ ref, origin }) {
+    const r = await this.call('GET', '/api/blindkey/fill/pending');
+    if (r.status !== 200 || !r.body || !Array.isArray(r.body.requests)) return { denied: false, reason: 'pending_unavailable' };
+    const mine = r.body.requests.filter((q) => q && q.own_session === true && q.ref === ref && q.origin === origin);
+    if (mine.length !== 1) return { denied: false, reason: mine.length ? 'ambiguous' : 'not_found' };
+    const id = mine[0].id;
+    if (!(Number.isInteger(id) || /^\d+$/.test(String(id)))) return { denied: false, reason: 'bad_id' };
+    const d = await this.call('POST', `/api/blindkey/fill/${encodeURIComponent(String(id))}/deny`);
+    return { denied: d.status === 200, id };
   }
 
   // { name, value, secret_type, login?, origins?, description? }
@@ -247,17 +336,26 @@ export class ApiClient {
   }
 
   // One redeem attempt.
-  // -> { state: 'pending' } | { state: 'denied' } | { state: 'expired' } |
-  //    { state: 'already_redeemed' } | { state: 'lost' } (404: request bound to an older token) |
+  // -> { state: 'pending' } | { state: 'busy' } (429: rate limited, poll slower) |
+  //    { state: 'denied' } | { state: 'expired' } | { state: 'already_redeemed' } |
+  //    { state: 'lost' } (404 and the access token changed: the request belonged to the old one) |
+  //    { state: 'gone', error } (404 with the same token, e.g. the login was deleted) |
   //    { state: 'approved', fill: {...value} }
-  async redeemOnce(requestId) {
+  async redeemOnce(requestId, jti = null) {
     const r = await this.call('POST', '/api/blindkey/fill/redeem', { request_id: requestId });
     const code = errCode(r.body);
     if (r.status === 428) return { state: 'pending' };
+    if (r.status === 429) return { state: 'busy' };
     if (r.status === 403 && code === 'denied') return { state: 'denied' };
     if (r.status === 410) return { state: code === 'already_redeemed' ? 'already_redeemed' : 'expired' };
     // The request is bound to the token that asked; after a refresh it is gone.
-    if (r.status === 404) return { state: 'lost' };
+    // With the same token, a 404 is a real answer (the login was deleted or
+    // revoked): asking again would only put another card on the phone.
+    if (r.status === 404) {
+      const now = await this.currentJti();
+      if (!jti || now !== jti) return { state: 'lost' };
+      return { state: 'gone', error: code };
+    }
     if (r.status === 200 && r.body && r.body.ok && typeof r.body.value === 'string') {
       const b = r.body;
       return {
@@ -270,23 +368,29 @@ export class ApiClient {
 }
 
 export const FILL_MIN_TOKEN_MS = 5 * 60 * 1000;
+const SIGNOUT_WAIT_MS = 3000;
 
 const realSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Polls redeem until a terminal state. The deadline is the server's
 // expires_in plus a little slack; the server stays authoritative.
+// isCancelled may be async (the background checks that the document is still there).
+// A 429 while polling is not an answer: wait longer (doubling, up to 16 s) and keep going.
 export async function waitForFill(client, requestId, { expiresIn = 120, intervalMs = 2000, sleep = realSleep, now = () => Date.now(), isCancelled = () => false, onPending, jti = null } = {}) {
   const deadline = now() + expiresIn * 1000 + 5000;
+  let wait = intervalMs;
   for (;;) {
-    if (isCancelled()) return { state: 'cancelled' };
+    if (await isCancelled()) return { state: 'cancelled' };
     // A refresh since the request was made means the server will answer 404;
     // skip the wasted round trip.
     if (jti && (await client.currentJti()) !== jti) return { state: 'lost' };
-    const r = await client.redeemOnce(requestId);
-    if (r.state !== 'pending') return r;
-    if (onPending) onPending();
+    const r = await client.redeemOnce(requestId, jti);
+    if (r.state === 'busy') wait = Math.min(Math.max(wait * 2, 1), 16000);
+    else if (r.state !== 'pending') return r;
+    else wait = intervalMs;
+    if (onPending && r.state === 'pending') onPending();
     if (now() >= deadline) return { state: 'expired' };
-    await sleep(intervalMs);
+    await sleep(wait);
   }
 }
 

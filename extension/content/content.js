@@ -31,6 +31,17 @@
     send({ type: 'dp:frame', hasLogin: has });
   }
 
+  // A save is offered only for a password the person put in the field: the
+  // value must be the one left by their own last input event (typing, paste,
+  // the browser's autofill — isTrusted). A page that sets .value from script,
+  // dispatches synthetic events, or calls requestSubmit() on its own gets no
+  // SAVE prompt, and neither does a value DemiPass filled.
+  const typed = new WeakMap(); // password input -> value after its last trusted input event
+  window.addEventListener('input', (e) => {
+    const t = e.target;
+    if (e.isTrusted && t instanceof HTMLInputElement && t.type === 'password') typed.set(t, t.value);
+  }, true);
+
   let lastCapture = 0;
   function capture(form) {
     let f = null;
@@ -38,7 +49,7 @@
     if (!f || !f.password) return;
     const pwEl = f.newPassword || f.password;
     const password = pwEl.value;
-    if (!password) return;
+    if (!password || typed.get(pwEl) !== password) return;
     const now = Date.now();
     if (now - lastCapture < 800) return; // submit + click on the same action
     lastCapture = now;
@@ -48,6 +59,7 @@
 
   // Native form submit.
   window.addEventListener('submit', (e) => {
+    if (!e.isTrusted) return; // dispatchEvent(new Event('submit'))
     const form = e.target instanceof HTMLFormElement ? e.target : null;
     capture(form);
   }, true);
@@ -55,6 +67,7 @@
   // Script-driven logins that never fire submit: a click on a submit-ish
   // button, or Enter in a password field.
   window.addEventListener('click', (e) => {
+    if (!e.isTrusted) return; // element.click() / dispatched clicks
     const t = e.target instanceof Element ? e.target.closest('button, input[type=submit], input[type=button], [role=button]') : null;
     if (!t) return;
     if (t.form && t.type === 'submit') return; // the submit listener handles it
@@ -63,7 +76,7 @@
   }, true);
 
   window.addEventListener('keydown', (e) => {
-    if (e.key !== 'Enter') return;
+    if (!e.isTrusted || e.key !== 'Enter') return;
     const t = e.target;
     if (t instanceof HTMLInputElement && t.type === 'password' && !t.form) capture(null);
   }, true);
@@ -72,6 +85,12 @@
     if (msg && msg.type === 'dp:announce') { announce(true); sendResponse({ ok: true }); }
     return false;
   });
+
+  // This document is going away (navigation, reload, removed iframe): drop
+  // its record now, so a fill waiting for it stops and is withdrawn. Coming
+  // back from the back/forward cache, announce again.
+  window.addEventListener('pagehide', () => { send({ type: 'dp:gone' }); }, true);
+  window.addEventListener('pageshow', (e) => { if (e.persisted) announce(true); }, true);
 
   announce(true);
   let t = null;

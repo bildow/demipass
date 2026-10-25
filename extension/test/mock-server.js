@@ -33,7 +33,10 @@ export function createMockState({ accessTtlSec = 3600, pin = '1234', authReject4
     refresh: new Map(), // raw -> { sid, scope, revoked }
     device: new Map(), // device_code -> { user_code, scope, status, expires }
     secrets: new Map(), // ref -> { name, value, secret_type, login, origins }
-    fills: new Map(), // id -> { ref, origin, jti, status, expires, client_label, created } — bound to the asking token
+    // request_id ('dpf_…', what the asking session sees) -> { id (the wallet's numeric id), ref, origin, jti,
+    // status, expires, client_label, created } — bound to the asking token, like dustforge's blindkey_fill_requests.
+    fills: new Map(),
+    fillSeq: 0,
     proofs: new Map(), // sid -> intent with a fresh PIN proof
     calls: [], // { method, path, status, meta } — never values
   };
@@ -202,9 +205,12 @@ export function apiHandler(state) {
       meta.ref = body.ref; meta.origin = body.origin;
       if (!s) return send(404, { error: 'secret not found' });
       if (!origin || !s.origins.includes(origin)) return send(403, { error: 'origin not bound to this secret', bound_origins: s.origins });
-      const id = rand('dpf_', 12);
-      state.fills.set(id, { ref: body.ref, origin, jti: a.jti, status: 'pending', expires: Date.now() + 120_000, client_label: String(body.client_label || ''), created: new Date().toISOString() });
-      return send(201, { ok: true, request_id: id, status: 'pending', expires_in: 120 });
+      // dustforge FILL_MAX_PENDING: at most 20 requests wait per person.
+      const waiting = [...state.fills.values()].filter((f) => f.status === 'pending' && f.expires > Date.now()).length;
+      if (waiting >= 20) return send(429, { error: 'too many fill requests waiting for approval — approve or deny some first' });
+      const code = rand('dpf_', 12);
+      state.fills.set(code, { id: ++state.fillSeq, ref: body.ref, origin, jti: a.jti, status: 'pending', expires: Date.now() + 120_000, client_label: String(body.client_label || ''), created: new Date().toISOString() });
+      return send(201, { ok: true, request_id: code, status: 'pending', expires_in: 120 });
     }
     if (p === '/api/blindkey/fill/redeem' && req.method === 'POST') {
       const f = state.fills.get(body.request_id);
@@ -215,22 +221,27 @@ export function apiHandler(state) {
       if (f.expires < Date.now()) return send(410, { error: 'expired' });
       if (f.status === 'denied') return send(403, { error: 'denied' });
       if (f.status === 'pending') return send(428, { error: 'approval_pending' });
-      f.status = 'redeemed';
       const s = state.secrets.get(f.ref);
+      if (!s) return send(404, { error: 'the login was deleted or revoked since the request' });
+      f.status = 'redeemed';
       meta.event = 'secret_filled';
       return send(200, { ok: true, value: s.value, username: s.login, origin: f.origin, name: s.name, ref: f.ref });
     }
     if (p === '/api/blindkey/fill/pending' && req.method === 'GET') {
-      const requests = [...state.fills].filter(([, f]) => f.status === 'pending' && f.expires > Date.now())
-        .map(([id, f]) => { const s = state.secrets.get(f.ref); return { id, intent: 'fill:' + id, name: s.name, ref: f.ref, username: s.login, origin: f.origin, client_label: f.client_label, created_at: f.created, expires_at: new Date(f.expires).toISOString() }; });
-      return send(200, { ok: true, requests });
+      const requests = [...state.fills.values()].filter((f) => f.status === 'pending' && f.expires > Date.now())
+        .map((f) => { const s = state.secrets.get(f.ref); return { id: f.id, intent: 'fill:' + f.id, name: s.name, ref: f.ref, username: s.login, origin: f.origin, client_label: f.client_label, created_at: f.created, expires_at: new Date(f.expires).toISOString(), own_session: f.jti === a.jti }; });
+      return send(200, { ok: true, requests, grants: [] });
     }
-    const m = p.match(/^\/api\/blindkey\/fill\/(dpf_[\w-]+)\/(approve|deny)$/);
+    // As in dustforge: the wallet decides by the numeric id from /fill/pending. Deny is allowed from any of the
+    // owner's sessions (the asking one included); approve is not allowed from the asking session.
+    const m = p.match(/^\/api\/blindkey\/fill\/(\d+)\/(approve|deny)$/);
     if (m && req.method === 'POST') {
-      const f = state.fills.get(m[1]);
-      if (!f || f.status !== 'pending') return send(404, { error: 'no pending request' });
-      if (f.jti === a.jti) return send(409, { error: 'the requesting session cannot approve its own fill' });
-      if (m[2] === 'deny') { f.status = 'denied'; return send(200, { ok: true, status: 'denied' }); }
+      meta.fill_id = Number(m[1]); meta.decision = m[2];
+      const f = [...state.fills.values()].find((x) => x.id === Number(m[1]));
+      if (!f) return send(404, { error: 'fill request not found' });
+      if (f.status !== 'pending') return send(409, { error: `this fill request is already ${f.status}` });
+      if (m[2] === 'deny') { f.status = 'denied'; meta.own_session = f.jti === a.jti; return send(200, { ok: true, id: f.id, status: 'denied' }); }
+      if (f.jti === a.jti) return send(409, { error: 'approve this fill from your phone wallet, not from the session that asked for it' });
       if (state.proofs.get(a.sid) !== 'fill:' + m[1]) return send(403, { error: 'pin proof required', gate: 'pin', intent: 'fill:' + m[1] });
       state.proofs.delete(a.sid); // spent
       f.status = 'approved';
@@ -255,13 +266,15 @@ export function expireAccessTokens(state) {
   return n;
 }
 
+// requestId: the request_id the extension got ('dpf_…') or the wallet's numeric id.
 export async function phoneDecide(apiBase, state, requestId, decision = 'approve') {
+  const id = state.fills.has(requestId) ? state.fills.get(requestId).id : requestId;
   const phone = mintSession(state, 'transact', 'sid_phone');
   const h = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + phone.token };
   if (decision === 'approve') {
-    await fetch(apiBase + '/api/identity/gate/verify', { method: 'POST', headers: h, body: JSON.stringify({ gate: 'pin', pin: state.pin, intent: 'fill:' + requestId }) });
+    await fetch(apiBase + '/api/identity/gate/verify', { method: 'POST', headers: h, body: JSON.stringify({ gate: 'pin', pin: state.pin, intent: 'fill:' + id }) });
   }
-  const r = await fetch(`${apiBase}/api/blindkey/fill/${requestId}/${decision}`, { method: 'POST', headers: h });
+  const r = await fetch(`${apiBase}/api/blindkey/fill/${id}/${decision}`, { method: 'POST', headers: h });
   return r.status;
 }
 
@@ -276,9 +289,48 @@ const LOGIN_PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>Mock
 <form id="search"><input id="q" name="q" type="search" placeholder="Search"></form>
 </body></html>`;
 
+const LOGIN_FORM = `<form id="login" method="post" action="/done">
+  <input id="user" name="email" type="email" autocomplete="username">
+  <input id="pass" name="password" type="password" autocomplete="current-password">
+  <button type="submit">Sign in</button></form>`;
+const page = (body) => `<!doctype html><html><head><meta charset="utf-8"><title>Mock</title></head><body>${body}</body></html>`;
+
+// Pages for the hostile / tricky cases. `other` is the second origin of the
+// same site (localhost <-> 127.0.0.1), used for cross-origin frames.
+function trickyPage(pathname, other) {
+  switch (pathname) {
+    // single-page app: changes its URL with pushState / the hash (same document)
+    case '/spa.html': return page(`${LOGIN_FORM}<script>window.pushNow=()=>history.pushState({}, '', '/spa.html?step=' + Math.random());</script>`);
+    // login page with a cross-origin ad iframe that keeps reloading
+    case '/ads.html': return page(`${LOGIN_FORM}<iframe id="ad" src="${other}/plain.html"></iframe>
+      <script>window.rotate=()=>{setInterval(()=>{document.getElementById('ad').src='${other}/plain.html?'+Math.random()},700)};</script>`);
+    // a page that forges a login with no person involved: script-set value + requestSubmit / dispatched events
+    case '/forge.html': return page(`${LOGIN_FORM}<script>
+      document.getElementById('login').addEventListener('submit', (e) => e.preventDefault());
+      window.forge = (v) => { user.value = 'victim@example.com'; pass.value = v; document.getElementById('login').requestSubmit(); };
+      window.forgeEvents = (v) => { user.value = 'victim@example.com'; pass.value = v;
+        pass.dispatchEvent(new Event('input', { bubbles: true }));
+        pass.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        document.querySelector('#login button').dispatchEvent(new MouseEvent('click', { bubbles: true })); };
+      window.addEventListener('message', (e) => { if (e.data === 'forge') window.forge('iframe-chosen-value'); });</script>`);
+    // top login page (stays put on submit) embedding a cross-origin frame that forges a capture
+    case '/top-frame.html': return page(`${LOGIN_FORM}<iframe id="f" src="${other}/forge.html"></iframe><script>
+      document.getElementById('login').addEventListener('submit', (e) => e.preventDefault());
+      window.forgeInFrame = () => document.getElementById('f').contentWindow.postMessage('forge', '*');</script>`);
+    // a login form that stays on the page when submitted
+    case '/stay.html': return page(`${LOGIN_FORM}<script>document.getElementById('login').addEventListener('submit', (e) => e.preventDefault());</script>`);
+    default: return null;
+  }
+}
+
 export function siteHandler() {
   return async (req, res) => {
     const url = new URL(req.url, 'http://site');
+    const host = (req.headers.host || '').replace(/:\d+$/, '');
+    const port = (req.headers.host || '').split(':').pop();
+    const other = host === '127.0.0.1' ? `http://localhost:${port}` : `http://127.0.0.1:${port}`;
+    const tricky = trickyPage(url.pathname, other);
+    if (tricky) { res.writeHead(200, { 'Content-Type': 'text/html' }); res.end(tricky); return; }
     if (url.pathname === '/login.html') { res.writeHead(200, { 'Content-Type': 'text/html' }); res.end(LOGIN_PAGE); return; }
     if (url.pathname === '/done') {
       for await (const _ of req) { /* drain; the site does not keep it */ }

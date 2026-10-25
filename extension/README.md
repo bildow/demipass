@@ -65,9 +65,10 @@ Build first: `npm run package:extension` (from the repo root). It writes
 |---|---|
 | Pair | Popup → **Pair with DemiPass** → device flow with `scope: 'transact'`. The popup shows the user code and a link to `https://demipass.com/device`. |
 | Store selected text | Right-click a selection → **Store in DemiPass**. The browser hands the selection to the background worker. A small extension window asks for a name and type (`api_key`, `oauth_token`, `password`, `other`) and can optionally bind it to the page's origin. |
-| Save a login on submit | The content script sees a login form submit and passes the username and password straight to the worker. The worker holds them in memory for 3 minutes and shows **SAVE** on the toolbar badge. The popup offers **Save to DemiPass**: `secret_type: 'password'`, `login`, `origins: [page origin]`. Nothing is stored unless the person clicks Save. |
+| Save a login on submit | The content script sees a login form submit and passes the username and password straight to the worker, but only for a password the person put in the field themselves (see the security model). The worker holds them in memory for 3 minutes, one per frame, and shows **SAVE** on the toolbar badge. The popup offers **Save to DemiPass**: `secret_type: 'password'`, `login`, `origins: [page origin]`. Nothing is stored unless the person clicks Save. |
 | Fill | The popup lists the vault entries bound to the page's origin (`/fill/candidates`). **Fill** → `/fill/request` → "Approve on your phone…" → polls `/fill/redeem` (428/403/410/200). On 200 the worker re-checks the frame, injects the fill into that exact document, then drops the value. |
-| Add for this site | Popup form (name, username, password), stored bound to the top frame's origin. |
+| Add for this site | Popup form (name, username, password), stored bound to the origin the popup showed. It is refused if the tab is on another origin by the time of Add. |
+| Same name | Every save path checks `/api/blindkey/list` first. If the name exists, nothing is stored. The button turns into **Replace** and says what would be replaced. A confirmed replace stores without `origins`, which keeps the existing binding, then adds this page's origin with `/api/blindkey/origins` `mode: 'add'`. |
 | Sign out | Revokes the refresh token (`/api/identity/refresh/revoke`), revokes the access token by `jti` (best effort), and clears both from storage. |
 
 ## Security model
@@ -90,8 +91,20 @@ Build first: `npm run package:extension` (from the repo root). It writes
   `data:`) is never fillable. Each content script also makes a random
   128-bit nonce for its document, in its isolated world, where the page
   cannot read it. The fill is requested for that origin. At fill time:
-  1. The poll stops, and the request is never redeemed, if that document is
-     gone or the tab navigated.
+  1. The poll stops if the document is gone, and the request is then never
+     redeemed. A document that unloads says so from `pagehide`, and before
+     every redeem the worker asks the frame itself (same `documentIds`/nonce
+     target as the fill) whether it is still that document on that origin.
+     Same-document changes do not stop the poll: pushState, hash changes,
+     and subframes loading. The fill still lands after the person approved
+     it. (An earlier build dropped every record on Chromium's tab
+     `status: 'loading'`, which fires for all of those.) A request the worker
+     stops waiting for is withdrawn: it finds it in `/fill/pending` as this
+     session's (`own_session`) only one for that ref and origin, and denies
+     it by its wallet id. The card leaves the phone and does not count
+     toward the 20-waiting limit. If that lookup is ambiguous, or the
+     request belonged to an access token since refreshed, it is left to
+     expire (120 s).
   2. The redeem response's `origin`/`ref` must equal what was requested.
   3. The worker re-checks its own record of the document.
   4. `scripting.executeScript` targets `documentIds: [documentId]`. That is
@@ -104,6 +117,14 @@ Build first: `npm run package:extension` (from the repo root). It writes
      check and the fill. A reload or a navigation gives a new document,
      with a new nonce or none, and is refused ("The page changed before the
      fill; nothing was filled").
+- **Save prompts come from the person.** The content script records the
+  value of a password field after each trusted `input` event (typing,
+  paste, the browser's autofill; `isTrusted`). A capture is sent only if the
+  field still holds that value, and only on a trusted submit, click or
+  Enter. A page that sets `.value` from script, dispatches events, or calls
+  `requestSubmit()` on its own gets no SAVE prompt. Neither does a value
+  DemiPass filled. Pending saves are kept per (tab, frame): a cross-origin
+  iframe can neither replace the top frame's save nor be offered ahead of it.
 - **Values:** never logged, never written to storage, never put in a badge,
   title, notification or error message, and never sent to the popup. A
   pending save lives only in worker memory, with a 3-minute TTL. A fill value
@@ -123,17 +144,39 @@ Build first: `npm run package:extension` (from the repo root). It writes
     content scripts `storage.session` at all.
   - The refresh token is in `storage.local`, sealed with AES-GCM under a
     non-extractable key kept in the extension's own IndexedDB. Content
-    scripts can read `storage.local` by default, but they cannot open the
-    extension origin's IndexedDB (`chrome-extension://<id>` /
+    scripts can read **and write** `storage.local` by default, but they
+    cannot open the extension origin's IndexedDB (`chrome-extension://<id>` /
     `moz-extension://<per-install UUID>`).
+  - Nothing in `storage.local` is trusted as configuration. The API server
+    setting lives in IndexedDB. Both tokens carry the API base they were
+    issued by: the sealed blob holds `{ rt, base }`, and the session entry
+    holds `{ t, base }`. A token is returned only under its own base. At
+    startup, a session sealed for a different base is signed out locally
+    and revoked at its own base. So is an older v1 blob, which records no
+    base; it is signed out but not revoked anywhere, because its base is
+    unknown. A `dp_api_base` key in `storage.local`, from older builds or
+    written by anything else, is deleted unread.
+  - Sign-out cannot be undone by a late answer. It bumps a generation
+    counter before and after clearing the tokens. A refresh or pairing poll
+    still in flight then revokes the pair it gets back instead of storing
+    it, even when the sign-out lands between its check and its write.
+    Sign-out waits up to 3 s for those, then finishes anyway. A server
+    switch signs out the same way.
   - Refresh rotates the pair. It is single-flight, because the refresh token
     is single-use, and the new refresh token is persisted before the new
     access token is used.
   - A carbon fill request belongs to the one access token (`jti`) that made
     it; a refreshed token gets 404 on redeem. So before `/fill/request` the
     worker refreshes if the access token expires within 5 minutes. If a
-    refresh happens anyway while the request waits (or redeem answers 404),
-    it asks once more and the popup shows "Approve on your phone…" again.
+    refresh happens anyway while the request waits, it asks once more and
+    the popup shows "Approve on your phone…" again. A redeem 404 with the
+    same token is final, for example "the login was deleted or revoked since
+    the request". It is shown, and no second card is created. A 429 while
+    polling backs off (doubling, up to 16 s) and keeps waiting.
+  - Fill errors are shown as what they are. A 403 with `bound_origins`
+    means "not bound to this site". "This token cannot hold a fill request"
+    and worker tokens mean "sign out and pair again". Anything else shows
+    the server's own short text.
   - A 401, or dustforge's 403 `admin access or Bearer token required` (what
     `getDemiPassActor` returns for a bad bearer when `ADMIN_API_KEY` is set),
     triggers one refresh and one retry. A 403 `denied` from redeem does not.
@@ -157,13 +200,13 @@ value is filled into can read it, and so can anything that drives the browser
 
 | Permission | Why |
 |---|---|
-| `storage` | Access token in `storage.session`; sealed refresh token and the optional dev-server setting in `storage.local`. |
+| `storage` | Access token in `storage.session`; sealed refresh token in `storage.local`. (The dev-server setting is in the extension's IndexedDB.) |
 | `contextMenus` | The **Store in DemiPass** item on selected text. Firefox accepts this name as well as `menus`. |
 | `scripting` | The fill: `executeScript` into the exact document after approval. Also injects the detector into tabs opened before install. |
 | `activeTab` | Grants `scripting` on the tab when the person clicks the toolbar button (or uses the context menu), so no broad host permission is needed for filling. |
 | `host_permissions: https://api.dustforge.com/*` | The worker's API calls. In Firefox the person can revoke it; the popup then says DemiPass cannot connect and offers **Allow**. |
-| `optional_host_permissions: <all_urls>` | Lets the popup ask for site access again with `permissions.request()`. **Allow on this site** asks for `scheme://host/*`; **Allow on all sites** asks for `<all_urls>`. Neither family prompts for it at install. |
-| content script on `<all_urls>`, all frames | Login-form detection and the submit capture. It reads password fields only at submit, and only to hand the value to the worker. Firefox runs it only where site access is granted. |
+| `optional_host_permissions: <all_urls>` | Lets the popup ask for site access again with `permissions.request()`. **Allow on this site** asks for `scheme://host/*`; **Allow on all sites** asks for `<all_urls>`. Being optional, it adds no install-time prompt of its own. |
+| content script on `<all_urls>`, all frames | Login-form detection and the submit capture. It reads password fields only at submit, and only to hand the value to the worker. **This is what produces the install-time warning** in Chromium ("Read and change all your data on all websites"), and Firefox lists it as access to all websites. Firefox runs it only where site access is granted. |
 
 `webNavigation` is **not** requested. The browser-set `MessageSender` fields
 plus `documentIds` targeting and the in-frame check give a tighter origin
@@ -173,9 +216,25 @@ browsing history" warning.
 
 ## Limits
 
-- Filling a **cross-origin iframe** (e.g. an embedded login on another domain)
-  needs host permission for that origin. `activeTab` covers only the tab's
-  top-level origin, so those fills fail with "Could not reach the page".
+- Filling a **cross-origin iframe** (an embedded login on another domain):
+  - **Chromium** needs host permission for the frame's origin. The
+    `<all_urls>` content-script match runs the detector there, and the frame
+    is listed, but it does not let `scripting.executeScript` into the frame.
+    Chromium 149 refuses with "Cannot access contents of the page. Extension
+    manifest must request permission to access the respective host". That
+    is the same for the top frame without `activeTab`. `activeTab` covers
+    the tab's top-level origin, so such a fill stops before redeem and is
+    withdrawn ("The page changed before the fill"). Granting the frame's
+    site from **Allow on this site** in that site's own tab, or **Allow on
+    all sites**, makes it work.
+  - **Firefox** treats the content-script hosts as granted host
+    permissions, so with site access on, iframe fills work.
+- **Uninstalling does not sign out.** Removing the extension deletes its
+  storage but does not revoke the refresh token on the server, and an
+  uninstalled extension can run no code to do it. Sign out first, or revoke
+  the session from another DemiPass session. `runtime.setUninstallURL` is
+  not used: it could only open a web page, and that page has no token to
+  revoke.
 - The submit capture covers native submits, clicks on sign-in buttons, and
   Enter in a form-less password field. Multi-step logins that ask for the
   username and password on separate pages capture only the password page's
