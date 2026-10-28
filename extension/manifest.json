@@ -4,6 +4,12 @@
   "version": "0.1.0",
   "description": "Put passwords and API keys into your DemiPass vault, and fill logins after approving on your phone.",
   "homepage_url": "https://demipass.com",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
   "minimum_chrome_version": "116",
   "permissions": [
     "storage",
@@ -23,7 +29,11 @@
   },
   "action": {
     "default_title": "DemiPass",
-    "default_popup": "ui/popup.html"
+    "default_popup": "ui/popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    }
   },
   "options_ui": {
     "page": "ui/options.html",

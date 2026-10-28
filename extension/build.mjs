@@ -19,7 +19,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 export const SRC = here;
 export const DIST = path.join(here, 'dist');
 // What ships. Everything else under extension/ (tests, docs, build files) does not.
-export const SHIPPED = ['background.js', 'lib', 'content', 'ui'];
+export const SHIPPED = ['background.js', 'lib', 'content', 'ui', 'icons'];
 export const TARGETS = ['chromium', 'firefox'];
 
 export function readJson(p) {
