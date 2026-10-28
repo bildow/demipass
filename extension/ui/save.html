@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Store in DemiPass</title>
+  <link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<main>
+  <h1>Store in DemiPass</h1>
+  <p id="info" class="muted">Loading…</p>
+  <form id="form" autocomplete="off" hidden>
+    <label for="name">Name</label>
+    <input id="name" type="text" maxlength="64" required placeholder="e.g. openai-prod">
+    <label for="type">Type</label>
+    <select id="type">
+      <option value="api_key">API key</option>
+      <option value="oauth_token">Token</option>
+      <option value="password">Password</option>
+      <option value="other">Other</option>
+    </select>
+    <label class="row" id="bind-wrap"><input id="bind" type="checkbox"> <span>Only fill it on <b id="bind-origin"></b></span></label>
+    <div class="actions">
+      <button id="store" class="primary" type="submit">Store</button>
+      <button type="button" id="cancel">Cancel</button>
+    </div>
+  </form>
+  <p id="msg"></p>
+  <p class="muted">The selected text goes from the page to the DemiPass extension and then to your vault. It is not copied to the clipboard and is not shown here.</p>
+</main>
+<script src="save.js" type="module"></script>
+</body>
+</html>

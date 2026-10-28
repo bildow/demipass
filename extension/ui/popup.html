@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>DemiPass</title>
+  <link rel="stylesheet" href="ui.css">
+</head>
+<body class="popup">
+<main>
+  <div class="row">
+    <h1 class="grow">DemiPass</h1>
+    <button id="signout" hidden>Sign out</button>
+  </div>
+  <div id="dev" class="banner" hidden></div>
+  <p id="status" class="muted">Loading…</p>
+
+  <section id="access" hidden>
+    <p id="access-text"></p>
+    <div class="actions">
+      <button id="access-site" class="primary" hidden>Allow on this site</button>
+      <button id="access-all" hidden>Allow on all sites</button>
+      <button id="access-api" class="primary" hidden>Allow</button>
+    </div>
+    <div id="access-msg"></div>
+  </section>
+
+  <section id="pair" hidden>
+    <p>Pair this browser with your DemiPass vault. You approve it on your phone.</p>
+    <div id="pair-code" hidden>
+      <div>Enter this code at <a id="pair-link" href="https://demipass.com/device" target="_blank" rel="noopener">demipass.com/device</a>:</div>
+      <div id="user-code" class="code"></div>
+      <div class="muted" id="pair-wait">Waiting for approval…</div>
+    </div>
+    <div class="actions">
+      <button id="pair-btn" class="primary">Pair with DemiPass</button>
+      <button id="pair-cancel" hidden>Cancel</button>
+    </div>
+  </section>
+
+  <section id="capture" hidden>
+    <h2>Save login</h2>
+    <div>Save the login you just used on <b id="cap-origin"></b><span id="cap-user-wrap"> as <b id="cap-user"></b></span>?</div>
+    <div id="cap-existing" class="muted" hidden></div>
+    <label for="cap-name">Name in vault</label>
+    <input id="cap-name" type="text" maxlength="64" autocomplete="off">
+    <div class="actions">
+      <button id="cap-save" class="primary">Save to DemiPass</button>
+      <button id="cap-dismiss">Not now</button>
+    </div>
+    <div id="cap-msg"></div>
+  </section>
+
+  <section id="entries" hidden>
+    <h2>For this site</h2>
+    <div id="entry-list"></div>
+    <div id="fill-msg"></div>
+  </section>
+
+  <section id="add" hidden>
+    <h2>Add for this site</h2>
+    <form id="add-form" autocomplete="off">
+      <label for="add-name">Name</label>
+      <input id="add-name" type="text" maxlength="64" required>
+      <label for="add-login">Username or email</label>
+      <input id="add-login" type="text" maxlength="256" autocomplete="off">
+      <label for="add-password">Password</label>
+      <input id="add-password" type="password" maxlength="10000" required autocomplete="new-password">
+      <div class="actions"><button id="add-submit" class="primary" type="submit">Add</button></div>
+    </form>
+    <div id="add-msg"></div>
+  </section>
+</main>
+<script src="popup.js" type="module"></script>
+</body>
+</html>

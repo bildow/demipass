@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>DemiPass options</title>
+  <link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<main>
+  <h1>DemiPass options</h1>
+  <form id="form">
+    <label for="base">API server</label>
+    <input id="base" type="url" placeholder="https://api.dustforge.com">
+    <p class="muted">Leave empty for https://api.dustforge.com. A development server must be on localhost or 127.0.0.1. Changing the server signs you out.</p>
+    <div class="actions"><button class="primary" type="submit">Save</button></div>
+  </form>
+  <p id="msg"></p>
+  <h2>Website access</h2>
+  <p id="access-state" class="muted">Checking…</p>
+  <div class="actions"><button id="access-all" hidden>Allow on all sites</button></div>
+</main>
+<script src="options.js" type="module"></script>
+</body>
+</html>

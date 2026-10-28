@@ -1,0 +1,22 @@
+{
+  "//": "Overlay for Firefox / Zen, applied by build.mjs on top of manifest.json. A null value removes the key.",
+  "minimum_chrome_version": null,
+  "background": {
+    "scripts": [
+      "background.js"
+    ],
+    "type": "module"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "demipass-browser@demipass.com",
+      "strict_min_version": "153.0",
+      "data_collection_permissions": {
+        "required": [
+          "authenticationInfo",
+          "browsingActivity"
+        ]
+      }
+    }
+  }
+}
