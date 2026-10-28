@@ -206,14 +206,14 @@ const TOOLS = [
   },
   {
     name: 'demipass_hostop_run',
-    description: 'HOST OPERATIONS: run a command on a host with a stored SSH password, as a list of words (argv), never a shell line. Runs only inside a window the owner approved; otherwise it files a request the owner approves on the phone and returns status needs_approval with request_id and explain (why nothing covers it, nearest shape). Long work runs as a background job: poll with demipass_hostop_status. Prefer this over demipass_ssh.',
+    description: 'HOST OPERATIONS: run a command on a host with a stored SSH password, as a list of words (argv), never a shell line. Runs only inside a window the owner approved; otherwise it files a request the owner approves on the phone and returns status needs_approval with request_id and explain (why nothing covers it, nearest shape). Long work runs as a background job: poll with demipass_hostop_status. Needs an identity token (your own DID with a delegation for the credential); silicon agent tokens are refused for now. Prefer this over demipass_ssh.',
     inputSchema: {
       type: 'object',
       properties: {
         ref:    { type: 'string', description: 'Ref code of the SSH password (DP-PWD-…)' },
         host:   { type: 'string', description: 'Host address or name' },
         user:   { type: 'string', description: 'SSH login; needed the first time a host is used' },
-        argv:   { type: 'array', items: { type: 'string' }, description: 'The command as words, e.g. ["incus","list"]. No spaces inside a word, no shell syntax.' },
+        argv:   { type: 'array', items: { type: 'string' }, description: 'The command as words, e.g. ["incus","list"]. Printable ASCII; no spaces or backslashes inside a word; no shell syntax.' },
         mode:   { type: 'string', enum: ['run', 'job'], description: 'job = background unit (needs sudo); default run (≤60 s)' },
         sudo:   { type: 'boolean', description: 'For a one-time request: run under sudo' },
         reason: { type: 'string', description: 'Why — shown to the owner when approval is needed' },
