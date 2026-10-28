@@ -72,7 +72,9 @@ function render() {
     $('cap-user').textContent = pl.login;
     show('cap-user-wrap', !!pl.login);
     if (!$('cap-name').value) $('cap-name').value = pl.suggestedName;
-    if (pl.existing) { $('cap-existing').textContent = `Replaces the saved password in “${pl.existing}”.`; show('cap-existing', true); }
+    // A username carried over from the previous step of a multi-step login may not be the account signed in to
+    // (an account chooser): say so, and ask before replacing (see cap-save).
+    if (pl.existing) { $('cap-existing').textContent = pl.loginFromHint ? `Username from the previous step. Saving under “${pl.existing}” replaces its password; you'll be asked first.` : `Replaces the saved password in “${pl.existing}”.`; show('cap-existing', true); }
     else show('cap-existing', false);
     $('cap-save').disabled = !c.paired;
     if (!c.paired) setMsg($('cap-msg'), 'Pair first, then save.', 'muted');
@@ -236,7 +238,7 @@ $('cap-save').addEventListener('click', async () => {
   const pl = ctx && ctx.pendingLogin;
   if (!pl) return;
   const name = $('cap-name').value.trim(); // the background trims too; compare what it compares
-  const replace = capReplace === name || (!!pl.existing && name === pl.existing);
+  const replace = capReplace === name || (!!pl.existing && !pl.loginFromHint && name === pl.existing);
   $('cap-save').disabled = true;
   const r = await send({ type: 'ui:savePending', id: pl.id, name, replace });
   $('cap-save').disabled = false;

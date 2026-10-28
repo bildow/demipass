@@ -133,6 +133,19 @@
     return { els, descriptors, forms };
   }
 
+  // How much one input looks like a username field (100 = says so, 80 email,
+  // 60 named like one, 10 a plain text box, 0/-1 not one).
+  function usernameScoreOf(el) {
+    const doc = el.ownerDocument;
+    const forms = Array.from(doc.forms || []);
+    return usernameScore({
+      type: String(el.type || 'text').toLowerCase(), name: el.name || '', id: el.id || '',
+      autocomplete: el.getAttribute('autocomplete') || '', placeholder: el.placeholder || '',
+      ariaLabel: el.getAttribute('aria-label') || '', label: labelFor(el), visible: isVisible(el),
+      disabled: !!el.disabled, readOnly: !!el.readOnly, formIndex: el.form ? forms.indexOf(el.form) : -1,
+    });
+  }
+
   // Finds the login fields in a document (or inside one <form>).
   function findLoginFields(doc, form) {
     const { els, descriptors, forms } = collectInputs(doc);
@@ -161,5 +174,5 @@
     el.dispatchEvent(new Event('change', { bubbles: true }));
   }
 
-  globalThis.DemiPassFormDetect = Object.freeze({ pickLoginFields, findLoginFields, setInputValue });
+  globalThis.DemiPassFormDetect = Object.freeze({ pickLoginFields, findLoginFields, setInputValue, usernameScoreOf });
 })();

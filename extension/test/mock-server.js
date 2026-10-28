@@ -378,6 +378,23 @@ function trickyPage(pathname, other) {
       <input id="user" name="email" type="email" autocomplete="username"><button type="submit">Next</button></form>`);
     case '/step2.html': return page(`<form id="login" method="post" action="/done">
       <input id="pass" name="password" type="password" autocomplete="current-password"><button type="submit">Sign in</button></form>`);
+    // audit round 4: password-only step with a show-password toggle; the first attempt is refused
+    case '/step2-toggle.html': return page(`<form id="login" method="post" action="/done">
+      <input id="pass" name="password" type="password" autocomplete="current-password"><button id="eye" type="button">show</button>
+      <button type="submit">Sign in</button></form><p id="err"></p><script>
+      let tries = 0; login.addEventListener('submit', (e) => { if (++tries === 1) { e.preventDefault(); err.textContent = 'wrong password'; } });
+      eye.onclick = () => { pass.type = pass.type === 'password' ? 'text' : 'password'; };</script>`);
+    // a search box with no form; Enter goes to a password-only page
+    case '/search.html': return page(`<input id="q" type="search" placeholder="Search">
+      <script>q.addEventListener('keydown', (e) => { if (e.key === 'Enter') location.href = '/step2.html'; });</script>`);
+    // a cookie banner button, and a real send that is type=button with utility classes
+    case '/banner.html': return page(`<div id="cookie" role="button" style="display:inline-block;width:80px;height:20px">Accept all</div>
+      <div><input id="user" type="email" autocomplete="username"><input id="pass" type="password">
+      <button id="go" type="button" class="focus-visible:ring-1 clearfix">Sign in</button></div>
+      <script>go.onclick = () => { location.href = '/done'; };</script>`);
+    // a page with no form, a password field and a header search box
+    case '/header-search.html': return page(`<input id="q" type="search" placeholder="Search">
+      <div><input id="user" type="email"><input id="pass" type="password"></div>`);
     // a login form that stays on the page when submitted
     case '/stay.html': return page(`${LOGIN_FORM}<script>document.getElementById('login').addEventListener('submit', (e) => e.preventDefault());</script>`);
     default: return null;

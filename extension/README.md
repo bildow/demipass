@@ -148,13 +148,18 @@ Build first: `npm run package:extension` (from the repo root). It writes
      before submit), nothing is offered.
   3. **Capture happens only on the person's own send.** That is a trusted
      click on a submit control or on any other button of the page that is
-     not plainly something else (show/hide password, forgot, reset, cancel,
-     back, clear, help, close, or a toggle with `aria-pressed`), labeled or
-     not, in a form or not; or a trusted Enter in any field. `submit`
-     events are not used, so `requestSubmit()` and `form.submit()` from
-     page script offer nothing. A click elsewhere before the real send
-     offers what was typed so far; the real send replaces it (one pending
-     save per tab and frame), and nothing is stored until Save.
+     not plainly something else, labeled or not, in a form or not; or a
+     trusted Enter in a field of a form, or (outside any form) in the
+     login fields themselves, not a search box elsewhere on the page.
+     "Plainly something else" is a whole word in the button's text,
+     `aria-label` or `title` (show, hide, reveal, peek, eye, visibility,
+     toggle, forgot, reset, cancel, back, clear, help, close), or
+     `aria-pressed`; class names and ids are not read. `submit` events are
+     not used, so `requestSubmit()` and `form.submit()` from page script
+     offer nothing. A click elsewhere before the real send (a cookie
+     banner) offers what was typed so far; the moment the person edits
+     that password again the offer is dropped, and the real send offers
+     the finished one. Nothing is stored until Save.
   4. **The password field must be usable.** It must be at least 16x8 CSS px
      and visible: not hidden by CSS, `display` or opacity
      (`checkVisibility`). A 1-pixel field that grabbed focus while the
@@ -305,9 +310,16 @@ browsing history" warning.
   not plainly something else, and Enter in any field. A login sent only by
   page script (for example after a timer) is not offered. Multi-step logins
   (username on one page, password on the next): the username the person
-  typed and sent on step one is kept in memory for that tab for 5 minutes
-  and names the save made on the same origin's password step. A username
-  the page wrote itself is not used.
+  typed and sent on step one is kept in memory for that tab and origin for
+  5 minutes and names the next save made on that origin's password step,
+  once. Only a field that plainly is a username counts (autocomplete
+  username/email, type=email, or named like one; not search, code or OTP
+  boxes) and never a field that has been a password field (a password
+  shown as text by a toggle stays a password). Because an account chooser
+  can switch accounts between the steps, a carried-over username that
+  matches a saved entry does not count as a confirmed replace: the popup
+  says where it came from and asks before replacing. A username the page
+  wrote itself is not used.
 - Selection text is whatever the browser reports as `selectionText`, trimmed.
 - The site-access check reads `permissions.getAll()` and matches the
   patterns itself. Chromium's `permissions.contains()` answers false for

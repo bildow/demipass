@@ -16,9 +16,18 @@ import { senderFrame, injectionTarget, injectedFill, sitePermissionPattern, orig
 const EXT_ORIGIN = new URL(ext.runtime.getURL('')).origin;
 const CLIENT_LABEL = 'DemiPass browser extension';
 const PENDING_TTL_MS = 3 * 60 * 1000;
-// Username sent on step one of a multi-step login, per tab: { origin, login, at }.
+// Username sent on step one of a multi-step login: tabId -> Map(origin -> { login, at }).
+// Used once, by the next same-origin capture in that tab with no username.
 const LOGIN_HINT_TTL_MS = 5 * 60 * 1000;
 const loginHints = new Map();
+function takeLoginHint(tabId, origin) {
+  const m = loginHints.get(tabId);
+  const h = m && m.get(origin);
+  if (!h) return '';
+  m.delete(origin);
+  if (!m.size) loginHints.delete(tabId);
+  return Date.now() - h.at <= LOGIN_HINT_TTL_MS ? h.login : '';
+}
 const MAX_PENDING = 20;
 const MAX_VALUE = 10000;
 
@@ -128,7 +137,7 @@ function pendingLoginFor(tabId) {
   let best = null;
   for (const [id, p] of pending) {
     if (p.kind !== 'login' || p.tabId !== tabId || p.expiresAt <= Date.now()) continue;
-    const cand = { id, origin: p.origin, login: p.login, frameId: p.frameId, at: p.expiresAt };
+    const cand = { id, origin: p.origin, login: p.login, loginFromHint: !!p.loginFromHint, frameId: p.frameId, at: p.expiresAt };
     if (!best || (cand.frameId === 0) > (best.frameId === 0) || ((cand.frameId === 0) === (best.frameId === 0) && cand.at > best.at)) best = cand;
   }
   return best && { id: best.id, origin: best.origin, login: best.login, frameId: best.frameId };
@@ -607,7 +616,13 @@ async function handleContent(msg, sender) {
   if (msg.type === 'dp:loginHint') {
     const login = typeof msg.login === 'string' ? msg.login.trim().slice(0, 256) : '';
     if (!f.origin || !login) return { ok: false };
-    loginHints.set(f.tabId, { origin: f.origin, login, at: Date.now() });
+    if (!loginHints.has(f.tabId)) loginHints.set(f.tabId, new Map());
+    loginHints.get(f.tabId).set(f.origin, { login, at: Date.now() });
+    return { ok: true };
+  }
+  // The person edited the password this frame offered: that offer is stale.
+  if (msg.type === 'dp:captureStale') {
+    for (const [id, p] of pending) if (p.kind === 'login' && p.tabId === f.tabId && p.frameId === f.frameId) dropPending(id);
     return { ok: true };
   }
   if (msg.type === 'dp:capture') {
@@ -615,11 +630,10 @@ async function handleContent(msg, sender) {
     const password = typeof msg.password === 'string' ? msg.password : '';
     let login = typeof msg.login === 'string' ? msg.login.slice(0, 256) : '';
     if (!origin || !password || password.length > MAX_VALUE) return { ok: false };
-    const hint = loginHints.get(f.tabId);
-    if (hint && Date.now() - hint.at > LOGIN_HINT_TTL_MS) loginHints.delete(f.tabId);
-    else if (hint && !login.trim() && hint.origin === origin) login = hint.login;
+    let loginFromHint = false;
+    if (!login.trim()) { const h = takeLoginHint(f.tabId, origin); if (h) { login = h; loginFromHint = true; } }
     recordFrame(f, true);
-    addPending({ kind: 'login', value: password, login, origin, tabId: f.tabId, frameId: f.frameId });
+    addPending({ kind: 'login', value: password, login, loginFromHint, origin, tabId: f.tabId, frameId: f.frameId });
     return { ok: true };
   }
   return { ok: false };

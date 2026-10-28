@@ -76,6 +76,10 @@
   const tokens = new WeakMap(); // input -> { kind, key }, valid for the current task only
   const composing = new WeakSet(); // inputs with an open trusted composition
   const typed = new WeakMap(); // input -> value after its last counted input event
+  // Fields that have been type=password at any point (a show-password toggle
+  // makes them type=text for a while): never a username, never a hint.
+  const everPassword = new WeakSet();
+  const notePasswords = () => { for (const el of document.querySelectorAll('input[type=password]')) everPassword.add(el); };
   const issue = (el, tok) => {
     tokens.set(el, tok);
     setTimeout(() => { if (tokens.get(el) === tok) tokens.delete(el); }, 0);
@@ -105,11 +109,15 @@
   window.addEventListener('input', (e) => {
     const t = e.target;
     if (!e.isTrusted || !(t instanceof HTMLInputElement)) return;
+    if (t.type === 'password') everPassword.add(t);
     const tok = tokens.get(t);
     tokens.delete(t); // spent either way
     const ime = composing.has(t) && (e.isComposing || /Composition/.test(e.inputType || ''));
     if (activated() && (ime || (tok && matches(tok, e)))) typed.set(t, t.value);
     else typed.delete(t);
+    // The password offered for saving was edited after all (a click or Enter
+    // before the real send): drop that offer; the real send offers again.
+    if (captured && captured.el === t && t.value !== captured.value) { captured = null; send({ type: 'dp:captureStale' }); }
   }, true);
 
   function usable(el) {
@@ -123,17 +131,25 @@
   // Step one of a multi-step login: the username the person typed (not one a
   // page or another manager wrote), from the field they sent, else from the
   // form or page.
+  // Only a field that plainly is a username (autocomplete username/email,
+  // type=email, or named like one; not search, code or OTP boxes) and never
+  // one that has been a password field.
   function typedUsername(form, target) {
     const own = (el) => el instanceof HTMLInputElement && typed.get(el) === el.value && String(el.value).trim() !== '' && usable(el);
-    const userish = (el) => /^(text|email|tel)$/.test(el.type) || /username|email/.test(el.autocomplete || '');
-    if (target && own(target) && userish(target)) return String(target.value).trim();
-    const pool = [...(form || document).querySelectorAll('input')].filter((el) => userish(el) && own(el));
-    const best = pool.find((el) => /username|email/.test(el.autocomplete || '')) || pool.find((el) => el.type === 'email') || pool[0];
-    return best ? String(best.value).trim() : '';
+    const userish = (el) => !everPassword.has(el) && !/current-password|new-password/.test(el.getAttribute('autocomplete') || '')
+      && D.usernameScoreOf(el) >= 60;
+    const pool = [...(form || document).querySelectorAll('input')].filter((el) => own(el) && userish(el));
+    if (target && pool.includes(target)) return String(target.value).trim();
+    pool.sort((a, b) => D.usernameScoreOf(b) - D.usernameScoreOf(a));
+    return pool.length ? String(pool[0].value).trim() : '';
   }
 
-  let lastCapture = 0;
-  function capture(form, target) {
+  let lastCapture = 0, lastCaptured = '';
+  let captured = null; // { el, value } of the password last offered from this document
+  // looseEnter: Enter in a field outside any form counts only in the login
+  // fields themselves (not a search box elsewhere on the page).
+  function capture(form, target, looseEnter) {
+    notePasswords();
     let f = null;
     try { f = D.findLoginFields(document, form || undefined); } catch (_) {}
     if (!f || !f.password) {
@@ -141,12 +157,14 @@
       if (login) send({ type: 'dp:loginHint', login: login.slice(0, 256) });
       return;
     }
+    if (looseEnter && target !== f.password && target !== f.newPassword && target !== f.username) return;
     const pwEl = f.newPassword || f.password;
     const password = pwEl.value;
     if (!password || typed.get(pwEl) !== password || !usable(pwEl)) return;
     const now = Date.now();
-    if (now - lastCapture < 800) return; // one action, one capture
-    lastCapture = now;
+    if (now - lastCapture < 800 && password === lastCaptured) return; // one action, one capture
+    lastCapture = now; lastCaptured = password;
+    captured = { el: pwEl, value: password };
     const login = f.username ? String(f.username.value || '').trim() : '';
     send({ type: 'dp:capture', login, password });
   }
@@ -154,13 +172,15 @@
   // The person's own send: a click on a submit control or another button,
   // labeled or not (icon-only, outside the form), except the buttons that
   // are clearly not a send.
-  const NOT_A_SEND = /show|hide|reveal|peek|eye|visib|toggle|forgot|reset|cancel|back|clear|help|close/;
+  const NOT_A_SEND = /\b(show|hide|reveal|peek|eye|visibility|toggle|forgot|reset|cancel|back|clear|help|close)\b/;
   window.addEventListener('click', (e) => {
     if (!e.isTrusted) return; // element.click() / dispatched clicks
     const t = e.target instanceof Element ? e.target.closest('button, input[type=submit], input[type=image], input[type=button], [role=button]') : null;
     if (!t) return;
     if (t.form && (t.type === 'submit' || t.type === 'image')) { capture(t.form); return; }
-    const label = [t.textContent, t.value, t.getAttribute('aria-label'), t.getAttribute('title'), t.id, t.className]
+    // What the person reads (text, aria-label, title), as whole words: class
+    // names like "focus-visible" or "clearfix" say nothing about the button.
+    const label = [t.textContent, t.value, t.getAttribute('aria-label'), t.getAttribute('title')]
       .map((x) => (typeof x === 'string' ? x : '')).join(' ').toLowerCase();
     if (NOT_A_SEND.test(label) || t.getAttribute('aria-pressed') != null) return;
     capture(t.form || null);
@@ -171,7 +191,8 @@
     if (!e.isTrusted || e.key !== 'Enter' || e.isComposing) return;
     const t = e.target;
     if (!(t instanceof HTMLInputElement)) return;
-    capture(t.form || null, t);
+    if (t.form) capture(t.form, t);
+    else capture(null, t, true);
   }, true);
 
   ext.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -185,9 +206,11 @@
   window.addEventListener('pagehide', (e) => { if (e.isTrusted) send({ type: 'dp:gone' }); }, true);
   window.addEventListener('pageshow', (e) => { if (e.isTrusted && e.persisted) announce(true); }, true);
 
+  notePasswords();
   announce(true);
   let t = null;
   new MutationObserver(() => {
+    notePasswords(); // before a show-password toggle can make a new field type=text
     if (t) return;
     t = setTimeout(() => { t = null; announce(false); }, 500);
   }).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['type', 'style', 'class', 'hidden'] });

@@ -593,6 +593,89 @@ async function scenario(d, mock, step) {
     await savedOffer(page, 'twostep@example.com');
     await page.close();
   });
+  await step('a password typed while shown as text never becomes the username (audit round 4 F1)', async () => {
+    const page = await d.newPage(`${A}/step2-toggle.html?p=${++seq}`);
+    await sleep(500);
+    await page.click('#eye');
+    await page.type('#pass', 'wrong-first-try');
+    await page.click('button[type=submit]'); // refused by the site; the field is type=text: no password on the page
+    await sleep(400);
+    await page.click('#eye');
+    await page.type('#pass', 'right-password');
+    await page.clickAndWaitUrl('button[type=submit]', /\/done$/);
+    await sleep(300);
+    const { pop } = await openPopupFor(page);
+    await waitVisible(pop, '#capture');
+    assert.equal(await text(pop, '#cap-user'), '');
+    assert.equal((await pop.content()).includes('wrong-first-try'), false, 'the first password is nowhere in the popup');
+    await pop.click('#cap-dismiss');
+    await pop.close(); await page.close();
+  });
+  await step('search text is not a username, and a step-one username is used once (audit round 4 F2)', async () => {
+    const page = await d.newPage(`${A}/search.html?p=${++seq}`);
+    await sleep(500);
+    await page.type('#q', 'divorce lawyer near me');
+    await page.pressAndWaitUrl('#q', 'Enter', /\/step2\.html/);
+    await sleep(500);
+    await page.type('#pass', 'typed-after-search');
+    await page.clickAndWaitUrl('button[type=submit]', /\/done$/);
+    await sleep(300);
+    let { pop } = await openPopupFor(page);
+    await waitVisible(pop, '#capture');
+    assert.equal(await text(pop, '#cap-user'), '');
+    await pop.click('#cap-dismiss'); await pop.close();
+    // the two-step hint is spent by its save: a second password step gets none
+    await page.goto(`${A}/step1.html?p=${++seq}`);
+    await sleep(500);
+    await page.type('#user', 'once@example.com');
+    await page.clickAndWaitUrl('button[type=submit]', /\/step2\.html/);
+    await sleep(500);
+    await page.type('#pass', 'first-use');
+    await page.clickAndWaitUrl('button[type=submit]', /\/done$/);
+    await savedOffer(page, 'once@example.com');
+    await page.goto(`${A}/step2.html?p=${++seq}`);
+    await sleep(500);
+    await page.type('#pass', 'second-use');
+    await page.clickAndWaitUrl('button[type=submit]', /\/done$/);
+    await sleep(300);
+    ({ pop } = await openPopupFor(page));
+    await waitVisible(pop, '#capture');
+    assert.equal(await text(pop, '#cap-user'), '');
+    await pop.click('#cap-dismiss'); await pop.close();
+    await page.close();
+  });
+  await step('a click before the real send, then more typing: the full password is what is offered (audit round 4 F3)', async () => {
+    const page = await d.newPage(`${A}/banner.html?p=${++seq}`);
+    await sleep(500);
+    await page.type('#user', 'banner@example.com');
+    await page.type('#pass', 'corr');
+    await page.click('#cookie'); // premature: offers "corr"
+    await sleep(300);
+    await page.eval(() => { document.getElementById('pass').focus(); const el = document.getElementById('pass'); el.setSelectionRange(el.value.length, el.value.length); return true; });
+    await page.typeMore('#pass', 'ect-horse');
+    await page.clickAndWaitUrl('#go', /\/done$/); // type=button with utility classes is still a send
+    await sleep(300);
+    const { pop } = await openPopupFor(page);
+    await waitVisible(pop, '#capture');
+    assert.equal(await text(pop, '#cap-user'), 'banner@example.com');
+    await pop.fill('#cap-name', 'banner-login');
+    await pop.click('#cap-save');
+    await waitText(pop, '#cap-msg', /Saved as/);
+    assert.equal([...state.secrets.values()].find((x) => x.name === 'banner-login').value, 'correct-horse');
+    await pop.close(); await page.close();
+  });
+  await step('Enter in a search box on a login page with no form offers nothing (audit round 4 F3)', async () => {
+    const page = await d.newPage(`${A}/header-search.html?p=${++seq}`);
+    await sleep(500);
+    await page.type('#user', 'half@example.com');
+    await page.type('#pass', 'half');
+    await page.type('#q', 'help');
+    await page.eval(() => { document.getElementById('q').focus(); return true; });
+    await page.pressKey('#q', 'Enter');
+    await sleep(500);
+    assert.equal(await noBadge(page), '');
+    await page.close();
+  });
   await step('the show-password toggle is not a send: no save offered by clicking it', async () => {
     const page = await d.newPage(`${A}/toggle.html?p=${++seq}`);
     await sleep(500);

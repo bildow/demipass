@@ -144,6 +144,15 @@ export async function launchGecko({ xpi, addonId, binary, geckodriver, work, lab
         const end = Date.now() + 15000;
         while (!re.test(await this.url())) { if (Date.now() > end) throw new Error('timeout waiting for url ' + re); await sleep(100); }
       },
+      // Send Keys without clearing: types after what the field holds.
+      async typeMore(sel, value) {
+        await waitVisible(handle, sel);
+        await cmd('POST', `/element/${await find(handle, sel)}/value`, { text: value });
+      },
+      async pressKey(sel, key) {
+        await waitVisible(handle, sel);
+        await cmd('POST', `/element/${await find(handle, sel)}/value`, { text: { Enter: '\uE007' }[key] || key });
+      },
       // A real key press in the field, without clearing it (WebDriver key codes: Enter = U+E007).
       async pressAndWaitUrl(sel, key, re) {
         await waitVisible(handle, sel);
