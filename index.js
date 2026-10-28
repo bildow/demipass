@@ -514,6 +514,33 @@ async function ssh({ ref, target_host, target_user, command, override_reason } =
   return use({ ref, action: 'ssh_exec', target_host, target_user, command, override_reason });
 }
 
+// ── Host operations (docs/host-operations.md in dustforge) ──
+// Run an argv (a list of words, never a shell line) on a host with a stored SSH password. Covered by an open window
+// → { ok, run }; not covered → { status:'needs_approval', request_id, explain } and the owner decides on the phone.
+function hostopRun({ ref, host, user, port, argv, mode, sudo, reason } = {}) {
+  if (!ref || !host || !Array.isArray(argv)) throw new Error('hostopRun() requires ref, host and argv (an array of words)');
+  const body = { ref, host, argv };
+  for (const [k, v] of Object.entries({ user, port, mode, sudo, reason })) if (v !== undefined) body[k] = v;
+  return _request('POST', '/api/demipass/hostops/run', body);
+}
+// Ask the owner for a window: a set of command shapes for some hours (the owner approves with the vault PIN).
+function hostopRequestWindow({ ref, host, user, port, label, reason, duration_hours, shapes } = {}) {
+  if (!ref || !host || !label || !duration_hours || !Array.isArray(shapes)) throw new Error('hostopRequestWindow() requires ref, host, label, duration_hours and shapes');
+  const body = { kind: 'window', ref, host, label, duration_hours, shapes };
+  for (const [k, v] of Object.entries({ user, port, reason })) if (v !== undefined) body[k] = v;
+  return _request('POST', '/api/demipass/hostops/requests', body);
+}
+// A run (refreshes a running job) or a request.
+function hostopStatus({ run_id, request_id } = {}) {
+  if (run_id) return _request('GET', `/api/demipass/hostops/runs/${encodeURIComponent(run_id)}`);
+  if (request_id) return _request('GET', `/api/demipass/hostops/requests/${encodeURIComponent(request_id)}`);
+  return _request('GET', '/api/demipass/hostops/windows');
+}
+function hostopCancel({ run_id } = {}) {
+  if (!run_id) throw new Error('hostopCancel() requires run_id');
+  return _request('POST', `/api/demipass/hostops/runs/${encodeURIComponent(run_id)}/cancel`, {});
+}
+
 // Search secrets by name pattern, type, or provider
 async function search({ query, type, provider } = {}) {
   const all = await list();
@@ -1166,6 +1193,10 @@ module.exports = {
   // High-level ergonomic operations
   use,
   ssh,
+  hostopRun,
+  hostopRequestWindow,
+  hostopStatus,
+  hostopCancel,
   search,
   expiring,
   whoami,

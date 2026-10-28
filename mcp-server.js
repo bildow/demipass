@@ -205,6 +205,50 @@ const TOOLS = [
     },
   },
   {
+    name: 'demipass_hostop_run',
+    description: 'HOST OPERATIONS: run a command on a host with a stored SSH password, as a list of words (argv), never a shell line. Runs only inside a window the owner approved; otherwise it files a request the owner approves on the phone and returns status needs_approval with request_id and explain (why nothing covers it, nearest shape). Long work runs as a background job: poll with demipass_hostop_status. Prefer this over demipass_ssh.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ref:    { type: 'string', description: 'Ref code of the SSH password (DP-PWD-…)' },
+        host:   { type: 'string', description: 'Host address or name' },
+        user:   { type: 'string', description: 'SSH login; needed the first time a host is used' },
+        argv:   { type: 'array', items: { type: 'string' }, description: 'The command as words, e.g. ["incus","list"]. No spaces inside a word, no shell syntax.' },
+        mode:   { type: 'string', enum: ['run', 'job'], description: 'job = background unit (needs sudo); default run (≤60 s)' },
+        sudo:   { type: 'boolean', description: 'For a one-time request: run under sudo' },
+        reason: { type: 'string', description: 'Why — shown to the owner when approval is needed' },
+      },
+      required: ['ref', 'host', 'argv'],
+    },
+  },
+  {
+    name: 'demipass_hostop_request_window',
+    description: 'HOST OPERATIONS: ask the owner for a time-boxed window of command shapes on a host (approved on the phone with the vault PIN). A shape is a template: literal words plus typed slots, e.g. {"name":"flight","mode":"job","sudo":true,"max_seconds":10800,"argv":["/usr/local/sbin/x.sh",{"slot":"c","enum":["a","b"]},{"slot":"p","type":"path","under":["/srv/"]},{"literal":"--dry-run","optional":true}]}. Slot kinds: type word|int|path(+under), enum, match (anchored regex); optional prefix (e.g. "source="). Returns request_id; poll demipass_hostop_status.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ref:            { type: 'string', description: 'Ref code of the SSH password (DP-PWD-…)' },
+        host:           { type: 'string', description: 'Host address or name' },
+        user:           { type: 'string', description: 'SSH login (needed for a host not yet registered)' },
+        label:          { type: 'string', description: 'What the window is for (shown to the owner)' },
+        reason:         { type: 'string', description: 'Why it is needed' },
+        duration_hours: { type: 'integer', description: '1-720' },
+        shapes:         { type: 'array', items: { type: 'object' }, description: 'Command shapes (see description)' },
+      },
+      required: ['ref', 'host', 'label', 'duration_hours', 'shapes'],
+    },
+  },
+  {
+    name: 'demipass_hostop_status',
+    description: 'HOST OPERATIONS: a run (status, exit code, output tail; refreshes a running job), a request (pending/approved/denied/expired), or with no arguments your windows.',
+    inputSchema: { type: 'object', properties: { run_id: { type: 'integer' }, request_id: { type: 'integer' } } },
+  },
+  {
+    name: 'demipass_hostop_cancel',
+    description: 'HOST OPERATIONS: stop a running background job.',
+    inputSchema: { type: 'object', properties: { run_id: { type: 'integer' } }, required: ['run_id'] },
+  },
+  {
     name: 'demipass_search',
     description: 'Search secrets by name, type, or provider. Returns matching secrets with ref codes. Use when you need to find a specific ref code from the vault.',
     inputSchema: {
@@ -441,6 +485,10 @@ const HANDLERS = {
   async demipass_ssh(args) {
     return await demipass.ssh(args);
   },
+  async demipass_hostop_run(args) { return await demipass.hostopRun(args); },
+  async demipass_hostop_request_window(args) { return await demipass.hostopRequestWindow(args); },
+  async demipass_hostop_status(args) { return await demipass.hostopStatus(args || {}); },
+  async demipass_hostop_cancel(args) { return await demipass.hostopCancel(args); },
   async demipass_search(args) {
     return await demipass.search(args);
   },
