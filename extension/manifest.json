@@ -3,6 +3,7 @@
   "name": "DemiPass",
   "version": "0.1.0",
   "description": "Put passwords and API keys into your DemiPass vault, and fill logins after approving on your phone.",
+  "homepage_url": "https://demipass.com",
   "minimum_chrome_version": "116",
   "permissions": [
     "storage",

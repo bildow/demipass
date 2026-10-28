@@ -4,9 +4,13 @@ Puts passwords and API keys into a DemiPass vault without the value passing
 through a clipboard, chat, terminal or transcript, and fills logins after the
 person approves each fill on their phone with the vault PIN.
 
-API contract: [`docs/browser-fill-api.md` on dustforge `feat/browser-fill`](https://github.com/bildow/dustforge/blob/feat/browser-fill/docs/browser-fill-api.md).
-The fill, candidates and origins endpoints are **not deployed yet**. Until
-they are, use the local mock (below).
+It needs a DemiPass account and the DemiPass Android app, which holds the
+vault and approves every pairing and fill: [demipass.com](https://demipass.com/#get-started).
+What it sends and stores: [demipass.com/privacy](https://demipass.com/privacy).
+
+API contract: [`docs/browser-fill-api.md` in dustforge](https://github.com/bildow/dustforge/blob/main/docs/browser-fill-api.md).
+The server side has been live at `https://api.dustforge.com` since 2026-10-25.
+For development, use the local mock (below).
 
 One source tree runs in **Chrome, Brave** (and other Chromium browsers) and
 **Firefox, Zen** (and other Gecko browsers). The code is identical. A small
