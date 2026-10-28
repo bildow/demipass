@@ -712,17 +712,21 @@ async function scenario(d, mock, step) {
     assert.equal(html.includes('Css-masked-pw'), false);
     await page.close();
   });
-  await step('page script editing the password after the send cannot withdraw the offer (audit round 5 R3)', async () => {
-    const page = await d.newPage(`${A}/stay-exec.html?p=${++seq}`);
+  await step('a half-typed offer is dropped when the rest arrives by an edit the extension does not count (audit round 6 N1)', async () => {
+    const page = await d.newPage(`${A}/banner.html?p=${++seq}`);
     await sleep(500);
-    await page.type('#user', 'exec@example.com');
-    await page.type('#pass', 'kept-offer');
-    await page.click('button[type=submit]');
+    await page.type('#user', 'n1@example.com');
+    await page.type('#pass', 'corr');
+    await page.click('#cookie'); // premature: offers "corr"
     await sleep(400);
     assert.equal(await noBadge(page), 'SAVE');
-    assert.equal(await page.eval(() => window.poke()), 'kept-offerx', 'the page did edit the field');
-    await sleep(500);
-    assert.equal(await noBadge(page), 'SAVE');
+    // the rest comes from autofill / another manager / dictation (no keystroke): execCommand stands in for it
+    await page.eval(() => { const el = document.getElementById('pass'); el.focus(); el.setSelectionRange(4, 4); document.execCommand('insertText', false, 'ect-horse'); return true; });
+    await sleep(400);
+    assert.equal(await noBadge(page), '', 'the half-typed offer is gone');
+    await page.clickAndWaitUrl('#go', /\/done$/);
+    await sleep(400);
+    assert.equal(await noBadge(page), '', 'and the uncounted value is not offered either');
     await page.close();
   });
 

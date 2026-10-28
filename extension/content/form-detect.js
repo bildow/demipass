@@ -10,7 +10,7 @@
 
   const USERNAME_TYPES = new Set(['text', 'email', 'tel', '']);
   const USERNAME_HINT = /user|login|email|e-mail|account|ident|nick|handle|phone|mail/i;
-  const NOT_USERNAME_HINT = /search|captcha|otp|totp|2fa|mfa|code|token|query|coupon|zip|postal|pass|pwd|\bpin\b/i;
+  const NOT_USERNAME_HINT = /search|captcha|otp|totp|2fa|mfa|code|token|query|coupon|zip|postal|pass(word|wd|code|phrase)|\bpass\b|pwd|\bpin\b/i;
 
   function hintText(d) {
     return [d.name, d.id, d.placeholder, d.ariaLabel, d.label].filter(Boolean).join(' ');

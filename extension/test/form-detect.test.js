@@ -97,3 +97,9 @@ test('a text field named or labelled as a password is never the username', () =>
     assert.notEqual(r.usernameIndex, 0, JSON.stringify(f));
   }
 });
+
+test('passport, compass and passkey fields are still usernames', () => {
+  for (const f of [inp({ placeholder: 'Email or passport number' }), inp({ name: 'compass_id' }), inp({ type: 'email', name: 'passkey_email' })]) {
+    assert.equal(pickLoginFields([f, inp({ type: 'password' })]).usernameIndex, 0, JSON.stringify(f));
+  }
+});

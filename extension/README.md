@@ -157,9 +157,12 @@ Build first: `npm run package:extension` (from the repo root). It writes
      `aria-pressed`; class names and ids are not read. `submit` events are
      not used, so `requestSubmit()` and `form.submit()` from page script
      offer nothing. A click elsewhere before the real send (a cookie
-     banner) offers what was typed so far; the moment the person edits
-     that password again the offer is dropped, and the real send offers
-     the finished one. Nothing is stored until Save.
+     banner) offers what was typed so far; the moment that password field
+     changes again (the person typing, or autofill, another manager or
+     dictation finishing it) the offer is dropped, and the real send
+     offers the finished value if the person typed it. A page can drop
+     its own offer this way; it could hide it anyway. Nothing is stored
+     until Save.
   4. **The password field must be usable.** It must be at least 16x8 CSS px
      and visible: not hidden by CSS, `display` or opacity
      (`checkVisibility`). A 1-pixel field that grabbed focus while the

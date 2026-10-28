@@ -116,10 +116,12 @@
     const counted = activated() && (ime || (tok && matches(tok, e)));
     if (counted) typed.set(t, t.value);
     else typed.delete(t);
-    // The person edited the password offered for saving (a click or Enter
-    // before the real send): drop that offer; the real send offers again.
-    // Only their own counted edit does this, so page script cannot withdraw it.
-    if (counted && captured && captured.el === t && t.value !== captured.value) { captured = null; send({ type: 'dp:captureStale' }); }
+    // The password offered for saving changed (the person kept typing after a
+    // click or Enter before the real send, or autofill, another manager or
+    // dictation finished it): drop that offer, so a half-typed value is never
+    // kept. The real send offers again if the new value is one the person
+    // typed. A page can drop its own offer this way; it could hide it anyway.
+    if (captured && captured.el === t && t.value !== captured.value) { captured = null; send({ type: 'dp:captureStale' }); }
   }, true);
 
   function usable(el) {
