@@ -147,10 +147,14 @@ Build first: `npm run package:extension` (from the repo root). It writes
      after its last counted input. If the page changed it since (swapped it
      before submit), nothing is offered.
   3. **Capture happens only on the person's own send.** That is a trusted
-     click on the form's submit control or on a sign-in button, or a
-     trusted Enter in a field of that form (or in a form-less password
-     field). `submit` events are not used, so `requestSubmit()` and
-     `form.submit()` from page script offer nothing.
+     click on a submit control or on any other button of the page that is
+     not plainly something else (show/hide password, forgot, reset, cancel,
+     back, clear, help, close, or a toggle with `aria-pressed`), labeled or
+     not, in a form or not; or a trusted Enter in any field. `submit`
+     events are not used, so `requestSubmit()` and `form.submit()` from
+     page script offer nothing. A click elsewhere before the real send
+     offers what was typed so far; the real send replaces it (one pending
+     save per tab and frame), and nothing is stored until Save.
   4. **The password field must be usable.** It must be at least 16x8 CSS px
      and visible: not hidden by CSS, `display` or opacity
      (`checkVisibility`). A 1-pixel field that grabbed focus while the
@@ -297,12 +301,13 @@ browsing history" warning.
 
   This is deliberate: to the content script they look the same as a page
   forging a value. Use **Add for this site** for them.
-- The capture covers a click on a form's submit control or a sign-in
-  button, and Enter in a login form's field or a form-less password field.
-  A login sent only by page script (for example after a timer) is not
-  offered. Multi-step logins that ask for the
-  username and password on separate pages capture only the password page's
-  fields, so the username may be empty. The person can still save.
+- The capture covers a click on a submit control or on any button that is
+  not plainly something else, and Enter in any field. A login sent only by
+  page script (for example after a timer) is not offered. Multi-step logins
+  (username on one page, password on the next): the username the person
+  typed and sent on step one is kept in memory for that tab for 5 minutes
+  and names the save made on the same origin's password step. A username
+  the page wrote itself is not used.
 - Selection text is whatever the browser reports as `selectionText`, trimmed.
 - The site-access check reads `permissions.getAll()` and matches the
   patterns itself. Chromium's `permissions.contains()` answers false for

@@ -144,6 +144,14 @@ export async function launchGecko({ xpi, addonId, binary, geckodriver, work, lab
         const end = Date.now() + 15000;
         while (!re.test(await this.url())) { if (Date.now() > end) throw new Error('timeout waiting for url ' + re); await sleep(100); }
       },
+      // A real key press in the field, without clearing it (WebDriver key codes: Enter = U+E007).
+      async pressAndWaitUrl(sel, key, re) {
+        await waitVisible(handle, sel);
+        const id = await find(handle, sel);
+        await cmd('POST', `/element/${id}/value`, { text: { Enter: '\uE007' }[key] || key });
+        const end = Date.now() + 15000;
+        while (!re.test(await this.url())) { if (Date.now() > end) throw new Error('timeout waiting for url ' + re); await sleep(100); }
+      },
       eval: (fn, arg) => exec(handle, fn, arg),
       async waitFn(fn, arg, timeout = 15000) {
         const end = Date.now() + timeout;

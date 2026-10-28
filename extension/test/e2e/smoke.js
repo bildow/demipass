@@ -545,6 +545,65 @@ async function scenario(d, mock, step) {
     await pop.close(); await page.close();
   });
 
+  // Sends that carry no sign-in words still offer the save (round 3 false negatives).
+  const savedOffer = async (page, user) => {
+    await sleep(300);
+    assert.equal(await noBadge(page), 'SAVE');
+    const { pop } = await openPopupFor(page);
+    await waitVisible(pop, '#capture');
+    assert.equal(await text(pop, '#cap-user'), user);
+    await pop.click('#cap-dismiss');
+    await pop.close();
+  };
+  await step('an icon-only button in the form (no label) offers the save', async () => {
+    const page = await d.newPage(`${A}/icon-btn.html?p=${++seq}`);
+    await sleep(500);
+    await page.type('#user', 'icon@example.com');
+    await page.type('#pass', 'typed-icon-button');
+    await page.clickAndWaitUrl('#go', /\/done$/);
+    await savedOffer(page, 'icon@example.com');
+    await page.close();
+  });
+  await step('an unlabeled role=button outside any form offers the save', async () => {
+    const page = await d.newPage(`${A}/outside-btn.html?p=${++seq}`);
+    await sleep(500);
+    await page.type('#user', 'outside-user');
+    await page.type('#pass', 'typed-outside-button');
+    await page.clickAndWaitUrl('#go', /\/done$/);
+    await savedOffer(page, 'outside-user');
+    await page.close();
+  });
+  await step('a page with no form: Enter in the username field offers the save', async () => {
+    const page = await d.newPage(`${A}/formless.html?p=${++seq}`);
+    await sleep(500);
+    await page.type('#pass', 'typed-formless');
+    await page.type('#user', 'formless@example.com');
+    await page.pressAndWaitUrl('#user', 'Enter', /\/done$/);
+    await savedOffer(page, 'formless@example.com');
+    await page.close();
+  });
+  await step('multi-step login: the username sent on step one names the save made on step two', async () => {
+    const page = await d.newPage(`${A}/step1.html?p=${++seq}`);
+    await sleep(500);
+    await page.type('#user', 'twostep@example.com');
+    await page.clickAndWaitUrl('button[type=submit]', /\/step2\.html/);
+    await sleep(500);
+    await page.type('#pass', 'typed-on-step-two');
+    await page.clickAndWaitUrl('button[type=submit]', /\/done$/);
+    await savedOffer(page, 'twostep@example.com');
+    await page.close();
+  });
+  await step('the show-password toggle is not a send: no save offered by clicking it', async () => {
+    const page = await d.newPage(`${A}/toggle.html?p=${++seq}`);
+    await sleep(500);
+    await page.type('#user', 'toggle2@example.com');
+    await page.type('#pass', 'typed-then-peek');
+    await page.click('#eye');
+    await sleep(500);
+    assert.equal(await noBadge(page), '');
+    await page.close();
+  });
+
   await step('a cross-origin iframe cannot replace the top frame\'s pending save (audit P3)', async () => {
     const page = await d.newPage(`${A}/top-frame.html?p=${++seq}`);
     await sleep(800);

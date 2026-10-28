@@ -362,6 +362,22 @@ function trickyPage(pathname, other) {
       login.addEventListener('submit', (e) => e.preventDefault());
       let busy = false; pass.addEventListener('input', () => { if (busy) return; busy = true; const v = pass.value; pass.select(); document.execCommand('insertText', false, v + 'X'); busy = false; });
       </script>`);
+    // sends with no sign-in words: an icon-only button in the form, an unlabeled role=button outside any form,
+    // Enter in the username field of a page with no form
+    case '/icon-btn.html': return page(`<form id="login" method="post" action="/done">
+      <input id="user" name="email" type="email" autocomplete="username"><input id="pass" name="password" type="password">
+      <button id="go" type="button"><svg width="16" height="16"><path d="M2 8h12"/></svg></button></form>
+      <script>go.onclick = () => login.submit();</script>`);
+    case '/outside-btn.html': return page(`<div><input id="user" type="text" autocomplete="username"><input id="pass" type="password"></div>
+      <div id="go" role="button" tabindex="0" style="display:inline-block;width:40px;height:20px;background:#ccc"></div>
+      <script>go.onclick = () => { location.href = '/done'; };</script>`);
+    case '/formless.html': return page(`<div><input id="user" type="email"><input id="pass" type="password"></div>
+      <script>user.addEventListener('keydown', (e) => { if (e.key === 'Enter') location.href = '/done'; });</script>`);
+    // multi-step: the username on one page, the password on the next
+    case '/step1.html': return page(`<form id="s1" method="get" action="/step2.html">
+      <input id="user" name="email" type="email" autocomplete="username"><button type="submit">Next</button></form>`);
+    case '/step2.html': return page(`<form id="login" method="post" action="/done">
+      <input id="pass" name="password" type="password" autocomplete="current-password"><button type="submit">Sign in</button></form>`);
     // a login form that stays on the page when submitted
     case '/stay.html': return page(`${LOGIN_FORM}<script>document.getElementById('login').addEventListener('submit', (e) => e.preventDefault());</script>`);
     default: return null;

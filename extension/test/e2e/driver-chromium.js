@@ -53,6 +53,7 @@ export async function launchChromium({ extDir, work, executablePath, label }) {
       },
       click: (sel) => page.click(sel),
       clickAndWaitUrl: (sel, re) => Promise.all([page.waitForURL(re), page.click(sel)]),
+      pressAndWaitUrl: (sel, key, re) => Promise.all([page.waitForURL(re), page.press(sel, key)]),
       eval: (fn, arg) => page.evaluate(fn, arg),
       waitFn: (fn, arg, timeout = 15000) => page.waitForFunction(fn, arg, { timeout, polling: 100 }),
       content: () => page.content(),

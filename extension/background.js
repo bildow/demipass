@@ -16,6 +16,9 @@ import { senderFrame, injectionTarget, injectedFill, sitePermissionPattern, orig
 const EXT_ORIGIN = new URL(ext.runtime.getURL('')).origin;
 const CLIENT_LABEL = 'DemiPass browser extension';
 const PENDING_TTL_MS = 3 * 60 * 1000;
+// Username sent on step one of a multi-step login, per tab: { origin, login, at }.
+const LOGIN_HINT_TTL_MS = 5 * 60 * 1000;
+const loginHints = new Map();
 const MAX_PENDING = 20;
 const MAX_VALUE = 10000;
 
@@ -82,6 +85,7 @@ function forgetFrame(f) {
 
 ext.tabs.onRemoved.addListener((tabId) => {
   frames.delete(tabId);
+  loginHints.delete(tabId);
   for (const [id, p] of pending) if (p.tabId === tabId) dropPending(id);
 });
 
@@ -598,11 +602,22 @@ async function handleContent(msg, sender) {
     forgetFrame(f);
     return { ok: true };
   }
+  // Step one of a multi-step login sent a username with no password on the
+  // page: keep it for this tab and origin, for the capture on the next step.
+  if (msg.type === 'dp:loginHint') {
+    const login = typeof msg.login === 'string' ? msg.login.trim().slice(0, 256) : '';
+    if (!f.origin || !login) return { ok: false };
+    loginHints.set(f.tabId, { origin: f.origin, login, at: Date.now() });
+    return { ok: true };
+  }
   if (msg.type === 'dp:capture') {
     const origin = f.origin;
     const password = typeof msg.password === 'string' ? msg.password : '';
-    const login = typeof msg.login === 'string' ? msg.login.slice(0, 256) : '';
+    let login = typeof msg.login === 'string' ? msg.login.slice(0, 256) : '';
     if (!origin || !password || password.length > MAX_VALUE) return { ok: false };
+    const hint = loginHints.get(f.tabId);
+    if (hint && Date.now() - hint.at > LOGIN_HINT_TTL_MS) loginHints.delete(f.tabId);
+    else if (hint && !login.trim() && hint.origin === origin) login = hint.login;
     recordFrame(f, true);
     addPending({ kind: 'login', value: password, login, origin, tabId: f.tabId, frameId: f.frameId });
     return { ok: true };

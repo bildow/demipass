@@ -55,10 +55,14 @@
   //     If the page changed it since (a swap before submit), nothing is
   //     offered.
   //  3. Capture happens only on the person's own send: a trusted click on
-  //     the form's submit control or on a sign-in button, or a trusted
-  //     Enter in a field of that form (or in a form-less password field).
-  //     submit events are not used, so requestSubmit() and form.submit()
-  //     from page script offer nothing.
+  //     a button of the page (any submit control, or any other button that
+  //     is not a show-password toggle or a forgot/cancel/back link), or a
+  //     trusted Enter in a field. Labels are not required: icon-only and
+  //     unlabeled buttons count. submit events are not used, so
+  //     requestSubmit() and form.submit() from page script offer nothing.
+  //     A send with no password on the page (step one of a multi-step
+  //     login) hands the username the person typed to the background, which
+  //     uses it for a capture with no username on the same origin.
   //  4. The password field must be rendered and visible at a usable size
   //     (at least 16x8 CSS px, not hidden by CSS, display or opacity), so a
   //     1px field that grabbed focus while the person typed elsewhere is
@@ -116,11 +120,27 @@
     return cs.visibility !== 'hidden' && Number(cs.opacity) > 0.05;
   }
 
+  // Step one of a multi-step login: the username the person typed (not one a
+  // page or another manager wrote), from the field they sent, else from the
+  // form or page.
+  function typedUsername(form, target) {
+    const own = (el) => el instanceof HTMLInputElement && typed.get(el) === el.value && String(el.value).trim() !== '' && usable(el);
+    const userish = (el) => /^(text|email|tel)$/.test(el.type) || /username|email/.test(el.autocomplete || '');
+    if (target && own(target) && userish(target)) return String(target.value).trim();
+    const pool = [...(form || document).querySelectorAll('input')].filter((el) => userish(el) && own(el));
+    const best = pool.find((el) => /username|email/.test(el.autocomplete || '')) || pool.find((el) => el.type === 'email') || pool[0];
+    return best ? String(best.value).trim() : '';
+  }
+
   let lastCapture = 0;
-  function capture(form) {
+  function capture(form, target) {
     let f = null;
     try { f = D.findLoginFields(document, form || undefined); } catch (_) {}
-    if (!f || !f.password) return;
+    if (!f || !f.password) {
+      const login = typedUsername(form, target);
+      if (login) send({ type: 'dp:loginHint', login: login.slice(0, 256) });
+      return;
+    }
     const pwEl = f.newPassword || f.password;
     const password = pwEl.value;
     if (!password || typed.get(pwEl) !== password || !usable(pwEl)) return;
@@ -131,23 +151,27 @@
     send({ type: 'dp:capture', login, password });
   }
 
-  // The person's own send: a click on a submit control or a sign-in button.
+  // The person's own send: a click on a submit control or another button,
+  // labeled or not (icon-only, outside the form), except the buttons that
+  // are clearly not a send.
+  const NOT_A_SEND = /show|hide|reveal|peek|eye|visib|toggle|forgot|reset|cancel|back|clear|help|close/;
   window.addEventListener('click', (e) => {
     if (!e.isTrusted) return; // element.click() / dispatched clicks
     const t = e.target instanceof Element ? e.target.closest('button, input[type=submit], input[type=image], input[type=button], [role=button]') : null;
     if (!t) return;
     if (t.form && (t.type === 'submit' || t.type === 'image')) { capture(t.form); return; }
-    const label = (t.textContent || t.value || '').toLowerCase();
-    if (/log\s*in|sign\s*in|continue|submit|next|enter/.test(label)) capture(t.form || null);
+    const label = [t.textContent, t.value, t.getAttribute('aria-label'), t.getAttribute('title'), t.id, t.className]
+      .map((x) => (typeof x === 'string' ? x : '')).join(' ').toLowerCase();
+    if (NOT_A_SEND.test(label) || t.getAttribute('aria-pressed') != null) return;
+    capture(t.form || null);
   }, true);
 
-  // ... or Enter in a field of a login form, or in a form-less password field.
+  // ... or Enter in a field (of a form, or of a page with no form).
   window.addEventListener('keydown', (e) => {
     if (!e.isTrusted || e.key !== 'Enter' || e.isComposing) return;
     const t = e.target;
     if (!(t instanceof HTMLInputElement)) return;
-    if (t.form) capture(t.form);
-    else if (t.type === 'password') capture(null);
+    capture(t.form || null, t);
   }, true);
 
   ext.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
