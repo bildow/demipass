@@ -384,6 +384,18 @@ function trickyPage(pathname, other) {
       <button type="submit">Sign in</button></form><p id="err"></p><script>
       let tries = 0; login.addEventListener('submit', (e) => { if (++tries === 1) { e.preventDefault(); err.textContent = 'wrong password'; } });
       eye.onclick = () => { pass.type = pass.type === 'password' ? 'text' : 'password'; };</script>`);
+    // round 5: the toggle swaps in a NEW type=text input (the password field never was type=text itself)
+    case '/step2-swap.html': return page(`<form id="login" method="post" action="/done"><span id="slot"><input id="pass" name="password" type="password" placeholder="Account password"></span>
+      <button id="eye" type="button">show</button><button type="submit">Sign in</button></form><script>
+      let tries = 0; login.addEventListener('submit', (e) => { if (++tries === 1) e.preventDefault(); });
+      eye.onclick = () => { const old = document.getElementById('pass'); const n = document.createElement('input');
+        n.id = 'pass'; n.name = 'password'; n.placeholder = 'Account password'; n.type = old.type === 'password' ? 'text' : 'password'; n.value = old.value; old.replaceWith(n); };</script>`);
+    // round 5: a CSS-masked text field used as the password
+    case '/masked.html': return page(`<form id="login" method="post" action="/step2.html"><input id="pass" name="user[password]" type="text" style="-webkit-text-security:disc">
+      <button type="submit">Next</button></form>`);
+    // round 5: after the send, page script edits the password field (execCommand makes trusted input events)
+    case '/stay-exec.html': return page(`${LOGIN_FORM}<script>login.addEventListener('submit', (e) => e.preventDefault());
+      window.poke = () => { pass.focus(); document.execCommand('insertText', false, 'x'); return pass.value; };</script>`);
     // a search box with no form; Enter goes to a password-only page
     case '/search.html': return page(`<input id="q" type="search" placeholder="Search">
       <script>q.addEventListener('keydown', (e) => { if (e.key === 'Enter') location.href = '/step2.html'; });</script>`);

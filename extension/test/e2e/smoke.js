@@ -676,6 +676,56 @@ async function scenario(d, mock, step) {
     assert.equal(await noBadge(page), '');
     await page.close();
   });
+  const offeredLogin = async (page) => {
+    await sleep(300);
+    const { pop } = await openPopupFor(page);
+    await waitVisible(pop, '#capture');
+    const u = await text(pop, '#cap-user'), html = await pop.content();
+    await pop.click('#cap-dismiss'); await pop.close();
+    return { u, html };
+  };
+  await step('a toggle that swaps in a new text field: the password typed there is never a username (audit round 5 R2)', async () => {
+    const page = await d.newPage(`${A}/step2-swap.html?p=${++seq}`);
+    await sleep(500);
+    await page.click('#eye');
+    await page.type('#pass', 'Swap-first-try');
+    await page.click('button[type=submit]'); // refused once
+    await sleep(400);
+    await page.click('#eye');
+    await page.type('#pass', 'swap-right-pw');
+    await page.clickAndWaitUrl('button[type=submit]', /\/done$/);
+    const { u, html } = await offeredLogin(page);
+    assert.equal(u, '');
+    assert.equal(html.includes('Swap-first-try'), false);
+    await page.close();
+  });
+  await step('a CSS-masked text field named as a password is never a username (audit round 5 R2)', async () => {
+    const page = await d.newPage(`${A}/masked.html?p=${++seq}`);
+    await sleep(500);
+    await page.type('#pass', 'Css-masked-pw');
+    await page.clickAndWaitUrl('button[type=submit]', /\/step2\.html/);
+    await sleep(500);
+    await page.type('#pass', 'after-masked');
+    await page.clickAndWaitUrl('button[type=submit]', /\/done$/);
+    const { u, html } = await offeredLogin(page);
+    assert.equal(u, '');
+    assert.equal(html.includes('Css-masked-pw'), false);
+    await page.close();
+  });
+  await step('page script editing the password after the send cannot withdraw the offer (audit round 5 R3)', async () => {
+    const page = await d.newPage(`${A}/stay-exec.html?p=${++seq}`);
+    await sleep(500);
+    await page.type('#user', 'exec@example.com');
+    await page.type('#pass', 'kept-offer');
+    await page.click('button[type=submit]');
+    await sleep(400);
+    assert.equal(await noBadge(page), 'SAVE');
+    assert.equal(await page.eval(() => window.poke()), 'kept-offerx', 'the page did edit the field');
+    await sleep(500);
+    assert.equal(await noBadge(page), 'SAVE');
+    await page.close();
+  });
+
   await step('the show-password toggle is not a send: no save offered by clicking it', async () => {
     const page = await d.newPage(`${A}/toggle.html?p=${++seq}`);
     await sleep(500);
@@ -752,6 +802,30 @@ async function scenario(d, mock, step) {
     const sec = state.secrets.get('DP-PWD-multi-1');
     assert.equal(sec.value, 'new-multi-value');
     assert.deepEqual(sec.origins.sort(), [A, 'https://other.example'].sort());
+    await pop.close(); await page.close();
+  });
+
+  await step('a username carried from step one that matches a saved login asks before replacing (audit round 5 R1)', async () => {
+    state.secrets.set('DP-PWD-alice-1', { name: 'alice-login', value: 'alice-old', secret_type: 'password', login: 'alice@example.com', origins: [A] });
+    const page = await d.newPage(`${A}/step1.html?p=${++seq}`);
+    await sleep(500);
+    await page.type('#user', 'alice@example.com');
+    await page.clickAndWaitUrl('button[type=submit]', /\/step2\.html/);
+    await sleep(500);
+    await page.type('#pass', 'maybe-bobs-password');
+    await page.clickAndWaitUrl('button[type=submit]', /\/done$/);
+    await sleep(300);
+    const { pop } = await openPopupFor(page);
+    await waitVisible(pop, '#capture');
+    assert.match(await text(pop, '#cap-existing'), /previous step/);
+    assert.equal(await inputValue(pop, '#cap-name'), 'alice-login');
+    await pop.click('#cap-save');
+    await waitText(pop, '#cap-msg', /already exists/);
+    assert.equal(state.secrets.get('DP-PWD-alice-1').value, 'alice-old', 'one click replaced nothing');
+    assert.equal(await text(pop, '#cap-save'), 'Replace');
+    await pop.click('#cap-save');
+    await waitText(pop, '#cap-msg', /Saved as “alice-login”/);
+    assert.equal(state.secrets.get('DP-PWD-alice-1').value, 'maybe-bobs-password');
     await pop.close(); await page.close();
   });
 

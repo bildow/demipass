@@ -89,3 +89,11 @@ test('form-less login (formIndex -1) still pairs username and password', () => {
   const r = pickLoginFields([inp({ name: 'username', formIndex: -1 }), inp({ type: 'password', formIndex: -1 })]);
   assert.equal(r.usernameIndex, 0);
 });
+
+test('a text field named or labelled as a password is never the username', () => {
+  // a show-password toggle that swaps in a new type=text field, a CSS-masked text field
+  for (const f of [inp({ placeholder: 'Account password' }), inp({ name: 'user[password]' }), inp({ id: 'login-pwd' }), inp({ label: 'PIN' })]) {
+    const r = pickLoginFields([f, inp({ type: 'password' })]);
+    assert.notEqual(r.usernameIndex, 0, JSON.stringify(f));
+  }
+});

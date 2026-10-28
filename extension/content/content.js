@@ -113,11 +113,13 @@
     const tok = tokens.get(t);
     tokens.delete(t); // spent either way
     const ime = composing.has(t) && (e.isComposing || /Composition/.test(e.inputType || ''));
-    if (activated() && (ime || (tok && matches(tok, e)))) typed.set(t, t.value);
+    const counted = activated() && (ime || (tok && matches(tok, e)));
+    if (counted) typed.set(t, t.value);
     else typed.delete(t);
-    // The password offered for saving was edited after all (a click or Enter
+    // The person edited the password offered for saving (a click or Enter
     // before the real send): drop that offer; the real send offers again.
-    if (captured && captured.el === t && t.value !== captured.value) { captured = null; send({ type: 'dp:captureStale' }); }
+    // Only their own counted edit does this, so page script cannot withdraw it.
+    if (counted && captured && captured.el === t && t.value !== captured.value) { captured = null; send({ type: 'dp:captureStale' }); }
   }, true);
 
   function usable(el) {

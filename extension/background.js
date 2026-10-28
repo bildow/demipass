@@ -140,7 +140,7 @@ function pendingLoginFor(tabId) {
     const cand = { id, origin: p.origin, login: p.login, loginFromHint: !!p.loginFromHint, frameId: p.frameId, at: p.expiresAt };
     if (!best || (cand.frameId === 0) > (best.frameId === 0) || ((cand.frameId === 0) === (best.frameId === 0) && cand.at > best.at)) best = cand;
   }
-  return best && { id: best.id, origin: best.origin, login: best.login, frameId: best.frameId };
+  return best && { id: best.id, origin: best.origin, login: best.login, loginFromHint: best.loginFromHint, frameId: best.frameId };
 }
 
 function setSaveBadge(tabId, on) {
