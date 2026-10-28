@@ -60,4 +60,5 @@ button.primary { background: var(--accent); color: var(--accent-fg); border-colo
 button:disabled { opacity: .5; cursor: default; }
 .actions { display: flex; gap: 8px; margin-top: 10px; }
 a { color: var(--accent); }
+.foot { border-top: 1px solid var(--line); margin: 12px 0 0; padding-top: 8px; font-size: 12px; }
 [hidden] { display: none !important; }
