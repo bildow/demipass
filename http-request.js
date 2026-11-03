@@ -31,7 +31,9 @@ function request(transport, opts, payload, { timeoutMs, label } = {}) {
       res.on('data', (c) => { chunks.push(c); received += c.length; });
       res.on('end', () => {
         if (settled) return;
-        if (!res.complete || (Number.isFinite(declared) && received !== declared)) {
+        // res.complete is false when the body was cut short. (A byte count against Content-Length
+        // would wrongly reject HEAD and 304 replies, which declare a length and send no body.)
+        if (!res.complete) {
           return fail(`connection closed after ${received} ${of}bytes (HTTP ${res.statusCode})`, 'ECONNRESET');
         }
         settled = true; clearTimeout(timer);

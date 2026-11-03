@@ -138,3 +138,18 @@ test('the original symptom: a process awaiting a cut response now fails loudly i
     assert.match(child.err, /ECONNRESET|connection closed|aborted/);
   } finally { await close(server); }
 });
+
+test('HEAD and 304 replies that declare a Content-Length and send no body resolve', async () => {
+  const { server, base } = await serve((req, res) => {
+    if (req.method === 'HEAD') { res.writeHead(200, { 'content-length': '5000' }); return res.end(); }
+    res.writeHead(304, { 'content-length': '5000' }); res.end();
+  });
+  try {
+    const { request } = require('../http-request');
+    const u = new URL(base);
+    for (const method of ['HEAD', 'GET']) {
+      const r = await request(http, { method, hostname: u.hostname, port: u.port, path: '/' }, null, { timeoutMs: 2000 });
+      assert.equal(r.body.length, 0);
+    }
+  } finally { await close(server); }
+});
