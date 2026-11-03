@@ -88,22 +88,15 @@ function apiRequest(method, path, body) {
     };
     if (BUOY_TOKEN) opts.headers['Authorization'] = 'Bearer ' + BUOY_TOKEN;
     if (data) opts.headers['Content-Length'] = Buffer.byteLength(data);
-    const req = mod.request(opts, (res) => {
-      let d = '';
-      res.on('data', c => d += c);
-      res.on('end', () => {
-        let parsed;
-        try { parsed = JSON.parse(d); } catch { parsed = d; }
-        if (res.statusCode >= 400) {
-          return reject(new Error((parsed && parsed.error) || `HTTP ${res.statusCode}`));
-        }
-        resolve(parsed);
-      });
-    });
-    req.on('error', reject);
-    req.setTimeout(15000, () => { req.destroy(); reject(new Error('timeout')); });
-    if (data) req.write(data);
-    req.end();
+    require('./http-request').request(mod, opts, data, { timeoutMs: 15000, label: `Buoy ${method} ${url.pathname}` }).then(({ status, body: raw }) => {
+      const d = raw.toString();
+      let parsed;
+      try { parsed = JSON.parse(d); } catch { parsed = d; }
+      if (status >= 400) {
+        return reject(new Error(`HTTP ${status}: ${(parsed && parsed.error) || (typeof parsed === 'string' ? parsed.slice(0, 200) : 'no message')}`));
+      }
+      resolve(parsed);
+    }, reject);
   });
 }
 

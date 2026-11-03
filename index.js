@@ -24,21 +24,32 @@
 const https = require('https');
 const http = require('http');
 const { URL } = require('url');
+const _http = require('./http-request');
 
 const AGENT_HEADER = 'demipass-sdk/1.0';
 
 // ── Module-level config ──
 
+// How long one HTTP call to DemiPass may take, start to last byte. /use waits up to
+// 30 s on the upstream, so the default leaves room for that and the transfer.
+const DEFAULT_TIMEOUT_MS = 90000;
+
 const config = {
   baseUrl: 'https://api.dustforge.com',
   bearerToken: '',
   adminKey: '',
+  timeoutMs: Number(process.env.DEMIPASS_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS,
 };
 
 function configure(opts) {
   if (opts.baseUrl) config.baseUrl = opts.baseUrl;
   if (opts.bearerToken) config.bearerToken = opts.bearerToken;
   if (opts.adminKey) config.adminKey = opts.adminKey;
+  if (opts.timeoutMs !== undefined) {
+    const t = Number(opts.timeoutMs);
+    if (!(t > 0)) throw new Error('timeoutMs must be a positive number of milliseconds');
+    config.timeoutMs = t;
+  }
 }
 
 // ── Internal HTTP helper ──
@@ -81,20 +92,12 @@ function _send(method, path, body, query) {
       opts.headers['Content-Length'] = Buffer.byteLength(payload);
     }
 
-    const req = transport.request(opts, (res) => {
-      const chunks = [];
-      res.on('data', (c) => chunks.push(c));
-      res.on('end', () => {
-        const raw = Buffer.concat(chunks).toString();
+    _http.request(transport, opts, payload, { timeoutMs: config.timeoutMs, label: `${method} ${parsed.pathname}` })
+      .then(({ status, body: raw }) => {
         let data;
-        try { data = JSON.parse(raw); } catch { data = raw; }
-        resolve({ status: res.statusCode, data });
-      });
-    });
-
-    req.on('error', (err) => reject(new Error(`Network error: ${err.message}`)));
-    if (payload) req.write(payload);
-    req.end();
+        try { data = JSON.parse(raw.toString()); } catch { data = raw.toString(); }
+        resolve({ status, data });
+      }, reject);
   });
 }
 
@@ -102,8 +105,8 @@ function _send(method, path, body, query) {
 function _request(method, path, body, query) {
   return _send(method, path, body, query).then(({ status, data }) => {
     if (status >= 400) {
-      const msg = (data && data.error) || `HTTP ${status}`;
-      throw new Error(`${method} ${path} failed: ${msg}`);
+      const msg = (data && data.error) || (typeof data === 'string' && data.trim() ? data.trim().slice(0, 200) : 'no message');
+      throw Object.assign(new Error(`${method} ${path} failed: HTTP ${status}: ${msg}`), { status, data });
     }
     return data;
   });
@@ -795,25 +798,17 @@ function _conduit(method, path, body) {
       hostname: url.hostname, port: url.port || (url.protocol === 'https:' ? 443 : 80),
       path: url.pathname + url.search, method,
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + CONDUIT_TOKEN },
-      timeout: 15000,
     };
     if (postData) opts.headers['Content-Length'] = Buffer.byteLength(postData);
-    const req = proto.request(opts, (res) => {
-      let data = '';
-      res.on('data', c => data += c);
-      res.on('end', () => {
-        if (res.statusCode >= 400) {
-          try { reject(new Error(JSON.parse(data).detail || JSON.parse(data).error || `Conduit HTTP ${res.statusCode}`)); }
-          catch { reject(new Error(`Conduit HTTP ${res.statusCode}: ${data.slice(0, 100)}`)); }
-          return;
-        }
-        try { resolve(JSON.parse(data)); } catch { resolve({ raw: data, status: res.statusCode }); }
-      });
-    });
-    req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('conduit timeout')); });
-    if (postData) req.write(postData);
-    req.end();
+    _http.request(proto, opts, postData, { timeoutMs: 15000, label: `Conduit ${method} ${url.pathname}` }).then(({ status, body: raw }) => {
+      const data = raw.toString();
+      if (status >= 400) {
+        try { reject(new Error(JSON.parse(data).detail || JSON.parse(data).error || `Conduit HTTP ${status}`)); }
+        catch { reject(new Error(`Conduit HTTP ${status}: ${data.slice(0, 100)}`)); }
+        return;
+      }
+      try { resolve(JSON.parse(data)); } catch { resolve({ raw: data, status }); }
+    }, reject);
   });
 }
 

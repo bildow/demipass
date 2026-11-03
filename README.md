@@ -130,6 +130,27 @@ await demipass.search({ query: 'openrouter' });
 await demipass.rotateBlind({ ref: 'DP-PWD-old-ref', target_host: '1.2.3.4', reason: 'exposed' });
 ```
 
+### Every call resolves or rejects
+
+No SDK call can hang. Each one either resolves with the whole response or rejects with
+an error that names the cause, and carries `err.code` / `err.status`:
+
+| Cause | `err.code` / `err.status` | Message (example) |
+|---|---|---|
+| No complete response in time | `ETIMEDOUT` | `POST /api/demipass/use: no complete response within 90000 ms (6 bytes received)` |
+| Connection cut mid-response | `ECONNRESET` | `POST /api/demipass/use: connection closed after 100000 of 304587 bytes (HTTP 200)` |
+| Socket error | the socket's code, e.g. `ECONNREFUSED` | `POST /api/demipass/use: network error: connect ECONNREFUSED …` |
+| HTTP error | `err.status`, server body on `err.data` | `POST /api/demipass/use failed: HTTP 413: upstream response too large: …` |
+
+The timeout covers the whole call, start to last byte: `configure({ timeoutMs })`, or the
+`DEMIPASS_TIMEOUT_MS` environment variable. The default is 90 s, because `/use` waits up
+to 30 s on the upstream.
+
+`/use` limits (server side): a request body up to 1 MiB, an upstream response up to 2 MiB.
+Over either one you get HTTP 413 with `limit_bytes` in the body. A refused request is not
+charged. An upstream response over the limit is charged, because the upstream call was
+made.
+
 ## Architecture
 
 DemiPass is a client SDK — all encryption, storage, and secret execution happens on the Dustforge server. This package provides:
