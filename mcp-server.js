@@ -172,7 +172,7 @@ const TOOLS = [
   },
   {
     name: 'demipass_use',
-    description: 'EGRESS (one-step): Request a use-token AND redeem it in a single call. Self-healing: if the context is missing, it auto-creates one and retries. You should never see "context not found" — the tool handles it. On an elevated/critical secret the first call returns status approval_pending with approval_id: PARK the task (do not retry in a loop); when you resume, make the same call once with approval_id.',
+    description: 'EGRESS (one-step): Request a use-token AND redeem it in a single call. It never creates or widens a scope: a secret with no scope for this target is refused, and only its owner adds one (in the app, with the PIN). On an elevated/critical secret the first call returns status approval_pending with approval_id: PARK the task (do not retry in a loop); when you resume, make the same call once with approval_id.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -194,7 +194,7 @@ const TOOLS = [
   },
   {
     name: 'demipass_ssh',
-    description: 'SSH into a host using a DemiPass ref code. One call: ref + host + command → output. The password is injected server-side. You never see it. Self-healing: if no SSH context exists for this secret, one is auto-created. This is the primary way to access remote machines. On an elevated/critical secret the first call returns status approval_pending with approval_id: PARK the task (no retry loop); when you resume, make the same call once with approval_id (and approval_code if the owner read you one).',
+    description: 'SSH into a host using a DemiPass ref code. One call: ref + host + command → output. The password is injected server-side. You never see it. It never creates a scope; on a new SSH entry only the commands its owner listed run. This is the primary way to access remote machines. On an elevated/critical secret the first call returns status approval_pending with approval_id: PARK the task (no retry loop); when you resume, make the same call once with approval_id (and approval_code if the owner read you one).',
     inputSchema: {
       type: 'object',
       properties: {

@@ -157,7 +157,7 @@ DemiPass is a client SDK — all encryption, storage, and secret execution happe
 
 - **MCP tool definitions** with behavioral descriptions that teach agents the protocol
 - **SDK functions** that wrap the Dustforge API
-- **Self-healing contexts** — if a secret has no approved context, the SDK auto-creates one
+- **No self-healing contexts** — an agent never creates or widens the scope of a secret; the owner sets it in the app (red team item 13).
 - **Buoy MCP tools** for temporal anchoring and audit trails
 
 The secrets vault, trust gradient, velocity throttle, and other security features are implemented in Dustforge. See [dustforge.com](https://dustforge.com) for the platform documentation.
