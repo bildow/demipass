@@ -268,23 +268,31 @@ function execute({ token, use_token, action, params, target_user, command } = {}
 // ── Delegation ──
 
 /** POST /api/demipass/delegate — owner grants scoped access to another silicon */
-function delegate({ secretName, targetSilicon, scope, ttl } = {}) {
-  if (!secretName || !targetSilicon) {
-    throw new Error('delegate() requires secretName and targetSilicon');
+function delegate({ secretName, delegateDid, targetSilicon, contextName, maxUses, expiresIn, ttl, ownerDid } = {}) {
+  // The server reads delegate_did (server.js /api/blindkey/delegate). Until 2026-11 this sent target_silicon,
+  // which the server never read, so every SDK delegation failed with "secret_name and delegate_did required".
+  // targetSilicon and ttl stay accepted as aliases so existing callers keep working.
+  const did = delegateDid || targetSilicon;
+  if (!secretName || !did) {
+    throw new Error('delegate() requires secretName and delegateDid');
   }
-  return _request('POST', '/api/demipass/delegate', {
-    secret_name: secretName, target_silicon: targetSilicon, scope, ttl,
-  });
+  const body = { secret_name: secretName, delegate_did: did };
+  if (contextName) body.context_name = contextName;
+  if (maxUses !== undefined) body.max_uses = maxUses;
+  const seconds = expiresIn !== undefined ? expiresIn : ttl;
+  if (seconds !== undefined) body.expires_in = seconds;
+  if (ownerDid) body.owner_did = ownerDid;
+  return _request('POST', '/api/demipass/delegate', body);
 }
 
-/** POST /api/demipass/delegate/revoke — revoke a delegation */
-function revoke({ secretName, targetSilicon } = {}) {
-  if (!secretName || !targetSilicon) {
-    throw new Error('revoke() requires secretName and targetSilicon');
+/** POST /api/demipass/delegate/revoke — revoke a delegation, by id or by secret + delegate */
+function revoke({ delegationId, secretName, delegateDid, targetSilicon } = {}) {
+  const did = delegateDid || targetSilicon;
+  if (!delegationId && (!secretName || !did)) {
+    throw new Error('revoke() requires delegationId, or secretName and delegateDid');
   }
-  return _request('POST', '/api/demipass/delegate/revoke', {
-    secret_name: secretName, target_silicon: targetSilicon,
-  });
+  const body = delegationId ? { delegation_id: delegationId } : { secret_name: secretName, delegate_did: did };
+  return _request('POST', '/api/demipass/delegate/revoke', body);
 }
 
 /** GET /api/demipass/delegations — list active delegations */
