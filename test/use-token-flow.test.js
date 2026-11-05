@@ -146,6 +146,42 @@ function startRecorder() {
     assert.strictEqual(t.body.target_url, 'https://example.com/a');
   });
 
+  console.log('\ndelegation fields — the server reads delegate_did');
+
+  seen.length = 0;
+  await demipass.delegate({ secretName: 'deploy-key', delegateDid: 'did:key:zTest', expiresIn: 3600, maxUses: 5 });
+  const del = seen.filter(s => s.path.endsWith('/delegate')).pop();
+
+  check('delegate() sends delegate_did (was target_silicon, which the server never read)', () => {
+    assert(del, 'no /delegate request recorded');
+    assert.strictEqual(del.body.delegate_did, 'did:key:zTest');
+    assert.strictEqual(del.body.target_silicon, undefined, 'target_silicon must not be sent');
+    assert.strictEqual(del.body.secret_name, 'deploy-key');
+    assert.strictEqual(del.body.expires_in, 3600);
+    assert.strictEqual(del.body.max_uses, 5);
+  });
+
+  seen.length = 0;
+  await demipass.delegate({ secretName: 'deploy-key', targetSilicon: 'did:key:zOld', ttl: 60 });
+  check('delegate() still accepts the old targetSilicon/ttl names', () => {
+    const d = seen.filter(s => s.path.endsWith('/delegate')).pop();
+    assert.strictEqual(d.body.delegate_did, 'did:key:zOld');
+    assert.strictEqual(d.body.expires_in, 60);
+  });
+
+  seen.length = 0;
+  await demipass.revoke({ secretName: 'deploy-key', delegateDid: 'did:key:zTest' });
+  await demipass.revoke({ delegationId: 20 });
+  check('revoke() sends delegate_did or delegation_id', () => {
+    const [byName, byId] = seen.filter(s => s.path.endsWith('/delegate/revoke'));
+    assert.deepStrictEqual(byName.body, { secret_name: 'deploy-key', delegate_did: 'did:key:zTest' });
+    assert.deepStrictEqual(byId.body, { delegation_id: 20 });
+  });
+
+  check('delegate() without a DID throws before any request', () => {
+    assert.throws(() => demipass.delegate({ secretName: 'x' }), /delegateDid/);
+  });
+
   server.close();
   console.log(failures ? `\n${failures} FAILED\n` : '\nall passed\n');
   process.exit(failures ? 1 : 0);
