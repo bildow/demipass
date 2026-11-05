@@ -416,7 +416,11 @@ async function onboard(opts) {
 // ── High-level ergonomic operations ──
 
 // Combined use: request token + execute in one call, with self-healing context recovery
-async function use({ ref, name, action, owner_did, target_host, target_url, target_user, command, params, override_reason, _retried } = {}) {
+// An elevated/critical secret answers a /use with 202 { status:'approval_pending', approval_id, next }: the owner
+// must approve that exact call. use() returns that reply as it is (no throw, no retry loop): park the task, and when
+// it resumes make the same call once more with approval_id (and approval_code if the owner read you a code).
+async function use({ ref, name, action, owner_did, target_host, target_url, target_user, command, params, override_reason,
+                     approval_id, approval_code, purpose, _retried } = {}) {
   _assertAction(action);
   const tokenReq = { ref, name, action, owner_did, target_host, target_url };
   Object.keys(tokenReq).forEach(k => tokenReq[k] === undefined && delete tokenReq[k]);
@@ -429,7 +433,7 @@ async function use({ ref, name, action, owner_did, target_host, target_url, targ
     if (!_retried && err.message && err.message.includes('context') && err.message.includes('not found')) {
       const healed = await _healContext({ ref, name, action, target_host });
       if (healed.ok) {
-        return use({ ref, name, action, owner_did, target_host, target_url, target_user, command, params, override_reason, _retried: true });
+        return use({ ref, name, action, owner_did, target_host, target_url, target_user, command, params, override_reason, approval_id, approval_code, purpose, _retried: true });
       }
       throw new Error(`${err.message}. Auto-heal attempted: ${healed.error || 'created context but retry needed'}`);
     }
@@ -441,7 +445,7 @@ async function use({ ref, name, action, owner_did, target_host, target_url, targ
     if (!_retried && tokenRes.error && tokenRes.error.includes('context') && tokenRes.error.includes('not found')) {
       const healed = await _healContext({ ref, name, action, target_host });
       if (healed.ok) {
-        return use({ ref, name, action, owner_did, target_host, target_url, target_user, command, params, override_reason, _retried: true });
+        return use({ ref, name, action, owner_did, target_host, target_url, target_user, command, params, override_reason, approval_id, approval_code, purpose, _retried: true });
       }
     }
     throw new Error(tokenRes.error || 'failed to get use-token');
@@ -461,6 +465,10 @@ async function use({ ref, name, action, owner_did, target_host, target_url, targ
     execReq.override_reason = override_reason;
     execReq.params.override_reason = override_reason;
   }
+  // Approval fields steer the approval and are never part of what it binds (the server leaves them out).
+  if (approval_id !== undefined && approval_id !== null) execReq.approval_id = approval_id;
+  if (approval_code !== undefined && approval_code !== null) execReq.approval_code = String(approval_code);
+  if (purpose) execReq.purpose = String(purpose).slice(0, 200);
   return _request('POST', '/api/demipass/use', execReq);
 }
 
@@ -512,9 +520,9 @@ async function _healContext({ ref, name, action, target_host } = {}) {
 // an explicit value regardless of the secret's bound username. Now leave it
 // undefined so the server resolver decides: bound → username, else hard error.
 // override_reason forwarded through for bound-mismatch cases.
-async function ssh({ ref, target_host, target_user, command, override_reason } = {}) {
+async function ssh({ ref, target_host, target_user, command, override_reason, approval_id, approval_code, purpose } = {}) {
   if (!ref || !target_host || !command) throw new Error('ref, target_host, and command required');
-  return use({ ref, action: 'ssh_exec', target_host, target_user, command, override_reason });
+  return use({ ref, action: 'ssh_exec', target_host, target_user, command, override_reason, approval_id, approval_code, purpose });
 }
 
 // ── Host operations (docs/host-operations.md in dustforge) ──

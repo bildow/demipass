@@ -172,7 +172,7 @@ const TOOLS = [
   },
   {
     name: 'demipass_use',
-    description: 'EGRESS (one-step): Request a use-token AND redeem it in a single call. Self-healing: if the context is missing, it auto-creates one and retries. You should never see "context not found" — the tool handles it.',
+    description: 'EGRESS (one-step): Request a use-token AND redeem it in a single call. Self-healing: if the context is missing, it auto-creates one and retries. You should never see "context not found" — the tool handles it. On an elevated/critical secret the first call returns status approval_pending with approval_id: PARK the task (do not retry in a loop); when you resume, make the same call once with approval_id.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -186,12 +186,15 @@ const TOOLS = [
         command:     { type: 'string', description: 'Command to execute (for SSH)' },
         override_reason: { type: 'string', description: 'Required when target_user differs from the secret\'s bound username. ≤128 chars. Logged to blindkey_events as ssh_exec_account_override.' },
         params:      { type: 'object', description: 'Additional action-specific parameters. Fields are sent both nested and top-level for server compatibility.' },
+        approval_id:   { type: 'integer', description: 'Only after a previous call returned status approval_pending: the request id it gave. Make the SAME call (same action, target, command/params) once more with it after the owner approved.' },
+        approval_code: { type: 'string', description: 'Only if the owner read you the 6-digit code from their request screen (another channel): send it with approval_id. It works for that request only, within about a minute; three wrong codes cancel the request.' },
+        purpose:       { type: 'string', description: 'Shown to the owner on the approval request: why you need this (≤200 chars). Used only for elevated/critical secrets.' },
       },
     },
   },
   {
     name: 'demipass_ssh',
-    description: 'SSH into a host using a DemiPass ref code. One call: ref + host + command → output. The password is injected server-side. You never see it. Self-healing: if no SSH context exists for this secret, one is auto-created. This is the primary way to access remote machines.',
+    description: 'SSH into a host using a DemiPass ref code. One call: ref + host + command → output. The password is injected server-side. You never see it. Self-healing: if no SSH context exists for this secret, one is auto-created. This is the primary way to access remote machines. On an elevated/critical secret the first call returns status approval_pending with approval_id: PARK the task (no retry loop); when you resume, make the same call once with approval_id (and approval_code if the owner read you one).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -200,6 +203,9 @@ const TOOLS = [
         target_user: { type: 'string', description: 'SSH username. Resolution order: this explicit value, then the secret\'s bound username, then the context\'s target_user_default, then HARD ERROR. There is no silent default. Omit only when the secret is account-bound.' },
         command:     { type: 'string', description: 'Command to run on the remote host' },
         override_reason: { type: 'string', description: 'Required when target_user differs from the secret\'s bound username. ≤128 chars. Logged to blindkey_events.' },
+        approval_id:   { type: 'integer', description: 'Only after a previous call returned status approval_pending: the request id it gave. Make the SAME call (same action, target, command/params) once more with it after the owner approved.' },
+        approval_code: { type: 'string', description: 'Only if the owner read you the 6-digit code from their request screen (another channel): send it with approval_id. It works for that request only, within about a minute; three wrong codes cancel the request.' },
+        purpose:       { type: 'string', description: 'Shown to the owner on the approval request: why you need this (≤200 chars). Used only for elevated/critical secrets.' },
       },
       required: ['ref', 'target_host', 'command'],
     },
