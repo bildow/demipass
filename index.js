@@ -422,7 +422,12 @@ async function onboard(opts) {
 async function use({ ref, name, action, owner_did, target_host, target_url, target_user, command, params, override_reason,
                      approval_id, approval_code, purpose, _retried } = {}) {
   _assertAction(action);
-  const tokenReq = { ref, name, action, owner_did, target_host, target_url };
+  // The token is for one target, checked against the owner's scope when it is issued: take it from the params when
+  // the caller put it there (http/db: params.url, git_clone: params.repo_url, smtp_auth: params.smtp_host).
+  const p0 = (params && typeof params === 'object') ? params : {};
+  const tokenReq = { ref, name, action, owner_did,
+                     target_host: target_host || p0.target_host || p0.smtp_host,
+                     target_url: target_url || p0.url || p0.repo_url };
   Object.keys(tokenReq).forEach(k => tokenReq[k] === undefined && delete tokenReq[k]);
 
   // No self-healing: an agent never creates or widens the scope of what it holds (red team item 13, tome
@@ -678,8 +683,8 @@ async function doctor() {
 
 // ── Explain denial — why was an action blocked? ──
 
-async function explainDenial({ ref, name, action, target_host } = {}) {
-  const report = { ref, name, action, target_host, checks: [] };
+async function explainDenial({ ref, name, action, target_host, target_url } = {}) {
+  const report = { ref, name, action, target_host, target_url, checks: [] };
 
   // Check if secret exists
   if (ref) {
@@ -705,6 +710,7 @@ async function explainDenial({ ref, name, action, target_host } = {}) {
     if (name) body.name = name;
     if (action) body.action = action;
     if (target_host) body.target_host = target_host;
+    if (target_url) body.target_url = target_url;
     const result = await _request('POST', '/api/demipass/request-token', body);
     if (result.use_token) {
       report.would_succeed = true;
@@ -713,7 +719,7 @@ async function explainDenial({ ref, name, action, target_host } = {}) {
   } catch (e) {
     report.would_succeed = false;
     const msg = e.message || '';
-    if (msg.includes('context')) report.checks.push({ check: 'context', passed: false, reason: msg, fix: 'Create a context: POST /api/demipass/context/add with secret_name, action_type, target_host' });
+    if (msg.includes('context')) report.checks.push({ check: 'context', passed: false, reason: msg, fix: "The secret's scope does not cover this call (or there is none). Only its owner sets a scope — in the DemiPass app, with their PIN; an agent cannot add or widen one. Ask the owner, naming the action and target." });
     else if (msg.includes('suspended')) report.checks.push({ check: 'suspension', passed: false, reason: msg, fix: 'Account is suspended — contact admin' });
     else if (msg.includes('concurrent')) report.checks.push({ check: 'concurrent limit', passed: false, reason: msg, fix: 'Wait 30 seconds for existing token to expire' });
     else report.checks.push({ check: 'token request', passed: false, reason: msg });
