@@ -61,6 +61,13 @@ srv.listen(0, '127.0.0.1', async () => {
     await assert.rejects(dp.metered({ token: 'c', action: 'post', costDd: 2, idempotencyKey: 'msg:4' }, async () => { worked++; }), e => e.status === 402);
     assert.strictEqual(worked, 1);
   });
+  await check('consent: snake_case body, 202 pending surfaces approval_id', async () => {
+    const me = services({ token: 'person', baseUrl: base });
+    next = [[202, { ok: false, status: 'approval_pending', approval_id: 12 }], [201, { consent_id: 3 }]];
+    await assert.rejects(me.consent({ service: 'conduit', dailyCapDd: 500 }), e => e.pending && e.body.approval_id === 12);
+    await me.consent({ service: 'conduit', dailyCapDd: 500, approvalId: 12 });
+    assert.deepStrictEqual(seen.slice(-2).map(r => r.body), [{ service: 'conduit', daily_cap_dd: 500 }, { service: 'conduit', daily_cap_dd: 500, approval_id: 12 }]);
+  });
   await check('caller side: mintToken, delegate, revokeDelegation, revokeToken', async () => {
     const me = services({ token: 'person', baseUrl: base });
     next = [[201, {}], [201, {}], [200, {}], [200, {}]];
@@ -78,10 +85,12 @@ srv.listen(0, '127.0.0.1', async () => {
     const raw = publicKey.export({ type: 'spki', format: 'der' }).subarray(-32);
     const issuer = 'did:key:z' + b58(Buffer.concat([Buffer.from([0xed, 0x01]), raw]));
     const receipt = JSON.stringify({ v: 1, type: 'dustforge_service_charge', charge_id: 'sc_x', issuer, dd: 3, token_id: 'ab12cd34' });
-    const sig = crypto.sign(null, Buffer.from(receipt), privateKey).toString('base64url');
+    const sig = crypto.sign(null, Buffer.from('dustforge-service-charge:v1\n' + receipt), privateKey).toString('base64url');
+    const bareSig = crypto.sign(null, Buffer.from(receipt), privateKey).toString('base64url');
     assert.strictEqual(verifyReceipt({ receipt, sig }, { issuer }).valid, true);
     assert.strictEqual(verifyReceipt({ receipt: receipt.replace('"dd":3', '"dd":1'), sig }).valid, false);
     assert.strictEqual(verifyReceipt({ receipt, sig }, { issuer: 'did:key:zOther' }).valid, false);
+    assert.strictEqual(verifyReceipt({ receipt, sig: bareSig }).valid, false);   // no domain prefix: not a service receipt
   });
   srv.close();
   console.log(failures ? `${failures} failure(s)` : 'all ok');

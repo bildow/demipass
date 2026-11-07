@@ -22,6 +22,8 @@ const crypto = require('crypto');
 const { URL } = require('url');
 
 const DEFAULT_BASE = 'https://api.dustforge.com';
+// Service receipts are signed over this prefix + the receipt string, so they never verify as meter receipts.
+const RECEIPT_DOMAIN = 'dustforge-service-charge:v1\n';
 
 class ServiceError extends Error {
   constructor(status, body, method, path) {
@@ -95,6 +97,11 @@ function services({ token, baseUrl = DEFAULT_BASE, timeoutMs = 15000 } = {}) {
     },
 
     // ── caller side ──────────────────────────────────────────────────────────────────────────────────────────────
+    /** Consent to pay a service up to dailyCapDd a day. First call → ServiceError 202 (pending): the person who answers
+     *  for this wallet approves it in the DemiPass app; then call again with approvalId. Needed before mintToken. */
+    consent({ service, dailyCapDd, approvalId } = {}) { return req('POST', '/api/services/consent', opt({ service, daily_cap_dd: dailyCapDd, approval_id: approvalId })); },
+    consents() { return req('GET', '/api/services/consents'); },
+    revokeConsent({ consentId } = {}) { return req('POST', `/api/services/consents/${Number(consentId)}/revoke`, {}); },
     /** A service token for one tenant: send it to the service as `Authorization: Bearer …`. It opens nothing at DemiPass. */
     mintToken({ service, ttl, scopes, capDd } = {}) { return req('POST', '/api/services/token', opt({ service, ttl, scopes, cap_dd: capDd })); },
     revokeToken({ tokenId } = {}) { return req('POST', '/api/services/token/revoke', { token_id: tokenId }); },
@@ -130,13 +137,13 @@ function ed25519FromDidKey(did) {
   if (raw.length !== 34 || raw[0] !== 0xed || raw[1] !== 0x01) throw new Error('issuer is not an Ed25519 did:key');
   return crypto.createPublicKey({ key: Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), raw.subarray(2)]), format: 'der', type: 'spki' });
 }
-/** verifyReceipt({receipt, sig}, {issuer?}) → {valid, charge}. Pin `issuer` (from GET /api/meter/key) to refuse others. */
+/** verifyReceipt({receipt, sig}, {issuer?}) → {valid, charge}. Ed25519 over RECEIPT_DOMAIN + receipt. Pin `issuer` (from GET /api/meter/key) to refuse others. */
 function verifyReceipt({ receipt, sig }, { issuer } = {}) {
   let charge; try { charge = JSON.parse(receipt); } catch { return { valid: false, error: 'receipt is not JSON' }; }
   if (issuer && charge.issuer !== issuer) return { valid: false, error: 'issuer is not the pinned one', charge };
   let ok = false;
-  try { ok = crypto.verify(null, Buffer.from(receipt, 'utf8'), ed25519FromDidKey(charge.issuer), Buffer.from(sig, 'base64url')); } catch (e) { return { valid: false, error: e.message, charge }; }
+  try { ok = crypto.verify(null, Buffer.from(RECEIPT_DOMAIN + receipt, 'utf8'), ed25519FromDidKey(charge.issuer), Buffer.from(sig, 'base64url')); } catch (e) { return { valid: false, error: e.message, charge }; }
   return ok ? { valid: true, charge } : { valid: false, error: 'signature does not verify', charge };
 }
 
-module.exports = { services, ServiceError, verifyReceipt };
+module.exports = { services, ServiceError, verifyReceipt, RECEIPT_DOMAIN };

@@ -21,7 +21,7 @@ Every non-2xx answer throws a `ServiceError` with `{status, body}`. **Pass both 
 
 | status | meaning |
 |---|---|
-| 402 | the caller's wallet cannot cover the call, or its token's cap is reached; `body.top_up` names where to add DD |
+| 402 | the caller can't pay: no consent (`consent_required`), too little DD (`top_up`), the token's cap or the daily cap reached |
 | 401 | bad, expired, revoked or wrong-audience token |
 | 403 | the wallet has no authority for the action |
 | 202 | from verify, `err.pending === true`: an elevated action waits on a person's phone; `body.approval_id` |
@@ -88,22 +88,32 @@ app.post('/messages', async (req, res) => {
 });
 ```
 
-Receipts verify offline. Pin the issuer from `GET https://api.dustforge.com/api/meter/key`:
+Receipts verify offline (Ed25519 over `"dustforge-service-charge:v1\n"` + the receipt string). Pin the issuer from `GET https://api.dustforge.com/api/meter/key`:
 
 ```js
 verifyServiceReceipt({ receipt: c.receipt, sig: c.sig }, { issuer: PINNED_ISSUER });   // { valid: true, charge: {…} }
 ```
 
+## Before any of it, the caller consents to pay you (caller side)
+
+A charge moves DD out of the caller's wallet, so a wallet pays a service only under a standing consent with a daily
+cap. The person who answers for the wallet approves it in the DemiPass app: the person themselves, or an agent's
+fleet owner. A token alone can ask, never grant.
+
+```js
+try { await me.consent({ service: 'conduit', dailyCapDd: 500 }); }
+catch (e) { if (!e.pending) throw e; /* approved in the app → */ await me.consent({ service: 'conduit', dailyCapDd: 500, approvalId: e.body.approval_id }); }
+```
+
 ## 3. delegate (caller side)
 
-A person lets one of their agents use a scope at your service. It is use-only: the agent can't hand it on. The agent
+A person lets an agent their own fleet created use a scope at your service. It is use-only: the agent can't hand it on. The agent
 calls you with its own service token and pays from its own wallet. You see `via: 'delegation'` and a pairwise
 `principal` for the person.
 
 ```js
 const me = services({ token: personSessionToken });   // the person's own session, never an agent token
-await me.delegate({ service: 'conduit', scope: 'post', delegateDid: agentDid });
-// an agent another fleet created → 403 with an `intent`: the person enters their PIN for it, then repeats the call
+await me.delegate({ service: 'conduit', scope: 'post', delegateDid: agentDid });   // another fleet's agent → 403
 ```
 
 The agent mints a token for your service and sends it:
@@ -128,4 +138,5 @@ await agent.revokeToken({ tokenId });          // a caller kills one service tok
 
 - The person's name, email or wallet. You get the calling wallet's DID, plus a pairwise id when an agent acts for a person.
 - A way to charge more than the action's `max_cost_dd` plus the margin per call, or more than the token's `cap_dd` in total.
-- A way to lower an action's depth without your owner's PIN.
+- A way to weaken your own gates (a lower depth, an opened action, a widened scope) without your owner's approval.
+- A charge on a wallet that hasn't consented to you, or for an action you didn't verify on that token.
