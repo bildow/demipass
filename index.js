@@ -822,6 +822,10 @@ module.exports = {
   // Diagnostics
   doctor,
   explainDenial,
+  // Service tenants (identity + metering for agent services; docs/services.md)
+  services: require('./services').services,
+  ServiceError: require('./services').ServiceError,
+  verifyServiceReceipt: require('./services').verifyReceipt,
   // Conduit
   conduitSend,
   conduitThreads,
