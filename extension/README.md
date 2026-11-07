@@ -46,14 +46,14 @@ Build first: `npm run package:extension` (from the repo root). It writes
   click **Load Temporary Add-on…**, and pick `extension/dist/demipass-firefox-<version>.xpi`
   (or `dist/firefox/manifest.json`). It stays until the browser restarts.
 - **Firefox / Zen (permanent):** release Firefox and Zen install only
-  Mozilla-signed add-ons. That needs an AMO account and API keys, then
-  `web-ext sign --channel=unlisted --source-dir extension/dist/firefox --api-key … --api-secret …`.
-  An unlisted, self-distributed signed `.xpi` then installs like any other add-on.
-  Whether to do this, and whose account to use, is the owner's call. Nothing
-  here has been signed. The first signing fixes the gecko `id`, so change it
-  before then if wanted. Firefox Developer Edition, Nightly and unbranded
-  builds can instead set `xpinstall.signatures.required = false` and install
-  the unsigned `.xpi`.
+  Mozilla-signed add-ons. DemiPass is on AMO as `demipass-browser@demipass.com`
+  (account "dustforge"): **0.1.0 is signed unlisted** (AMO add-on 3119631) and
+  is what https://demipass.com/extension installs. The listed (public) version
+  goes through `extension/release/amo-listed.mjs` with the account's API keys
+  in `AMO_JWT_ISSUER` / `AMO_JWT_SECRET`; a listed version needs a version
+  number of its own (AMO versions are unique across channels). Firefox
+  Developer Edition, Nightly and unbranded builds can instead set
+  `xpinstall.signatures.required = false` and install the unsigned `.xpi`.
 - **Firefox site access:** Firefox treats host access as the person's choice.
   A normal install asks for it. It can be turned off in `about:addons` →
   DemiPass → Permissions, or limited per site from the toolbar's extensions
