@@ -4,18 +4,20 @@
   "description": "Secrets management for LLM sessions. Keep credentials out of context windows.",
   "main": "index.js",
   "bin": {
-    "demipass-mcp": "./mcp-server.js"
+    "demipass-mcp": "./mcp-server.js",
+    "fleetgate-mcp": "./fleetgate-mcp.js"
   },
   "mcpName": "com.dustforge/demipass",
   "scripts": {
     "mcp": "node mcp-server.js",
     "buoy": "node buoy-mcp.js",
-    "test": "node test/use-token-flow.test.js && node test/services.test.js && node test/conduit.test.js",
+    "test": "node test/use-token-flow.test.js && node test/services.test.js && node test/conduit.test.js && node --test test/fleetgate-mcp.test.js",
     "test:extension": "node --test extension/test/*.test.js",
     "test:extension:e2e": "node extension/test/e2e/smoke.js",
     "test:extension:e2e:all": "node extension/test/e2e/smoke.js --browser=chromium,chrome,brave,firefox,zen",
     "build:extension": "node extension/build.mjs",
-    "package:extension": "node extension/build.mjs --package"
+    "package:extension": "node extension/build.mjs --package",
+    "fleetgate": "node fleetgate-mcp.js"
   },
   "keywords": [
     "secrets",
@@ -49,6 +51,7 @@
     "docs/services.md",
     "mcp-server.js",
     "buoy-mcp.js",
+    "fleetgate-mcp.js",
     "README.md",
     "ONBOARDING.md",
     "docs/security-stance.md",
