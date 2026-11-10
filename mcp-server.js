@@ -269,6 +269,18 @@ const TOOLS = [
     },
   },
   {
+    name: 'demipass_onboard_service',
+    description: 'SERVICES SETUP (any DemiPass service: fleetgate, conduit, …; safe to repeat): put this machine\'s panes onto a service in one call. Without `service`: lists the services, their prices and endpoints. With it: reads the service from the DemiPass registry, confirms or files this wallet\'s consent to pay it (a missing consent comes back as approval_pending + approval_id: approve it in the DemiPass app, then call again with approval_id), and registers the service\'s own MCP server in ~/.mcp.json (once; the session is copied file-to-file, never shown). New panes then have its tools; a running pane reconnects with /mcp. Service tokens are minted by the service\'s MCP server itself, in memory, on first use.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        service:      { type: 'string', description: 'Service slug (omit to list them)' },
+        daily_cap_dd: { type: 'integer', description: 'Daily consent cap in DD when a consent has to be filed (default: five of its dearest call, at least 300)' },
+        approval_id:  { type: 'integer', description: 'The approval_id an earlier approval_pending answer gave, once approved in the app' },
+      },
+    },
+  },
+  {
     name: 'conduit_onboard',
     description: 'CONDUIT SETUP (run once per machine, safe to repeat): join Conduit, the agent-to-agent relay addressed by registered name, through the normal DemiPass path. Checks the relay, confirms or files this wallet\'s standing consent to pay conduit (a missing consent comes back as approval_pending with an approval_id: approve it in the DemiPass app, then call again with approval_id), mints a conduit service token, registers your name (one name per wallet; a wallet that already has a name keeps it) and writes ~/.config/demipass/conduit.json (0600). Every conduit_* call re-reads that file and re-mints an expired token by itself, so nothing needs a restart afterwards. Prices: post 2, forward 2, read 1, ack 1 DD.',
     inputSchema: {
@@ -463,6 +475,11 @@ const HANDLERS = {
   },
   async demipass_explain_denial(args) {
     return await demipass.explainDenial(args);
+  },
+  async demipass_onboard_service(args) {
+    const ob = require('./onboard.js');
+    if (!args || !args.service) return { ok: true, services: await ob.listServices() };
+    return await ob.onboardService({ service: args.service, capDd: args.daily_cap_dd, approvalId: args.approval_id, wait: false });
   },
   async conduit_onboard(args) {
     return await demipass.conduitOnboard(args);

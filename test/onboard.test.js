@@ -1,0 +1,102 @@
+'use strict';
+// demipass-onboard: registry lookup → consent (filed, waited for, approved) → MCP server registered once in the config,
+// with the session copied (never printed), a .bak kept, and nothing re-registered. Mock DemiPass only.
+const test = require('node:test');
+const assert = require('node:assert');
+const http = require('http');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+const st = { consents: [], approveAfter: 2, polls: 0, posts: [] };
+const tenants = {
+  fleetgate: { slug: 'fleetgate', name: 'FLEETGATE', endpoint: 'https://repo.example/-/fleetgate/door', mcp_server: 'demipass#fleetgate-mcp',
+    actions: [{ action: 'submit', open: true, price_dd: 696, max_price_dd: 696 }, { action: 'sign-charter', open: false, price_dd: 12 }] },
+  conduit: { slug: 'conduit', name: 'Conduit', endpoint: 'http://phasewhip.example.ts.net:8080', mcp_server: 'demipass#demipass-mcp', actions: [{ action: 'post', open: true, price_dd: 3 }] },
+  bare: { slug: 'bare', name: 'Bare', endpoint: null, mcp_server: null, actions: [] },
+};
+const srv = http.createServer((req, res) => {
+  let b = ''; req.on('data', c => { b += c; }); req.on('end', () => {
+    const body = b ? JSON.parse(b) : {};
+    const j = (s, o) => { res.writeHead(s, { 'content-type': 'application/json' }); res.end(JSON.stringify(o)); };
+    const m = /^\/api\/services\/([a-z-]+)$/.exec(req.url);
+    if (req.method === 'GET' && req.url === '/api/services') return j(200, { tenants: Object.values(tenants) });
+    if (req.method === 'GET' && m && !['consents'].includes(m[1])) return tenants[m[1]] ? j(200, tenants[m[1]]) : j(404, { error: 'no such service' });
+    if (req.headers.authorization !== 'Bearer sess-TOKEN-xyz') return j(401, { error: 'bad session' });
+    if (req.method === 'GET' && req.url === '/api/services/consents') return j(200, { ok: true, mine: st.consents });
+    if (req.method === 'POST' && req.url === '/api/services/consent') {
+      st.posts.push(body);
+      if (body.approval_id && ++st.polls >= st.approveAfter) { const c = { id: st.consents.length + 1, service: body.service, daily_cap_dd: body.daily_cap_dd, status: 'active' }; st.consents.push(c); return j(201, { ok: true, consent_id: c.id, service: c.service, daily_cap_dd: c.daily_cap_dd }); }
+      return j(202, { status: 'approval_pending', approval_id: 41 });
+    }
+    j(404, { error: 'no route' });
+  });
+});
+
+let ob, dir, cfg;
+test.before(async () => {
+  await new Promise(ok => srv.listen(0, '127.0.0.1', ok));
+  process.env.DEMIPASS_URL = `http://127.0.0.1:${srv.address().port}`;
+  delete process.env.DEMIPASS_TOKEN;
+  dir = fs.mkdtempSync(path.join(os.tmpdir(), 'onboard-test-'));
+  cfg = path.join(dir, 'mcp.json');
+  fs.writeFileSync(cfg, JSON.stringify({ mcpServers: { demipass: { command: 'node', args: [path.join(__dirname, '..', 'mcp-server.js')], env: { DEMIPASS_TOKEN: 'sess-TOKEN-xyz' } }, other: { command: 'x' } } }));
+  ob = require('../onboard.js');
+});
+test.after(() => { srv.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+
+test('fleetgate: consent filed and waited for, then the MCP server is registered with the session copied', async () => {
+  const logs = [];
+  const r = await ob.onboardService({ service: 'fleetgate', mcpConfig: cfg, waitMs: 30000, log: m => logs.push(m) });
+  assert.strictEqual(r.ok, true, JSON.stringify(r));
+  assert.strictEqual(st.posts[0].daily_cap_dd, 3480, 'default cap: five of the dearest open action');
+  assert.match(logs[0], /Approve .* in the DemiPass app/);
+  assert.ok(!JSON.stringify(r).includes('sess-TOKEN-xyz'), 'the session never appears in the answer');
+  assert.strictEqual(r.mcp.attached, true); assert.strictEqual(r.mcp.changed, true); assert.strictEqual(r.endpoint, 'https://repo.example/-/fleetgate/door');
+  const c = JSON.parse(fs.readFileSync(cfg, 'utf8'));
+  assert.deepStrictEqual(c.mcpServers.fleetgate.args, [path.resolve(__dirname, '..', 'fleetgate-mcp.js')]);
+  assert.strictEqual(c.mcpServers.fleetgate.env.DEMIPASS_TOKEN, 'sess-TOKEN-xyz');
+  assert.ok(c.mcpServers.other && c.mcpServers.demipass, 'other entries kept');
+  assert.ok(fs.existsSync(cfg + '.bak'));
+  assert.strictEqual(fs.statSync(cfg).mode & 0o077, 0, 'config is 0600');
+});
+
+test('fleetgate again: existing consent reused, config untouched', async () => {
+  const n = st.posts.length, before = fs.readFileSync(cfg, 'utf8');
+  const r = await ob.onboardService({ service: 'fleetgate', mcpConfig: cfg });
+  assert.strictEqual(r.ok, true); assert.strictEqual(r.consent.existing, true); assert.strictEqual(r.mcp.changed, false);
+  assert.strictEqual(st.posts.length, n); assert.strictEqual(fs.readFileSync(cfg, 'utf8'), before);
+});
+
+test('conduit: its tools live in the demipass server already: recognised, no second entry', async () => {
+  st.polls = 0; st.approveAfter = 1;
+  const r = await ob.onboardService({ service: 'conduit', mcpConfig: cfg, waitMs: 30000 });
+  assert.strictEqual(r.ok, true, JSON.stringify(r)); assert.strictEqual(r.mcp.entry, 'demipass'); assert.strictEqual(r.mcp.changed, false);
+  assert.strictEqual(r.consent.daily_cap_dd, 300, 'small prices → the 300 DD floor');
+  assert.ok(!JSON.parse(fs.readFileSync(cfg, 'utf8')).mcpServers.conduit);
+});
+
+test('--no-wait returns the approval id and the command to finish with', async () => {
+  st.polls = 0; st.approveAfter = 99;
+  const r = await ob.onboardService({ service: 'bare', mcpConfig: cfg, wait: false });
+  assert.strictEqual(r.status, 'approval_pending'); assert.strictEqual(r.approval_id, 41); assert.match(r.next, /--approval 41/);
+});
+
+test('unknown service and bad slugs are refused before any session use', async () => {
+  const n = st.posts.length;
+  assert.match((await ob.onboardService({ service: 'nope', mcpConfig: cfg })).error, /no service "nope"/);
+  assert.match((await ob.onboardService({ service: '../x', mcpConfig: cfg })).error, /slug/);
+  assert.strictEqual(st.posts.length, n);
+});
+
+test('resolveMcpServer: only local, known bins', () => {
+  assert.ok(ob.resolveMcpServer('demipass#fleetgate-mcp').file.endsWith('fleetgate-mcp.js'));
+  assert.match(ob.resolveMcpServer('demipass#nope').error, /no bin/);
+  assert.match(ob.resolveMcpServer('left-pad-zzz-not-here#x').error, /not installed/);
+  assert.strictEqual(ob.resolveMcpServer('rm -rf /'), null);
+});
+
+test('list', async () => {
+  const l = await ob.listServices();
+  assert.deepStrictEqual(l.find(x => x.service === 'fleetgate').prices, { submit: 696 });
+});
