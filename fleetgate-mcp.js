@@ -66,13 +66,14 @@ async function onboard({ daily_cap_dd, approval_id } = {}, { fileConsent = true 
     const all = await dp().consents();
     if (!(all.mine || []).some(c => c.service === SERVICE && c.status === 'active')) return { ok: false, status: 'not_onboarded', error: 'not onboarded: run fleetgate_onboard and approve it in the DemiPass app' };
   }
-  // services().onboard's two steps, with the token's cap set to the whole daily consent: the server's default token
-  // cap (500 DD) is below one submission (submit + review round, ~700 DD), so a default token could never submit.
+  // services().onboard's two steps; the token carries a follow-up budget so the submission's review rounds can bill.
   const api = dp();
   const c = await consentAtLeast(api, { service: SERVICE, cap: daily_cap_dd || DEFAULT_CAP, explicit: Boolean(daily_cap_dd), approvalId: approval_id });
   let r = c;
   if (!c.pending) {
-    const t = await api.mintToken({ service: SERVICE, ttl: '24h', capDd: c.consent.daily_cap_dd });
+    // Ordinary charges (the door's intake) stay under the server's default cap; the review rounds a submission starts
+    // bill afterwards against the follow-up budget, up to the whole daily consent (the door needs at least ~one round).
+    const t = await api.mintToken({ service: SERVICE, ttl: '24h', followUpDd: c.consent.daily_cap_dd });
     r = { consent: c.consent, existing: c.existing, token: { token: t.token, token_id: t.token_id, expires_at: t.expires_at, cap_dd: t.cap_dd } };
   }
   if (r.pending) {

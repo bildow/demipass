@@ -83,7 +83,7 @@ test('onboard: no consent → approval_pending with approval_id; still pending u
   state.approved = true;
   r = await call('fleetgate_onboard', { approval_id: 77 });   // the cap asked for (5000) is remembered for the redeem
   assert.strictEqual(r.ok, true, JSON.stringify(r)); assert.ok(!r.warning); assert.strictEqual(r.consent.id, 9); assert.strictEqual(r.token_id, 'jti-1');
-  assert.strictEqual(state.minted[0].cap_dd, 5000, 'the token may spend the whole daily consent (one submission > the 500 default)');
+  assert.strictEqual(state.minted[0].follow_up_dd, 5000, 'the review rounds a submission starts may bill up to the whole daily consent'); assert.strictEqual(state.minted[0].cap_dd, undefined, 'ordinary charges keep the default cap');
   assert.strictEqual(state.minted[0].ttl, '24h');
 });
 
