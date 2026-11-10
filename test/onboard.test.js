@@ -8,6 +8,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
+const SESSION = 'eyJhbGciOiJFZERTQSJ9.' + Buffer.from(JSON.stringify({ sub: 'did:key:zPaneWallet' })).toString('base64url') + '.c2ln';
 const st = { consents: [], approveAfter: 2, polls: 0, posts: [] };
 const tenants = {
   kodiak: { slug: 'kodiak', name: 'Not Kodiak', endpoint: 'https://k.example', mcp_server: 'demipass#demipass-onboard', actions: [{ action: 'x', open: true, price_dd: 5 }] },
@@ -25,7 +26,7 @@ const srv = http.createServer((req, res) => {
     const m = /^\/api\/services\/([a-z-]+)$/.exec(req.url);
     if (req.method === 'GET' && req.url === '/api/services') return j(200, { tenants: Object.values(tenants) });
     if (req.method === 'GET' && m && !['consents'].includes(m[1])) return tenants[m[1]] ? j(200, tenants[m[1]]) : j(404, { error: 'no such service' });
-    if (req.headers.authorization !== 'Bearer sess-TOKEN-xyz') return j(401, { error: 'bad session' });
+    if (req.headers.authorization !== 'Bearer ' + SESSION) return j(401, { error: 'bad session' });
     if (req.method === 'GET' && req.url === '/api/services/consents') return j(200, { ok: true, mine: st.consents });
     if (req.method === 'POST' && req.url === '/api/services/consent') {
       st.posts.push(body);
@@ -43,7 +44,7 @@ test.before(async () => {
   delete process.env.DEMIPASS_TOKEN;
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'onboard-test-'));
   cfg = path.join(dir, 'mcp.json');
-  fs.writeFileSync(cfg, JSON.stringify({ mcpServers: { demipass: { command: 'node', args: [path.join(__dirname, '..', 'mcp-server.js')], env: { DEMIPASS_TOKEN: 'sess-TOKEN-xyz' } }, other: { command: 'x' },
+  fs.writeFileSync(cfg, JSON.stringify({ mcpServers: { demipass: { command: 'node', args: [path.join(__dirname, '..', 'mcp-server.js')], env: { DEMIPASS_TOKEN: SESSION } }, other: { command: 'x' },
     kodiak: { command: 'node', args: ['/opt/kodiak/mcp.js'], env: { KODIAK_KEY: 'k' } } } }), { mode: 0o644 });
   ob = require('../onboard.js');
 });
@@ -55,11 +56,13 @@ test('fleetgate: consent filed and waited for, then the MCP server is registered
   assert.strictEqual(r.ok, true, JSON.stringify(r));
   assert.strictEqual(st.posts[0].daily_cap_dd, 3480, 'default cap: five of the dearest open action');
   assert.match(logs[0], /Approve .* in the DemiPass app/);
-  assert.ok(!JSON.stringify(r).includes('sess-TOKEN-xyz'), 'the session never appears in the answer');
+  assert.ok(!JSON.stringify(r).includes(SESSION), 'the session never appears in the answer');
   assert.strictEqual(r.mcp.attached, true); assert.strictEqual(r.mcp.changed, true); assert.strictEqual(r.endpoint, 'https://repo.example/-/fleetgate/door');
   const c = JSON.parse(fs.readFileSync(cfg, 'utf8'));
   assert.deepStrictEqual(c.mcpServers.fleetgate.args, [path.resolve(__dirname, '..', 'fleetgate-mcp.js')]);
   assert.strictEqual(c.mcpServers.fleetgate.env.DEMIPASS_TOKEN, undefined, 'no session copy in the entry: the server reads the live one');
+  assert.strictEqual(c.mcpServers.fleetgate.env.DEMIPASS_EXPECT_DID, 'did:key:zPaneWallet', 'pinned to the wallet that onboarded it');
+  assert.strictEqual(c.mcpServers.fleetgate.env.DEMIPASS_MCP_CONFIG, fs.realpathSync(cfg));
   assert.ok(c.mcpServers.other && c.mcpServers.demipass, 'other entries kept');
   assert.ok(fs.existsSync(cfg + '.bak')); assert.strictEqual(fs.statSync(cfg + '.bak').mode & 0o077, 0, '.bak is 0600 too');
   assert.strictEqual(fs.statSync(cfg).mode & 0o077, 0, 'config is 0600');
@@ -95,7 +98,7 @@ test('unknown service and bad slugs are refused before any session use', async (
 
 test('resolveMcpServer: only local, known bins', () => {
   assert.ok(ob.resolveMcpServer('demipass#fleetgate-mcp').file.endsWith('fleetgate-mcp.js'));
-  assert.match(ob.resolveMcpServer('demipass#nope').error, /no bin/);
+  assert.match(ob.resolveMcpServer('demipass#nope').error, /not one of its MCP servers/);
   assert.match(ob.resolveMcpServer('left-pad-zzz-not-here#x').error, /not a first-party/);
   assert.match(ob.resolveMcpServer('npm#npm').error, /not a first-party/, 'never resolves another installed package');
   assert.strictEqual(ob.resolveMcpServer('rm -rf /'), null);
@@ -108,11 +111,30 @@ test('a tenant naming a third-party server gets consent but no MCP entry; no ins
   assert.ok(!JSON.parse(fs.readFileSync(cfg, 'utf8')).mcpServers.evil);
 });
 
-test('a tenant slug that clashes with an existing MCP server never replaces it', async () => {
+test('a CLI bin is not an MCP server: a tenant naming one gets no entry', async () => {
   st.polls = 0; st.approveAfter = 1;
   const r = await ob.onboardService({ service: 'kodiak', mcpConfig: cfg, waitMs: 30000 });
-  assert.strictEqual(r.mcp.attached, false); assert.match(r.mcp.reason, /already exists/);
+  assert.strictEqual(r.mcp.attached, false); assert.match(r.mcp.reason, /not one of its MCP servers/);
   assert.deepStrictEqual(JSON.parse(fs.readFileSync(cfg, 'utf8')).mcpServers.kodiak.args, ['/opt/kodiak/mcp.js']);
+  assert.match(ob.resolveMcpServer('demipass#constructor').error, /not one of its MCP servers/);
+});
+
+test('registerMcp: a name clash never replaces; an old entry\'s copied session is stripped and pinned', () => {
+  const c2 = path.join(dir, 'clash.json'); const f = ob.resolveMcpServer('demipass#fleetgate-mcp').file;
+  fs.writeFileSync(c2, JSON.stringify({ mcpServers: { brain: { command: 'node', args: ['/opt/brain.js'] } } }));
+  const r = ob.registerMcp({ slug: 'brain', file: f, mcpConfig: c2, did: 'did:key:zW' });
+  assert.match(r.error, /already exists/); assert.deepStrictEqual(JSON.parse(fs.readFileSync(c2, 'utf8')).mcpServers.brain.args, ['/opt/brain.js']);
+  fs.writeFileSync(c2, JSON.stringify({ mcpServers: { fg: { command: 'node', args: [f], env: { DEMIPASS_TOKEN: 'old-copy' } } } }));
+  const r2 = ob.registerMcp({ slug: 'fleetgate', file: f, mcpConfig: c2, did: 'did:key:zW' });
+  const e = JSON.parse(fs.readFileSync(c2, 'utf8')).mcpServers.fg.env;
+  assert.strictEqual(r2.stripped_session_copy, true); assert.strictEqual(e.DEMIPASS_TOKEN, undefined); assert.strictEqual(e.DEMIPASS_EXPECT_DID, 'did:key:zW');
+});
+
+test('sessionToken: pinned to the onboarded wallet; another wallet\'s session is refused', () => {
+  process.env.DEMIPASS_TOKEN = SESSION;
+  process.env.DEMIPASS_EXPECT_DID = 'did:key:zPaneWallet'; assert.strictEqual(ob.sessionToken(cfg), SESSION);
+  process.env.DEMIPASS_EXPECT_DID = 'did:key:zSomeoneElse'; assert.strictEqual(ob.sessionToken(cfg), '');
+  delete process.env.DEMIPASS_EXPECT_DID; delete process.env.DEMIPASS_TOKEN;
 });
 
 test('a tenant\'s huge prices never make the default cap huge (10,000 DD at most)', async () => {

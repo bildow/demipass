@@ -32,8 +32,20 @@ const API = (process.env.DEMIPASS_URL || 'https://api.dustforge.com').replace(/\
 const DEFAULT_MCP_CONFIG = path.join(os.homedir(), '.mcp.json');
 const SLUG_RE = /^[a-z][a-z0-9-]{1,30}$/;
 
-// This machine's DemiPass session: DEMIPASS_TOKEN, else the `demipass` entry of the MCP config, else the SDK login.
-function sessionToken(mcpConfig = DEFAULT_MCP_CONFIG) {
+// The MCP servers this package ships: the only bins a service may name (#87/#17 review: a CLI is not a server).
+const MCP_BINS = new Set(['demipass-mcp', 'fleetgate-mcp']);
+const didOf = (jwt) => { try { return JSON.parse(Buffer.from(String(jwt).split('.')[1], 'base64url').toString('utf8')).sub || null; } catch (_) { return null; } };
+
+// This machine's DemiPass session: DEMIPASS_TOKEN, else the `demipass` entry of the MCP config (the one the entry was
+// registered in: DEMIPASS_MCP_CONFIG), else the SDK login. With DEMIPASS_EXPECT_DID set (every entry onboarding
+// writes), a session of any other wallet is refused: a service server pays as the wallet that onboarded it, never as
+// whoever signs in later (#17 review M1).
+function sessionToken(mcpConfig = process.env.DEMIPASS_MCP_CONFIG || DEFAULT_MCP_CONFIG) {
+  const t = sessionTokenAny(mcpConfig);
+  const want = process.env.DEMIPASS_EXPECT_DID;
+  return want && t && didOf(t) !== want ? '' : t;
+}
+function sessionTokenAny(mcpConfig) {
   if (process.env.DEMIPASS_TOKEN) return process.env.DEMIPASS_TOKEN.trim();
   try { const c = JSON.parse(fs.readFileSync(mcpConfig, 'utf8')); const t = c.mcpServers && c.mcpServers.demipass && c.mcpServers.demipass.env && c.mcpServers.demipass.env.DEMIPASS_TOKEN; if (t) return t; } catch (_) {}
   try { const c = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.config', 'demipass', 'credentials.json'), 'utf8')); if (c && c.token) return c.token; } catch (_) {}
@@ -55,7 +67,8 @@ function resolveMcpServer(spec) {
   const [, pkg, bin] = m;
   let own; try { own = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')); } catch (_) { return { error: 'this package has no package.json' }; }
   if (own.name !== pkg) return { error: `${pkg}#${bin} is not a first-party DemiPass server; only ${own.name}#<bin> servers are attached` };
-  const rel = own.bin && typeof own.bin === 'object' ? own.bin[bin] : null;
+  if (!MCP_BINS.has(bin)) return { error: `${pkg}#${bin} is not one of its MCP servers (${[...MCP_BINS].join(', ')})` };
+  const rel = own.bin && typeof own.bin === 'object' && Object.hasOwn(own.bin, bin) && typeof own.bin[bin] === 'string' ? own.bin[bin] : null;
   if (!rel) return { error: `${pkg} has no bin "${bin}"` };
   const file = path.resolve(__dirname, rel);
   const inside = path.relative(__dirname, file);
@@ -65,23 +78,36 @@ function resolveMcpServer(spec) {
 }
 
 // Adds (or confirms) the MCP server entry for a service. No session goes into it: the server reads the live one.
-function registerMcp({ slug, file, mcpConfig = DEFAULT_MCP_CONFIG }) {
+function registerMcp({ slug, file, mcpConfig = DEFAULT_MCP_CONFIG, did }) {
   let cfg = { mcpServers: {} };
   const exists = fs.existsSync(mcpConfig);
   if (exists) mcpConfig = fs.realpathSync(mcpConfig);   // a symlinked config is updated where it lives, not replaced
   if (exists) cfg = JSON.parse(fs.readFileSync(mcpConfig, 'utf8'));
   cfg.mcpServers = cfg.mcpServers || {};
   // Already attached under any name (the same file): nothing to do. Conduit's tools, for one, live in the demipass server.
+  const write = () => {
+    if (exists) { fs.copyFileSync(mcpConfig, mcpConfig + '.bak'); fs.chmodSync(mcpConfig + '.bak', 0o600); }
+    const tmp = mcpConfig + '.tmp-' + process.pid;
+    fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2) + '\n', { mode: 0o600 });
+    fs.renameSync(tmp, mcpConfig);
+  };
+  const isMain = path.basename(file) === 'mcp-server.js';   // the demipass server itself runs on the session it is given
   for (const [name, e] of Object.entries(cfg.mcpServers)) {
-    if (e && Array.isArray(e.args) && e.args.some(a => path.resolve(String(a)) === file)) return { changed: false, name };
+    if (e && Array.isArray(e.args) && e.args.some(a => path.resolve(String(a)) === file)) {
+      // A service entry from before (#17 round 1) may still hold a copied session: drop it (#17 review M2).
+      if (!isMain && e.env && e.env.DEMIPASS_TOKEN) {
+        delete e.env.DEMIPASS_TOKEN;
+        Object.assign(e.env, { DEMIPASS_MCP_CONFIG: mcpConfig, ...(did ? { DEMIPASS_EXPECT_DID: did } : {}) });
+        write(); return { changed: true, name, stripped_session_copy: true };
+      }
+      return { changed: false, name };
+    }
   }
   // A different server already under this name (a tenant slug like "kodiak" or "brain"): never overwritten (#17 M1).
   if (cfg.mcpServers[slug]) return { changed: false, name: slug, error: `an MCP server named "${slug}" already exists in ${mcpConfig} and runs something else; not replaced` };
-  cfg.mcpServers[slug] = { command: process.execPath, args: [file], env: { DEMIPASS_URL: API } };
-  if (exists) { fs.copyFileSync(mcpConfig, mcpConfig + '.bak'); fs.chmodSync(mcpConfig + '.bak', 0o600); }
-  const tmp = mcpConfig + '.tmp-' + process.pid;
-  fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2) + '\n', { mode: 0o600 });
-  fs.renameSync(tmp, mcpConfig);
+  cfg.mcpServers[slug] = { command: process.execPath, args: [file],
+    env: { DEMIPASS_URL: API, DEMIPASS_MCP_CONFIG: mcpConfig, ...(did ? { DEMIPASS_EXPECT_DID: did } : {}) } };
+  write();
   return { changed: true, name: slug };
 }
 
@@ -103,7 +129,7 @@ async function onboardService({ service, capDd, approvalId, wait = true, waitMs 
   let t;
   try { t = await getJson(`${API}/api/services/${slug}`); }
   catch (e) { return { ok: false, error: e.status === 404 ? `no service "${slug}" (demipass-onboard --list)` : e.message }; }
-  const token = sessionToken(mcpConfig);
+  const token = sessionTokenAny(mcpConfig);
   if (!token) return { ok: false, error: 'no DemiPass session on this machine: sign in first (demipass_login, or set DEMIPASS_TOKEN)' };
   const dp = services({ token, baseUrl: API });
 
@@ -130,7 +156,7 @@ async function onboardService({ service, capDd, approvalId, wait = true, waitMs 
   if (t.mcp_server && register) {
     const r = resolveMcpServer(t.mcp_server);
     if (!r || r.error) mcp = { attached: false, reason: r ? r.error : `bad mcp_server "${t.mcp_server}"` };
-    else { const g = registerMcp({ slug, file: r.file, mcpConfig }); mcp = g.error ? { attached: false, reason: g.error } : { attached: true, config: mcpConfig, entry: g.name, changed: g.changed }; }
+    else { const g = registerMcp({ slug, file: r.file, mcpConfig, did: didOf(token) }); mcp = g.error ? { attached: false, reason: g.error } : { attached: true, config: mcpConfig, entry: g.name, changed: g.changed }; }
   }
   return { ok: true, service: slug, name: t.name, endpoint: t.endpoint || null,
     consent: { id: c.consent.id, daily_cap_dd: c.consent.daily_cap_dd, existing: Boolean(c.existing) }, mcp,

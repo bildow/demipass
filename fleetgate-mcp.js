@@ -59,7 +59,7 @@ const TOKEN_RE = /^[A-Za-z0-9_.-]{20,4096}$/;
 const live = () => held && Date.parse(held.expires_at) - Date.now() > 60 * 1000;
 
 async function onboard({ daily_cap_dd, approval_id } = {}, { fileConsent = true } = {}) {
-  if (!sessionToken()) return { ok: false, error: 'no DemiPass session on this machine: sign in first (demipass_login, or set DEMIPASS_TOKEN)' };
+  if (!sessionToken()) return { ok: false, error: process.env.DEMIPASS_EXPECT_DID ? `no DemiPass session for ${process.env.DEMIPASS_EXPECT_DID} (the wallet this server was onboarded as) on this machine` : 'no DemiPass session on this machine: sign in first (demipass_login, or set DEMIPASS_TOKEN)' };
   if (approval_id && !daily_cap_dd && pendingCaps.has(Number(approval_id))) daily_cap_dd = pendingCaps.get(Number(approval_id));
   if (!fileConsent) {
     // Submitting never files a consent (#17 review L3): after a person said no, a submit must not ask their phone again.
