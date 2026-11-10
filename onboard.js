@@ -13,9 +13,11 @@
  *      the person approves in the DemiPass app; the command waits for that tap (up to 15 min; --no-wait returns the
  *      approval id to pass back with --approval).
  *   3. Registers the service's MCP server in the MCP config (default ~/.mcp.json; one entry per service, idempotent,
- *      a .bak copy before any change). The entry reuses this machine's DemiPass session from the `demipass` entry
- *      (or DEMIPASS_TOKEN), copied file-to-file, never printed. Every pane started afterwards has the tools; a running
- *      pane picks them up with /mcp (reconnect).
+ *      a 0600 .bak copy before any change). Only first-party servers: a bin of this demipass package, inside it
+ *      (#17 review H1 — the server a tenant names is code run on this machine). The entry holds no session: the
+ *      server reads this machine's live DemiPass session when it needs one (no copies to go stale or sprawl, M2).
+ *      An existing entry of that name pointing elsewhere is never overwritten (M1). Every pane started afterwards has
+ *      the tools; a running pane picks them up with /mcp (reconnect).
  *   4. Service tokens are not minted here: the service's MCP server mints its own (aud svc:<slug>), in memory, on first
  *      use, and re-mints on expiry. A token therefore never sits in a config file.
  *
@@ -45,42 +47,54 @@ async function getJson(url) {
   return d;
 }
 
-// "<package>#<bin>" → the local file to run. Only packages resolvable on this machine (this checkout counts as
-// `demipass`); never installs anything.
+// "<package>#<bin>" → the local file to run. First-party only: the package must be this demipass package and the
+// bin one of its own files, inside it. Nothing else is resolved, and nothing is ever installed (#17 review H1).
 function resolveMcpServer(spec) {
   const m = /^((?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*)#([a-z0-9][a-z0-9._-]*)$/.exec(String(spec || ''));
   if (!m) return null;
   const [, pkg, bin] = m;
-  let dir = null;
-  try { const own = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')); if (own.name === pkg) dir = __dirname; } catch (_) {}
-  if (!dir) { try { dir = path.dirname(require.resolve(pkg + '/package.json')); } catch (_) { return { error: `${pkg} is not installed here (npm i ${pkg})` }; } }
-  const pj = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
-  const rel = pj.bin && (typeof pj.bin === 'string' ? (bin === pj.name ? pj.bin : null) : pj.bin[bin]);
+  let own; try { own = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')); } catch (_) { return { error: 'this package has no package.json' }; }
+  if (own.name !== pkg) return { error: `${pkg}#${bin} is not a first-party DemiPass server; only ${own.name}#<bin> servers are attached` };
+  const rel = own.bin && typeof own.bin === 'object' ? own.bin[bin] : null;
   if (!rel) return { error: `${pkg} has no bin "${bin}"` };
-  const file = path.resolve(dir, rel);
+  const file = path.resolve(__dirname, rel);
+  const inside = path.relative(__dirname, file);
+  if (!inside || inside.startsWith('..') || path.isAbsolute(inside)) return { error: `${pkg}#${bin} points outside the package` };
   if (!fs.existsSync(file)) return { error: `${file} is missing` };
   return { file };
 }
 
-// Adds (or confirms) the MCP server entry for a service. The session token is copied from the demipass entry (or the
-// env) into the new entry's env without passing through any output.
-function registerMcp({ slug, file, mcpConfig = DEFAULT_MCP_CONFIG, token }) {
+// Adds (or confirms) the MCP server entry for a service. No session goes into it: the server reads the live one.
+function registerMcp({ slug, file, mcpConfig = DEFAULT_MCP_CONFIG }) {
   let cfg = { mcpServers: {} };
   const exists = fs.existsSync(mcpConfig);
+  if (exists) mcpConfig = fs.realpathSync(mcpConfig);   // a symlinked config is updated where it lives, not replaced
   if (exists) cfg = JSON.parse(fs.readFileSync(mcpConfig, 'utf8'));
   cfg.mcpServers = cfg.mcpServers || {};
   // Already attached under any name (the same file): nothing to do. Conduit's tools, for one, live in the demipass server.
   for (const [name, e] of Object.entries(cfg.mcpServers)) {
     if (e && Array.isArray(e.args) && e.args.some(a => path.resolve(String(a)) === file)) return { changed: false, name };
   }
-  const env = { DEMIPASS_URL: API };
-  if (token) env.DEMIPASS_TOKEN = token;
-  cfg.mcpServers[slug] = { command: process.execPath, args: [file], env };
-  if (exists) fs.copyFileSync(mcpConfig, mcpConfig + '.bak');
+  // A different server already under this name (a tenant slug like "kodiak" or "brain"): never overwritten (#17 M1).
+  if (cfg.mcpServers[slug]) return { changed: false, name: slug, error: `an MCP server named "${slug}" already exists in ${mcpConfig} and runs something else; not replaced` };
+  cfg.mcpServers[slug] = { command: process.execPath, args: [file], env: { DEMIPASS_URL: API } };
+  if (exists) { fs.copyFileSync(mcpConfig, mcpConfig + '.bak'); fs.chmodSync(mcpConfig + '.bak', 0o600); }
   const tmp = mcpConfig + '.tmp-' + process.pid;
   fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2) + '\n', { mode: 0o600 });
   fs.renameSync(tmp, mcpConfig);
   return { changed: true, name: slug };
+}
+
+// A standing consent of at least `cap` DD a day. An existing smaller one is replaced only when a higher cap is asked
+// for explicitly: that files a new consent for the person to approve (ensureConsent alone would return the old one).
+async function consentAtLeast(dp, { service, cap, explicit, approvalId }) {
+  const c = await dp.ensureConsent({ service, dailyCapDd: cap, approvalId });
+  if (c.pending || !explicit || c.consent.daily_cap_dd >= cap) return c;
+  try { const r = await dp.consent({ service, dailyCapDd: cap, approvalId }); return { consent: { id: r.consent_id, service: r.service, daily_cap_dd: r.daily_cap_dd, status: 'active' }, existing: false }; }
+  catch (e) {
+    if (!e.pending) throw e;
+    return { pending: { approval_id: e.body.approval_id, expires_at: e.body.expires_at || null, daily_cap_dd: cap, replaces: c.consent.id } };
+  }
 }
 
 async function onboardService({ service, capDd, approvalId, wait = true, waitMs = 15 * 60 * 1000, mcpConfig = DEFAULT_MCP_CONFIG, register = true, log = () => {} } = {}) {
@@ -93,32 +107,34 @@ async function onboardService({ service, capDd, approvalId, wait = true, waitMs 
   if (!token) return { ok: false, error: 'no DemiPass session on this machine: sign in first (demipass_login, or set DEMIPASS_TOKEN)' };
   const dp = services({ token, baseUrl: API });
 
-  // One submission/call must fit the daily consent: default to 5 of the dearest action, at least 300 DD.
+  // One call must fit the daily consent: default to 5 of the dearest open action, at least 300 and at most 10,000 DD
+  // (a tenant's prices never make the default ask for more; above it, the person passes --cap; #17 review L).
   const dearest = Math.max(0, ...(t.actions || []).filter(a => a.open).map(a => a.max_price_dd || a.price_dd || 0));
-  const cap = capDd || Math.max(300, dearest * 5);
-  let c = await dp.ensureConsent({ service: slug, dailyCapDd: cap, approvalId });
+  const cap = capDd || Math.min(10000, Math.max(300, dearest * 5));
+  const ask = (id) => consentAtLeast(dp, { service: slug, cap, explicit: Boolean(capDd), approvalId: id });
+  let c = await ask(approvalId);
   if (c.pending && wait) {
     log(`Approve "let a wallet pay ${slug}" (${cap} DD/day) in the DemiPass app — waiting (approval ${c.pending.approval_id})…`);
     const id = c.pending.approval_id, until = Date.now() + waitMs;
     while (c.pending && Date.now() < until) {
       await new Promise(ok => setTimeout(ok, 5000));
-      try { c = await dp.ensureConsent({ service: slug, dailyCapDd: cap, approvalId: id }); }
+      try { c = await ask(id); }
       catch (e) { if (e.status === 410 || e.status === 403) return { ok: false, error: `approval ${id}: ${e.message}` }; throw e; }
     }
   }
   if (c.pending) return { ok: false, status: 'approval_pending', service: slug, approval_id: c.pending.approval_id, daily_cap_dd: cap,
-    next: `Approve it in the DemiPass app, then: demipass-onboard ${slug} --cap ${cap} --approval ${c.pending.approval_id}` };
+    next: `Approve it in the DemiPass app, then call again with approval_id ${c.pending.approval_id} and daily_cap_dd ${cap} (CLI: demipass-onboard ${slug} --cap ${cap} --approval ${c.pending.approval_id})` };
   const low = dearest && c.consent.daily_cap_dd < dearest;
 
   let mcp = { attached: false, reason: 'the service names no MCP server yet (its owner sets mcp_server)' };
   if (t.mcp_server && register) {
     const r = resolveMcpServer(t.mcp_server);
     if (!r || r.error) mcp = { attached: false, reason: r ? r.error : `bad mcp_server "${t.mcp_server}"` };
-    else { const g = registerMcp({ slug, file: r.file, mcpConfig, token }); mcp = { attached: true, config: mcpConfig, entry: g.name, changed: g.changed }; }
+    else { const g = registerMcp({ slug, file: r.file, mcpConfig }); mcp = g.error ? { attached: false, reason: g.error } : { attached: true, config: mcpConfig, entry: g.name, changed: g.changed }; }
   }
   return { ok: true, service: slug, name: t.name, endpoint: t.endpoint || null,
     consent: { id: c.consent.id, daily_cap_dd: c.consent.daily_cap_dd, existing: Boolean(c.existing) }, mcp,
-    ...(low ? { warning: `the daily consent (${c.consent.daily_cap_dd} DD) is below one ${slug} call (${dearest} DD); re-run with --cap` } : {}),
+    ...(low ? { warning: `the daily consent (${c.consent.daily_cap_dd} DD) is below one ${slug} call (${dearest} DD); call again with a higher daily_cap_dd (--cap) to file a replacement for approval` } : {}),
     next: mcp.attached ? (mcp.changed ? 'New panes have the tools. In a running pane: /mcp → reconnect.' : 'Already attached; nothing to restart.') : 'Consent is in place.' };
 }
 
@@ -128,7 +144,7 @@ async function listServices() {
     prices: Object.fromEntries((t.actions || []).filter(a => a.open).map(a => [a.action, a.price_dd])) }));
 }
 
-module.exports = { onboardService, listServices, resolveMcpServer, registerMcp };
+module.exports = { onboardService, listServices, resolveMcpServer, registerMcp, sessionToken, consentAtLeast };
 
 if (require.main === module) {
   const a = process.argv.slice(2);

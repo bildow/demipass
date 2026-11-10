@@ -22,6 +22,9 @@
  */
 const crypto = require('crypto');
 const { services } = require('./services.js');
+// This machine's live DemiPass session (DEMIPASS_TOKEN, else the demipass MCP entry, else the SDK login), read each
+// time it is needed: the MCP config entry holds no copy of it (#17 review M2).
+const { sessionToken, consentAtLeast } = require('./onboard.js');
 
 const DEMIPASS_URL = (process.env.DEMIPASS_URL || 'https://api.dustforge.com').replace(/\/$/, '');
 const DOOR_DEFAULT = 'https://repo.dustroot.com/-/fleetgate/door';
@@ -45,7 +48,7 @@ async function door() {
 const DEFAULT_CAP = Number(process.env.FLEETGATE_DAILY_CAP_DD || 3000);   // one submission is ~700 DD (submit + review round)
 const SERVICE = 'fleetgate';
 
-function dp() { return services({ token: process.env.DEMIPASS_TOKEN || '', baseUrl: DEMIPASS_URL }); }
+function dp() { return services({ token: sessionToken(), baseUrl: DEMIPASS_URL }); }
 
 // The service token: memory only.
 let held = null;   // { token, token_id, expires_at, cap_dd }
@@ -56,7 +59,7 @@ const TOKEN_RE = /^[A-Za-z0-9_.-]{20,4096}$/;
 const live = () => held && Date.parse(held.expires_at) - Date.now() > 60 * 1000;
 
 async function onboard({ daily_cap_dd, approval_id } = {}, { fileConsent = true } = {}) {
-  if (!process.env.DEMIPASS_TOKEN) return { ok: false, error: 'DEMIPASS_TOKEN is not set for this MCP server: sign this pane in to DemiPass first' };
+  if (!sessionToken()) return { ok: false, error: 'no DemiPass session on this machine: sign in first (demipass_login, or set DEMIPASS_TOKEN)' };
   if (approval_id && !daily_cap_dd && pendingCaps.has(Number(approval_id))) daily_cap_dd = pendingCaps.get(Number(approval_id));
   if (!fileConsent) {
     // Submitting never files a consent (#17 review L3): after a person said no, a submit must not ask their phone again.
@@ -66,7 +69,7 @@ async function onboard({ daily_cap_dd, approval_id } = {}, { fileConsent = true 
   // services().onboard's two steps, with the token's cap set to the whole daily consent: the server's default token
   // cap (500 DD) is below one submission (submit + review round, ~700 DD), so a default token could never submit.
   const api = dp();
-  const c = await api.ensureConsent({ service: SERVICE, dailyCapDd: daily_cap_dd || DEFAULT_CAP, approvalId: approval_id });
+  const c = await consentAtLeast(api, { service: SERVICE, cap: daily_cap_dd || DEFAULT_CAP, explicit: Boolean(daily_cap_dd), approvalId: approval_id });
   let r = c;
   if (!c.pending) {
     const t = await api.mintToken({ service: SERVICE, ttl: '24h', capDd: c.consent.daily_cap_dd });
@@ -75,7 +78,7 @@ async function onboard({ daily_cap_dd, approval_id } = {}, { fileConsent = true 
   if (r.pending) {
     pendingCaps.set(Number(r.pending.approval_id), r.pending.daily_cap_dd);
     return { ok: false, status: 'approval_pending', approval_id: r.pending.approval_id, expires_at: r.pending.expires_at, daily_cap_dd: r.pending.daily_cap_dd,
-             next: 'Approve "let a wallet pay fleetgate" in the DemiPass app (Requests), then call fleetgate_onboard again with this approval_id.' };
+             next: `Approve "let a wallet pay fleetgate" (${r.pending.daily_cap_dd} DD/day) in the DemiPass app (Requests), then call fleetgate_onboard again with approval_id ${r.pending.approval_id} and daily_cap_dd ${r.pending.daily_cap_dd}.` };
   }
   if (!TOKEN_RE.test(String(r.token.token || ''))) return { ok: false, error: 'DemiPass returned a malformed service token; not held' };
   held = { token: r.token.token, token_id: r.token.token_id, expires_at: r.token.expires_at, cap_dd: r.token.cap_dd };

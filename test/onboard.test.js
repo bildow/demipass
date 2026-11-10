@@ -10,6 +10,9 @@ const path = require('path');
 
 const st = { consents: [], approveAfter: 2, polls: 0, posts: [] };
 const tenants = {
+  kodiak: { slug: 'kodiak', name: 'Not Kodiak', endpoint: 'https://k.example', mcp_server: 'demipass#demipass-onboard', actions: [{ action: 'x', open: true, price_dd: 5 }] },
+  evil: { slug: 'evil', name: 'Evil', endpoint: 'https://e.example', mcp_server: 'evilpkg#x', actions: [{ action: 'x', open: true, price_dd: 5 }] },
+  pricey: { slug: 'pricey', name: 'Pricey', endpoint: 'https://p.example', mcp_server: null, actions: [{ action: 'x', open: true, price_dd: 999999, max_price_dd: 999999 }] },
   fleetgate: { slug: 'fleetgate', name: 'FLEETGATE', endpoint: 'https://repo.example/-/fleetgate/door', mcp_server: 'demipass#fleetgate-mcp',
     actions: [{ action: 'submit', open: true, price_dd: 696, max_price_dd: 696 }, { action: 'sign-charter', open: false, price_dd: 12 }] },
   conduit: { slug: 'conduit', name: 'Conduit', endpoint: 'http://phasewhip.example.ts.net:8080', mcp_server: 'demipass#demipass-mcp', actions: [{ action: 'post', open: true, price_dd: 3 }] },
@@ -40,7 +43,8 @@ test.before(async () => {
   delete process.env.DEMIPASS_TOKEN;
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'onboard-test-'));
   cfg = path.join(dir, 'mcp.json');
-  fs.writeFileSync(cfg, JSON.stringify({ mcpServers: { demipass: { command: 'node', args: [path.join(__dirname, '..', 'mcp-server.js')], env: { DEMIPASS_TOKEN: 'sess-TOKEN-xyz' } }, other: { command: 'x' } } }));
+  fs.writeFileSync(cfg, JSON.stringify({ mcpServers: { demipass: { command: 'node', args: [path.join(__dirname, '..', 'mcp-server.js')], env: { DEMIPASS_TOKEN: 'sess-TOKEN-xyz' } }, other: { command: 'x' },
+    kodiak: { command: 'node', args: ['/opt/kodiak/mcp.js'], env: { KODIAK_KEY: 'k' } } } }), { mode: 0o644 });
   ob = require('../onboard.js');
 });
 test.after(() => { srv.close(); fs.rmSync(dir, { recursive: true, force: true }); });
@@ -55,9 +59,9 @@ test('fleetgate: consent filed and waited for, then the MCP server is registered
   assert.strictEqual(r.mcp.attached, true); assert.strictEqual(r.mcp.changed, true); assert.strictEqual(r.endpoint, 'https://repo.example/-/fleetgate/door');
   const c = JSON.parse(fs.readFileSync(cfg, 'utf8'));
   assert.deepStrictEqual(c.mcpServers.fleetgate.args, [path.resolve(__dirname, '..', 'fleetgate-mcp.js')]);
-  assert.strictEqual(c.mcpServers.fleetgate.env.DEMIPASS_TOKEN, 'sess-TOKEN-xyz');
+  assert.strictEqual(c.mcpServers.fleetgate.env.DEMIPASS_TOKEN, undefined, 'no session copy in the entry: the server reads the live one');
   assert.ok(c.mcpServers.other && c.mcpServers.demipass, 'other entries kept');
-  assert.ok(fs.existsSync(cfg + '.bak'));
+  assert.ok(fs.existsSync(cfg + '.bak')); assert.strictEqual(fs.statSync(cfg + '.bak').mode & 0o077, 0, '.bak is 0600 too');
   assert.strictEqual(fs.statSync(cfg).mode & 0o077, 0, 'config is 0600');
 });
 
@@ -92,8 +96,36 @@ test('unknown service and bad slugs are refused before any session use', async (
 test('resolveMcpServer: only local, known bins', () => {
   assert.ok(ob.resolveMcpServer('demipass#fleetgate-mcp').file.endsWith('fleetgate-mcp.js'));
   assert.match(ob.resolveMcpServer('demipass#nope').error, /no bin/);
-  assert.match(ob.resolveMcpServer('left-pad-zzz-not-here#x').error, /not installed/);
+  assert.match(ob.resolveMcpServer('left-pad-zzz-not-here#x').error, /not a first-party/);
+  assert.match(ob.resolveMcpServer('npm#npm').error, /not a first-party/, 'never resolves another installed package');
   assert.strictEqual(ob.resolveMcpServer('rm -rf /'), null);
+});
+
+test('a tenant naming a third-party server gets consent but no MCP entry; no install hint', async () => {
+  st.polls = 0; st.approveAfter = 1;
+  const r = await ob.onboardService({ service: 'evil', mcpConfig: cfg, waitMs: 30000 });
+  assert.strictEqual(r.ok, true); assert.strictEqual(r.mcp.attached, false); assert.match(r.mcp.reason, /first-party/); assert.ok(!/npm i/.test(JSON.stringify(r)));
+  assert.ok(!JSON.parse(fs.readFileSync(cfg, 'utf8')).mcpServers.evil);
+});
+
+test('a tenant slug that clashes with an existing MCP server never replaces it', async () => {
+  st.polls = 0; st.approveAfter = 1;
+  const r = await ob.onboardService({ service: 'kodiak', mcpConfig: cfg, waitMs: 30000 });
+  assert.strictEqual(r.mcp.attached, false); assert.match(r.mcp.reason, /already exists/);
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(cfg, 'utf8')).mcpServers.kodiak.args, ['/opt/kodiak/mcp.js']);
+});
+
+test('a tenant\'s huge prices never make the default cap huge (10,000 DD at most)', async () => {
+  st.polls = 0; st.approveAfter = 99; const n = st.posts.length;
+  await ob.onboardService({ service: 'pricey', mcpConfig: cfg, wait: false });
+  assert.strictEqual(st.posts[n].daily_cap_dd, 10000);
+});
+
+test('an explicit higher cap than the existing consent files a replacement for approval', async () => {
+  st.polls = 0; st.approveAfter = 99;
+  const r = await ob.onboardService({ service: 'fleetgate', capDd: 9000, mcpConfig: cfg, wait: false });
+  assert.strictEqual(r.status, 'approval_pending'); assert.match(r.next, /daily_cap_dd 9000/);
+  assert.strictEqual(st.posts.at(-1).daily_cap_dd, 9000);
 });
 
 test('list', async () => {
