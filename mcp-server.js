@@ -269,17 +269,69 @@ const TOOLS = [
     },
   },
   {
-    name: 'conduit_send',
-    description: 'CONDUIT: Send a message to another agent via Conduit (agent-to-agent messaging). If no handshake exists with the target, one is filed automatically — the target agent must approve before messages flow. Known agents: civitasvox-brain (Brain), civitasvox-conductor (Conductor), civitasvox-riley (Riley), platform-rowen (Rowen), platform-lori (Lori). Requires CONDUIT_TOKEN env var.',
+    name: 'conduit_onboard',
+    description: 'CONDUIT SETUP (run once per machine, safe to repeat): join Conduit, the agent-to-agent relay addressed by registered name, through the normal DemiPass path. Checks the relay, confirms or files this wallet\'s standing consent to pay conduit (a missing consent comes back as approval_pending with an approval_id: approve it in the DemiPass app, then call again with approval_id), mints a conduit service token, registers your name (one name per wallet; a wallet that already has a name keeps it) and writes ~/.config/demipass/conduit.json (0600). Every conduit_* call re-reads that file and re-mints an expired token by itself, so nothing needs a restart afterwards. Prices: post 2, forward 2, read 1, ack 1 DD.',
     inputSchema: {
       type: 'object',
       properties: {
-        to:        { type: 'string', description: 'Target agent ID (e.g. "civitasvox-brain")' },
-        message:   { type: 'string', description: 'Message body to send' },
-        thread_id: { type: 'string', description: 'Optional: reuse an existing thread ID instead of finding/creating one' },
+        name:         { type: 'string', description: 'Name to register (default: the DemiPass username). Lower-case; it is how others address you.' },
+        owns:         { type: 'array', items: { type: 'string' }, description: 'Subjects this agent owns (e.g. "kodiak", "atlas/incus-dashboard"): a message whose subject you own is forwarded to you. Omitted = keep the current list.' },
+        description:  { type: 'string', description: 'Directory description (≤500 chars)' },
+        daily_cap_dd: { type: 'integer', description: 'Daily consent cap in DD when a consent has to be filed (default 300)' },
+        cap_dd:       { type: 'integer', description: 'Per-token cap in DD (default: server default within the consent)' },
+        ttl:          { type: 'string', description: 'Token lifetime, e.g. 1h, 24h (default 24h, the maximum)' },
+        approval_id:  { type: 'integer', description: 'The approval_id a previous call returned as approval_pending, once approved in the app' },
+        url:          { type: 'string', description: 'Relay URL (default http://phasewhip.taildb5a42.ts.net:8080)' },
+        renew:        { type: 'boolean', description: 'Mint a fresh token even if the current one is still valid' },
       },
-      required: ['to', 'message'],
     },
+  },
+  {
+    name: 'conduit_send',
+    description: 'CONDUIT: Post a message to another agent by its registered name (2 DD, charged to you). Give `subject` when the message is about something: if another agent owns that subject, Conduit forwards it to the owner and sends you a notice naming them. Reply inside a thread with `thread` instead of `to` and every other participant receives it. Names: conduit_agents. Requires conduit_onboard once per machine.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        to:            { type: 'string', description: 'Recipient\'s registered name (e.g. "brain", "aaron")' },
+        thread:        { type: 'string', description: 'Thread id to reply into (delivered to every other participant) instead of `to`' },
+        subject:       { type: 'string', description: 'What the message is about; owner lookup runs on it' },
+        body:          { type: 'string', description: 'Message body' },
+        client_msg_id: { type: 'string', description: 'Your idempotency id: a retry with the same id is never billed twice' },
+      },
+      required: ['body'],
+    },
+  },
+  {
+    name: 'conduit_inbox',
+    description: 'CONDUIT: Read your inbox (messages and notices addressed to your name). Returned messages move to `read`: 1 DD only when at least one message changes state; an empty poll is free. Use `since` (next_since from the last call) to page.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        since:         { type: 'integer', description: 'Only messages after this sequence number (next_since from the previous call)' },
+        limit:         { type: 'integer', description: 'Max messages (default server-side)' },
+        include_acked: { type: 'boolean', description: 'Include messages you already acked' },
+      },
+    },
+  },
+  {
+    name: 'conduit_ack',
+    description: 'CONDUIT: Acknowledge a message you received (1 DD). The sender\'s receipt then shows `acked`; silence is never agreement.',
+    inputSchema: { type: 'object', properties: { msg_id: { type: 'string', description: 'The msg_id from conduit_inbox' } }, required: ['msg_id'] },
+  },
+  {
+    name: 'conduit_forward',
+    description: 'CONDUIT: Forward a message you received to another name (2 DD, charged to you, never to the original sender). The original sender gets a notice naming where it went.',
+    inputSchema: { type: 'object', properties: { msg_id: { type: 'string' }, to: { type: 'string', description: 'Registered name' }, note: { type: 'string', description: 'Why it was forwarded' } }, required: ['msg_id', 'to'] },
+  },
+  {
+    name: 'conduit_receipt',
+    description: 'CONDUIT: Delivery receipt for a message you sent or received: state ∈ delivered | read | acked | forwarded (+ forwarded_to) with timestamps. Free.',
+    inputSchema: { type: 'object', properties: { msg_id: { type: 'string' } }, required: ['msg_id'] },
+  },
+  {
+    name: 'conduit_agents',
+    description: 'CONDUIT: The directory of registered names with what each one owns and its description (never DIDs). Use it to pick `to` for conduit_send.',
+    inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'demipass_doctor',
@@ -301,12 +353,12 @@ const TOOLS = [
   },
   {
     name: 'conduit_threads',
-    description: 'CONDUIT: List active Conduit threads. Shows all conversations between agents that you have access to.',
+    description: 'CONDUIT (legacy view): the threads you take part in, as the pre-rebuild clients saw them. Prefer conduit_inbox.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'conduit_status',
-    description: 'CONDUIT: Get Conduit service status — agent count, active sessions, pending handshakes, thread/message counts.',
+    description: 'CONDUIT: Relay health (agents, threads, messages, prices) plus this machine\'s onboarding state: name, token expiry, consent, config file. Says `run conduit_onboard` when nothing is set up. Never charges.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
@@ -412,8 +464,26 @@ const HANDLERS = {
   async demipass_explain_denial(args) {
     return await demipass.explainDenial(args);
   },
+  async conduit_onboard(args) {
+    return await demipass.conduitOnboard(args);
+  },
   async conduit_send(args) {
     return await demipass.conduitSend(args);
+  },
+  async conduit_inbox(args) {
+    return await demipass.conduitInbox(args);
+  },
+  async conduit_ack(args) {
+    return await demipass.conduitAck(args);
+  },
+  async conduit_forward(args) {
+    return await demipass.conduitForward(args);
+  },
+  async conduit_receipt(args) {
+    return await demipass.conduitReceipt(args);
+  },
+  async conduit_agents() {
+    return await demipass.conduitAgents();
   },
   async conduit_threads() {
     return await demipass.conduitThreads();
@@ -451,7 +521,8 @@ const HANDLERS = {
     // 3. Check Conduit service health
     try {
       const status = await demipass.conduitStatus();
-      report.channels.conduit_service = { status: 'up', agents: status.agents, pending_handshakes: status.pending_handshakes };
+      const h = status.health || {};
+      report.channels.conduit_service = { status: h.ok ? 'up' : 'down', url: status.url, me: status.me, agents: h.agents, threads: h.threads, messages: h.messages, next: status.next, error: h.error };
     } catch (e) {
       report.channels.conduit_service = { status: 'down', error: e.message };
     }

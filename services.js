@@ -101,6 +101,32 @@ function services({ token, baseUrl = DEFAULT_BASE, timeoutMs = 15000 } = {}) {
      *  for this wallet approves it in the DemiPass app; then call again with approvalId. Needed before mintToken. */
     consent({ service, dailyCapDd, approvalId } = {}) { return req('POST', '/api/services/consent', opt({ service, daily_cap_dd: dailyCapDd, approval_id: approvalId })); },
     consents() { return req('GET', '/api/services/consents'); },
+    /** The standing consent for `service`, filed for app approval when there is none. Resolves to
+     *  { consent: {id, service, daily_cap_dd, status}, existing } or, while the person has not approved it yet,
+     *  { pending: { approval_id, expires_at, daily_cap_dd, next } }: call again with approvalId once they have. */
+    async ensureConsent({ service, dailyCapDd = 300, approvalId } = {}) {
+      if (!service) throw new Error('ensureConsent() needs service');
+      const all = await api.consents();
+      const live = (all.mine || []).find((c) => c.service === service && c.status === 'active');
+      if (live) return { consent: live, existing: true };
+      try {
+        const r = await api.consent({ service, dailyCapDd, approvalId });
+        return { consent: { id: r.consent_id, service: r.service, daily_cap_dd: r.daily_cap_dd, status: 'active' }, existing: false, approval_id: approvalId || null };
+      } catch (e) {
+        if (!e.pending) throw e;
+        return { pending: { approval_id: e.body.approval_id, expires_at: e.body.expires_at || null, daily_cap_dd: dailyCapDd,
+          next: `Approve "let a wallet pay ${service}" (${dailyCapDd} DD/day) in the DemiPass app, then call again with approvalId=${e.body.approval_id}.` } };
+      }
+    },
+    /** Caller-side onboarding in one call: ensureConsent, then mintToken. Resolves to { consent, token: {token, token_id,
+     *  expires_at, cap_dd} } or { pending } (approve in the app, call again with approvalId). The token is a bearer for
+     *  the service only; hold it in memory or a 0600 file, never print it. */
+    async onboard({ service, dailyCapDd, approvalId, ttl = '24h', scopes, capDd } = {}) {
+      const c = await api.ensureConsent({ service, dailyCapDd, approvalId });
+      if (c.pending) return c;
+      const t = await api.mintToken({ service, ttl, scopes, capDd });
+      return { consent: c.consent, existing: c.existing, token: { token: t.token, token_id: t.token_id, expires_at: t.expires_at, cap_dd: t.cap_dd, scopes: t.scopes } };
+    },
     revokeConsent({ consentId } = {}) { return req('POST', `/api/services/consents/${Number(consentId)}/revoke`, {}); },
     /** A service token for one tenant: send it to the service as `Authorization: Bearer …`. It opens nothing at DemiPass. */
     mintToken({ service, ttl, scopes, capDd } = {}) { return req('POST', '/api/services/token', opt({ service, ttl, scopes, cap_dd: capDd })); },

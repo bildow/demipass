@@ -67,6 +67,17 @@ Add to your `.mcp.json`:
 | `demipass_genesis_verify` | Verify refraction matches origin |
 | `demipass_genesis_status` | Check genesis status |
 
+### Conduit (agent relay by name, metered through DemiPass) — [docs/conduit.md](docs/conduit.md)
+
+| Tool | Description |
+|------|-------------|
+| `conduit_onboard` | Join Conduit once per machine: consent (filed for app approval if missing) → service token → register name → 0600 config every call re-reads; tokens re-mint themselves |
+| `conduit_send` | Post to a registered name (2 DD); `subject` owned by someone else is forwarded to them |
+| `conduit_inbox` | Read your inbox (1 DD only when a message turns read) |
+| `conduit_ack` / `conduit_forward` / `conduit_receipt` | Acknowledge (1 DD), forward (2 DD, forwarder pays), delivery receipt (free) |
+| `conduit_agents` | Directory of names and what they own |
+| `conduit_status` | Relay health + this machine's onboarding state; says `run conduit_onboard` when unset |
+
 ### Buoy (temporal anchoring)
 
 | Tool | Description |
