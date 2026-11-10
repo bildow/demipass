@@ -599,9 +599,10 @@ async function handleMessage(msg) {
 // ---------------------------------------------------------------------------
 
 let buffer = '';
+let queue = Promise.resolve(); // calls answer in order; stdin end waits for the ones in flight
 
 process.stdin.setEncoding('utf-8');
-process.stdin.on('data', async (chunk) => {
+process.stdin.on('data', (chunk) => {
   buffer += chunk;
 
   // MCP uses newline-delimited JSON
@@ -611,20 +612,23 @@ process.stdin.on('data', async (chunk) => {
     buffer = buffer.slice(newlineIdx + 1);
     if (!line) continue;
 
-    try {
-      const msg = JSON.parse(line);
-      const response = await handleMessage(msg);
-      if (response) {
-        process.stdout.write(response + '\n');
+    queue = queue.then(async () => {
+      try {
+        const msg = JSON.parse(line);
+        const response = await handleMessage(msg);
+        if (response) {
+          process.stdout.write(response + '\n');
+        }
+      } catch (err) {
+        const errResp = jsonrpcError(null, -32700, 'Parse error');
+        process.stdout.write(errResp + '\n');
       }
-    } catch (err) {
-      const errResp = jsonrpcError(null, -32700, 'Parse error');
-      process.stdout.write(errResp + '\n');
-    }
+    });
   }
 });
 
-process.stdin.on('end', () => process.exit(0));
+// A one-shot client (echo … | node mcp-server.js) closes stdin while a call is still running: answer it first.
+process.stdin.on('end', () => { queue.then(() => process.exit(0)); });
 
 // Suppress noisy errors when piped processes close
 process.stdout.on('error', () => process.exit(0));
