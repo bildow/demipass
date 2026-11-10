@@ -25,9 +25,10 @@ const json = (res, status, body) => { res.writeHead(status, { 'content-type': 'a
 const body = (req) => new Promise((r) => { let raw = ''; req.on('data', (c) => (raw += c)); req.on('end', () => r(raw ? JSON.parse(raw) : {})); });
 
 // ── fake DemiPass ──
-const dp = { consentActive: false, mints: 0, issued: new Set(), seen: [] };
+const dp = { consentActive: false, mints: 0, issued: new Set(), seen: [], endpoint: null, registryHits: 0 };
 const dpSrv = http.createServer(async (req, res) => {
   const b = await body(req); dp.seen.push({ m: req.method, p: req.url, b, auth: req.headers.authorization });
+  if (req.method === 'GET' && req.url === '/api/services/conduit') { dp.registryHits++; return json(res, 200, { slug: 'conduit', name: 'Conduit', endpoint: dp.endpoint, mcp_server: dp.endpoint ? 'demipass#demipass-mcp' : null }); }
   if (req.headers.authorization !== 'Bearer ' + SESSION && req.headers.authorization !== 'Bearer ' + SESSION_B) return json(res, 401, { error: 'bad session' });
   const sub = req.headers.authorization === 'Bearer ' + SESSION_B ? 'did:key:zOther' : 'did:key:zTester';
   if (req.method === 'GET' && req.url === '/api/services/consents') return json(res, 200, { ok: true, mine: dp.consentActive ? [{ id: 3, service: 'conduit', status: 'active', daily_cap_dd: 300 }] : [], approved_by_me: [] });
@@ -71,11 +72,11 @@ dpSrv.listen(0, '127.0.0.1', () => cdSrv.listen(0, '127.0.0.1', async () => {
   const cdBase = `http://127.0.0.1:${cdSrv.address().port}`;
   demipass.configure({ baseUrl: dpBase, bearerToken: SESSION });
 
-  await check('status before onboarding: not onboarded, legacy CONDUIT_TOKEN ignored, says run conduit_onboard', async () => {
+  await check('status before onboarding: not onboarded, legacy CONDUIT_TOKEN ignored, says run conduit_onboard; url = default when the registry has no endpoint', async () => {
     const s = await demipass.conduitStatus();
     assert.strictEqual(s.me.onboarded, false); assert.strictEqual(s.next, 'run conduit_onboard');
     assert.match(s.me.env_token_ignored, /not a DemiPass service token/);
-    assert.strictEqual(s.url, 'http://phasewhip.taildb5a42.ts.net:8080');
+    assert.strictEqual(s.url, 'http://phasewhip.taildb5a42.ts.net:8080'); assert.strictEqual(s.url_source, 'default'); assert.strictEqual(dp.registryHits, 1);
   });
   await check('a send before onboarding fails on the missing consent, naming conduit_onboard', async () => {
     fs.writeFileSync(process.env.CONDUIT_CONFIG, JSON.stringify({ url: cdBase }));
@@ -172,6 +173,22 @@ dpSrv.listen(0, '127.0.0.1', () => cdSrv.listen(0, '127.0.0.1', async () => {
     assert.strictEqual(r.ok, true, JSON.stringify(r)); assert.strictEqual(dp.mints, m + 1);
     assert.ok(JSON.parse(fs.readFileSync(process.env.CONDUIT_CONFIG, 'utf8')).token, 'the file now holds a token');
     delete process.env.CONDUIT_TOKEN;
+  });
+
+  await check('no url in the file and no CONDUIT_URL → the tenant registry endpoint is used, and never written to the file', async () => {
+    const f = JSON.parse(fs.readFileSync(process.env.CONDUIT_CONFIG, 'utf8')); delete f.url; fs.writeFileSync(process.env.CONDUIT_CONFIG, JSON.stringify(f));
+    dp.endpoint = cdBase + '/'; demipass._conduitRegistryReset();
+    const s = await demipass.conduitStatus();
+    assert.strictEqual(s.url, cdBase); assert.strictEqual(s.url_source, 'registry'); assert.strictEqual(s.health.ok, true);
+    const r = await demipass.conduitSend({ to: 'brain', body: 'via registry' }); assert.strictEqual(r.ok, true);
+    const r2 = await demipass.conduitOnboard(); assert.strictEqual(r2.ok, true); assert.strictEqual(r2.url_source, 'registry');
+    const f2 = JSON.parse(fs.readFileSync(process.env.CONDUIT_CONFIG, 'utf8')); assert.strictEqual(f2.url, undefined);
+    assert.strictEqual(dp.registryHits, 2, 'registry answer is cached');
+  });
+  await check('an explicit url wins over the registry and is persisted', async () => {
+    const r = await demipass.conduitOnboard({ url: cdBase }); assert.strictEqual(r.url_source, 'argument');
+    assert.strictEqual(JSON.parse(fs.readFileSync(process.env.CONDUIT_CONFIG, 'utf8')).url, cdBase);
+    assert.strictEqual((await demipass.conduitStatus()).url_source, 'config_file');
   });
 
   dpSrv.close(); cdSrv.close(); fs.rmSync(tmp, { recursive: true, force: true });

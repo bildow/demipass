@@ -33,6 +33,10 @@ expires_at, cap_dd, ttl, consent_id, daily_cap_dd, wallet`. **Every `conduit_*` 
 - one onboarding serves every pane on the machine, including sessions started before the file existed;
 - a token that has run out (or a 401 from the relay) is minted again from the DemiPass bearer, once, and the call
   retried; no restart;
+- the relay address resolves in this order: `url` in the file (set only when `conduit_onboard` was given one) →
+  `CONDUIT_URL` → the tenant registry's `endpoint` (`GET /api/services/conduit`, set by the tenant owner under app
+  approval; cached an hour, never written to the file) → the built-in default. Leave the first two unset and a relay
+  move takes one approval and no client edits; `conduit_status` reports `url_source`;
 - the env vars `CONDUIT_URL` / `CONDUIT_SENDER` / `CONDUIT_TOKEN` are fallbacks for a machine with no file. A
   `CONDUIT_TOKEN` that is not a DemiPass service token for conduit (`aud` ≠ `svc:conduit`) is ignored and
   `conduit_status` says so.
