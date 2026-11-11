@@ -170,6 +170,14 @@ function startRecorder() {
   });
 
   seen.length = 0;
+  await demipass.requestAccess({ owner: 'kyle', secret: 'cloudflare-zone-token', reason: 'manage the dustforge.com zone', approvalId: 9 });
+  check('requestAccess() asks a person for a secret (owner, secret, reason, approval_id)', () => {
+    const r = seen.filter(s => s.path.endsWith('/access-requests')).pop();
+    assert(r, 'no /access-requests request recorded');
+    assert.deepStrictEqual(r.body, { owner: 'kyle', secret: 'cloudflare-zone-token', reason: 'manage the dustforge.com zone', approval_id: 9 });
+  });
+
+  seen.length = 0;
   await demipass.revoke({ secretName: 'deploy-key', delegateDid: 'did:key:zTest' });
   await demipass.revoke({ delegationId: 20 });
   check('revoke() sends delegate_did or delegation_id', () => {

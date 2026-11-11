@@ -296,6 +296,20 @@ function revoke({ delegationId, secretName, delegateDid, targetSilicon } = {}) {
 }
 
 /** GET /api/demipass/delegations — list active delegations */
+// ── Access requests ──
+/** POST /api/demipass/access-requests — ask a person for use of one of their secrets. An agent may ask its fleet's owner,
+ *  or a person its fleet owner paired with in person (then the owner approves the ask first: 202 with approval_id; call
+ *  again with approvalId). The person approves in their app with their PIN; the result is a use-only delegation (30 days
+ *  for an outside ask), bounded by the person's contexts. Example: Brain asking Kyle for his Cloudflare zone token. */
+function requestAccess({ owner, secret, reason, approvalId } = {}) {
+  if (!owner) throw new Error('requestAccess() requires owner (a username or DID)');
+  const body = { owner, secret: secret || '', reason: reason || '' };
+  if (approvalId !== undefined) body.approval_id = approvalId;
+  return _request('POST', '/api/demipass/access-requests', body);
+}
+/** GET /api/demipass/access-requests — { incoming (for a person), outgoing (what you asked; approved ones carry the ref) } */
+function accessRequests() { return _request('GET', '/api/demipass/access-requests'); }
+
 function delegations({ secretName, owner } = {}) {
   return _request('GET', '/api/demipass/delegations', null, {
     secret_name: secretName, owner,
@@ -805,6 +819,8 @@ module.exports = {
   execute,
   delegate,
   revoke,
+  requestAccess,
+  accessRequests,
   delegations,
   history,
   authenticate,
