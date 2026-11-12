@@ -268,26 +268,48 @@ function execute({ token, use_token, action, params, target_user, command } = {}
 // ── Delegation ──
 
 /** POST /api/demipass/delegate — owner grants scoped access to another silicon */
-function delegate({ secretName, targetSilicon, scope, ttl } = {}) {
-  if (!secretName || !targetSilicon) {
-    throw new Error('delegate() requires secretName and targetSilicon');
+function delegate({ secretName, delegateDid, targetSilicon, contextName, maxUses, expiresIn, ttl, ownerDid } = {}) {
+  // The server reads delegate_did (server.js /api/blindkey/delegate). Until 2026-11 this sent target_silicon,
+  // which the server never read, so every SDK delegation failed with "secret_name and delegate_did required".
+  // targetSilicon and ttl stay accepted as aliases so existing callers keep working.
+  const did = delegateDid || targetSilicon;
+  if (!secretName || !did) {
+    throw new Error('delegate() requires secretName and delegateDid');
   }
-  return _request('POST', '/api/demipass/delegate', {
-    secret_name: secretName, target_silicon: targetSilicon, scope, ttl,
-  });
+  const body = { secret_name: secretName, delegate_did: did };
+  if (contextName) body.context_name = contextName;
+  if (maxUses !== undefined) body.max_uses = maxUses;
+  const seconds = expiresIn !== undefined ? expiresIn : ttl;
+  if (seconds !== undefined) body.expires_in = seconds;
+  if (ownerDid) body.owner_did = ownerDid;
+  return _request('POST', '/api/demipass/delegate', body);
 }
 
-/** POST /api/demipass/delegate/revoke — revoke a delegation */
-function revoke({ secretName, targetSilicon } = {}) {
-  if (!secretName || !targetSilicon) {
-    throw new Error('revoke() requires secretName and targetSilicon');
+/** POST /api/demipass/delegate/revoke — revoke a delegation, by id or by secret + delegate */
+function revoke({ delegationId, secretName, delegateDid, targetSilicon } = {}) {
+  const did = delegateDid || targetSilicon;
+  if (!delegationId && (!secretName || !did)) {
+    throw new Error('revoke() requires delegationId, or secretName and delegateDid');
   }
-  return _request('POST', '/api/demipass/delegate/revoke', {
-    secret_name: secretName, target_silicon: targetSilicon,
-  });
+  const body = delegationId ? { delegation_id: delegationId } : { secret_name: secretName, delegate_did: did };
+  return _request('POST', '/api/demipass/delegate/revoke', body);
 }
 
 /** GET /api/demipass/delegations — list active delegations */
+// ── Access requests ──
+/** POST /api/demipass/access-requests — ask a person for use of one of their secrets. An agent may ask its fleet's owner,
+ *  or a person its fleet owner paired with in person (then the owner approves the ask first: 202 with approval_id; call
+ *  again with approvalId). The person approves in their app with their PIN; the result is a use-only delegation (30 days
+ *  for an outside ask), bounded by the person's contexts. Example: Brain asking Kyle for his Cloudflare zone token. */
+function requestAccess({ owner, secret, reason, approvalId } = {}) {
+  if (!owner) throw new Error('requestAccess() requires owner (a username or DID)');
+  const body = { owner, secret: secret || '', reason: reason || '' };
+  if (approvalId !== undefined) body.approval_id = approvalId;
+  return _request('POST', '/api/demipass/access-requests', body);
+}
+/** GET /api/demipass/access-requests — { incoming (for a person), outgoing (what you asked; approved ones carry the ref) } */
+function accessRequests() { return _request('GET', '/api/demipass/access-requests'); }
+
 function delegations({ secretName, owner } = {}) {
   return _request('GET', '/api/demipass/delegations', null, {
     secret_name: secretName, owner,
@@ -1240,6 +1262,8 @@ module.exports = {
   execute,
   delegate,
   revoke,
+  requestAccess,
+  accessRequests,
   delegations,
   history,
   authenticate,
