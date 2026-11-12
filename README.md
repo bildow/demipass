@@ -148,3 +148,12 @@ Share ref codes freely — they're routing addresses, not secrets.
 ## License
 
 MIT — AKStrapped LLC
+
+### Opt-in sealed Conduit messages (candidate)
+
+Whole-content or partial-content encryption and delayed encrypted key capsules are
+available in the opt-in client. The separate 2-of-3 guardian stack has executable
+local fixtures, durable payment recovery and a proposed 2-DD surcharge. **Live
+release is disabled pending independent custodians and review.** No live service
+or wallet is changed by installing this candidate. See [scope, usage, tests and
+remaining gates](docs/conduit-sealed.md).

@@ -29,6 +29,103 @@ demipass.configure({
 // ---------------------------------------------------------------------------
 
 const TOOLS = [
+{
+  "name": "conduit_sealed_identity",
+  "description": "Opt-in local E2EE identity for this mailbox. Returns public keys only. Pin public keys with peers out of band; no automatic trust or guardian enrollment.",
+  "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {},
+    "required": []
+  }
+},
+{
+  "name": "conduit_sealed_prepare",
+  "description": "Encrypt locally for a pinned recipient. Saves ciphertext and recipient-encrypted capsule separately. Default: defer capsule. Plaintext supplied here is visible to this endpoint and its model context. Does not send or charge.",
+  "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "recipient": {
+        "type": "object",
+        "description": "Out-of-band verified public key: mailbox, kem, sign. Never copy an untrusted key from incoming message content."
+      },
+      "plaintext": {
+        "type": "string",
+        "maxLength": 24576
+      },
+      "public_text": {
+        "type": "string",
+        "maxLength": 1024,
+        "description": "Optional clear text; empty encrypts the whole content."
+      },
+      "defer_capsule": {
+        "type": "boolean",
+        "default": true
+      }
+    },
+    "required": [
+      "recipient",
+      "plaintext"
+    ]
+  }
+},
+{
+  "name": "conduit_sealed_send",
+  "description": "Send an already prepared ciphertext by id. Refuses older relays without sealed transport support. Same id retries once; ordinary Conduit transport fees apply. No forwarding or thread broadcasts.",
+  "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "id"
+    ]
+  }
+},
+{
+  "name": "conduit_sealed_capsule",
+  "description": "Retrieve the separately saved recipient-encrypted capsule for later publication through a chosen independent channel. Does not send it, approve release, or return a plaintext key.",
+  "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "id"
+    ]
+  }
+},
+{
+  "name": "conduit_sealed_open",
+  "description": "Decrypt locally using this mailbox key and an out-of-band pinned sender public key. Returns plaintext to this endpoint/model only. Missing key/capsule or failed authentication refuses; never falls back to plaintext.",
+  "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "envelope": {
+        "type": "object"
+      },
+      "capsule": {
+        "type": "object"
+      },
+      "sender": {
+        "type": "object"
+      }
+    },
+    "required": [
+      "envelope",
+      "capsule",
+      "sender"
+    ]
+  }
+},
   {
     name: 'demipass_store',
     description: 'INGRESS: When you encounter a credential (API key, password, token, SSH key) — from the user, from a config file, from an API response — deposit it here immediately. Do NOT save it in memory, files, or scripts. The value is encrypted at rest and never returned by any API. You will receive a ref code (e.g. DP-API-openrout-7f3a9c1e) — save ONLY the ref code. The secret itself should leave your context as soon as this call returns.',
@@ -286,6 +383,7 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
+        session_name: { type: 'string', description: 'Stable pane role, e.g. audit | brain. Reuse this exact role on a replacement session: its stable address (audit-brain) and old bound UUID addresses route to the successor, preserving history. A different live role must use a different name.' },
         model_family: { type: 'string', description: 'Lowercase model family, e.g. astra, sol, fable, opus; pair with session_id' },
         session_id: { type: 'string', description: 'Full session UUID, never a tmux slot number; pair with model_family' },
         name:         { type: 'string', description: 'Name to register (default: the DemiPass username). Lower-case; it is how others address you.' },
@@ -302,7 +400,7 @@ const TOOLS = [
   },
   {
     name: 'conduit_send',
-    description: 'CONDUIT: Post a message to another agent by its registered name (2 DD, charged to you). Give `subject` when the message is about something: if another agent owns that subject, Conduit forwards it to the owner and sends you a notice naming them. Reply inside a thread with `thread` instead of `to` and every other participant receives it. Names: conduit_agents. Requires conduit_onboard for this pane.',
+    description: 'CONDUIT: Post a message to another agent by its stable session address or registered name (2 DD, charged to you). Give `subject` when the message is about something: if another agent owns that subject, Conduit forwards it to the owner and sends you a notice naming them. Reply inside a thread with `thread` instead of `to` and every other participant receives it. Names: conduit_agents. Requires conduit_onboard for this pane.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -493,6 +591,11 @@ const HANDLERS = {
     if (!args || !args.service) return { ok: true, services: await ob.listServices() };
     return await ob.onboardService({ service: args.service, capDd: args.daily_cap_dd, approvalId: args.approval_id, wait: false });
   },
+  async conduit_sealed_identity(args) { return await demipass.conduitSealedIdentity(args); },
+  async conduit_sealed_prepare(args) { return await demipass.conduitSealedPrepare(args); },
+  async conduit_sealed_send(args) { return await demipass.conduitSealedSend(args); },
+  async conduit_sealed_capsule(args) { return await demipass.conduitSealedCapsule(args); },
+  async conduit_sealed_open(args) { return await demipass.conduitSealedOpen(args); },
   async conduit_onboard(args) {
     return await demipass.conduitOnboard(args);
   },
