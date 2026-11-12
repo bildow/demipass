@@ -100,6 +100,12 @@ function registerMcp({ slug, file, mcpConfig = DEFAULT_MCP_CONFIG, did }) {
         Object.assign(e.env, { DEMIPASS_MCP_CONFIG: mcpConfig, ...(did ? { DEMIPASS_EXPECT_DID: did } : {}) });
         write(); return { changed: true, name, stripped_session_copy: true };
       }
+      // Pinned to another wallet (another pane onboarded here first): never re-pinned silently, and never reported as
+      // attached for this one — its sessions would be refused (#17 review round 4).
+      const pinned = e.env && e.env.DEMIPASS_EXPECT_DID;
+      if (!isMain && did && pinned && pinned !== did) {
+        return { changed: false, name, error: `the "${name}" entry in ${mcpConfig} is pinned to wallet ${pinned}, not ${did}: it serves that wallet only. Add a separate entry for this wallet (a copy under another name with DEMIPASS_EXPECT_DID=${did}), or remove the old one if that wallet no longer uses this machine.` };
+      }
       return { changed: false, name };
     }
   }

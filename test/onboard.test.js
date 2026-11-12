@@ -130,6 +130,16 @@ test('registerMcp: a name clash never replaces; an old entry\'s copied session i
   assert.strictEqual(r2.stripped_session_copy, true); assert.strictEqual(e.DEMIPASS_TOKEN, undefined); assert.strictEqual(e.DEMIPASS_EXPECT_DID, 'did:key:zW');
 });
 
+test('registerMcp: an entry pinned to another wallet is not "attached" for this one, and is not re-pinned (#17 review round 4)', () => {
+  const c3 = path.join(dir, 'pinned.json'); const f = ob.resolveMcpServer('demipass#fleetgate-mcp').file;
+  fs.writeFileSync(c3, JSON.stringify({ mcpServers: { fleetgate: { command: 'node', args: [f], env: { DEMIPASS_EXPECT_DID: 'did:key:zWalletA' } } } }));
+  const r = ob.registerMcp({ slug: 'fleetgate', file: f, mcpConfig: c3, did: 'did:key:zWalletB' });
+  assert.strictEqual(r.changed, false); assert.match(r.error, /pinned to wallet did:key:zWalletA, not did:key:zWalletB/);
+  assert.strictEqual(JSON.parse(fs.readFileSync(c3, 'utf8')).mcpServers.fleetgate.env.DEMIPASS_EXPECT_DID, 'did:key:zWalletA', 'not re-pinned');
+  const same = ob.registerMcp({ slug: 'fleetgate', file: f, mcpConfig: c3, did: 'did:key:zWalletA' });
+  assert.strictEqual(same.error, undefined); assert.strictEqual(same.changed, false);
+});
+
 test('sessionToken: pinned to the onboarded wallet; another wallet\'s session is refused', () => {
   process.env.DEMIPASS_TOKEN = SESSION;
   process.env.DEMIPASS_EXPECT_DID = 'did:key:zPaneWallet'; assert.strictEqual(ob.sessionToken(cfg), SESSION);
