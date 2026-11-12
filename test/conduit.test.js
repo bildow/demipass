@@ -49,13 +49,21 @@ const SESSION = jwt({ sub: 'did:key:zTester', username: 'tester', scope: 'admin'
 const SESSION_B = jwt({ sub: 'did:key:zOther', username: 'other', scope: 'admin', exp: Math.floor(Date.now() / 1000) + 86400 });
 
 // ── fake Conduit ──
-const cd = { agents: new Map(), walletName: null, revoked: new Set(), posts: [], reads: 0 };
+const cd = { agents: new Map(), walletName: null, revoked: new Set(), posts: [], reads: 0, retired: new Map(), registers: [], stickyRetire: false };
 const cdSrv = http.createServer(async (req, res) => {
   const b = await body(req);
   if (req.url === '/health') return json(res, 200, { ok: true, service: 'conduit', version: '0.1.0', auth: 'demipass', agents: cd.agents.size, prices_dd: { post: 2, forward: 2, read: 1, ack: 1 } });
   const tok = (req.headers.authorization || '').replace(/^Bearer /, '');
   if (!dp.issued.has(tok) || cd.revoked.has(tok)) return json(res, 401, { error: 'invalid_token' });
+  // Retirement (relay review): calls AS a retired address get 410 address_retired; sends TO one 410 recipient_retired; the
+  // body carries retired_by ('expiry' | 'owner'; absent = an older relay). Re-registering from the owning wallet
+  // reactivates it (stickyRetire: a relay that keeps it retired).
+  const as = req.headers['x-conduit-address'];
+  const by = (n) => (cd.retired.get(n) ? { retired_by: cd.retired.get(n) } : {});
+  if (as && cd.retired.has(as) && req.url !== '/agents/register') return json(res, 410, { error: 'address_retired', name: as, retired_at: '2026-11-05T00:00:00.000Z', ...by(as), detail: 're-register it' });
+  if (req.method === 'POST' && req.url === '/messages' && cd.retired.has(b.to)) return json(res, 410, { error: 'recipient_retired', to: b.to, retired_at: '2026-11-04T00:00:00.000Z', ...by(b.to) });
   if (req.method === 'POST' && req.url === '/agents/register') {
+    cd.registers.push(b); if (!cd.stickyRetire && cd.retired.delete(b.name)) b.reactivated = true;
     if (!b.session_id && cd.walletName && cd.walletName !== b.name) return json(res, 409, { error: 'wallet_has_name', name: cd.walletName });
     const existed = cd.agents.has(b.name); if (!b.session_id) cd.walletName = b.name;
     cd.agents.set(b.name, { name: b.name, owns: (b.owns || []).map((s) => s.toLowerCase()).sort(), description: b.description || '' });
@@ -242,6 +250,58 @@ dpSrv.listen(0, '127.0.0.1', () => cdSrv.listen(0, '127.0.0.1', async () => {
     await assert.rejects(demipass.conduitOnboard({ model_family: 'sol', session_id: sid }), /another pane/);
     assert.throws(() => demipass.conduitPaneAddress({ model_family: '../bad', session_id: sid }));
     assert.throws(() => demipass.conduitPaneAddress({ model_family: family, session_id: 'short-prefix' }));
+  });
+  const PANE = 'astra-11111111-2222-3333-4444-555555555555';
+  await check('a pane address retired by idle expiry is re-registered once (same identity, previous owns) and the call retried', async () => {
+    const o = await demipass.conduitOnboard({ owns: ['pane-subject'] }); assert.strictEqual(o.ok, true, JSON.stringify(o));
+    cd.retired.set(PANE, 'expiry'); cd.registers.length = 0; const posts = cd.posts.length;
+    const r = await demipass.conduitSend({ to: 'brain', body: 'back after a week', client_msg_id: 'c-retired' });
+    assert.strictEqual(r.ok, true, JSON.stringify(r));
+    assert.strictEqual(cd.registers.length, 1);
+    assert.deepStrictEqual(cd.registers[0], { name: PANE, model_family: 'astra', session_id: '11111111-2222-3333-4444-555555555555', owns: ['pane-subject'], reactivated: true });
+    assert.ok(!cd.retired.has(PANE)); assert.strictEqual(cd.posts.length, posts + 1, 'the original call retried exactly once');
+    assert.strictEqual(cd.posts[cd.posts.length - 1].client_msg_id, 'c-retired', 'the retry keeps the idempotency key');
+    assert.ok(JSON.parse(fs.readFileSync(demipass.conduitConfig().file, 'utf8')).revived_at);
+  });
+  await check('a relay that keeps an expired address retired: one re-register, one retry, then a clear 410 (no loop)', async () => {
+    cd.retired.set(PANE, 'expiry'); cd.stickyRetire = true; cd.registers.length = 0; const posts = cd.posts.length;
+    try {
+      await assert.rejects(demipass.conduitSend({ to: 'brain', body: 'still gone' }), (e) => {
+        assert.strictEqual(e.status, 410); assert.strictEqual(e.code, 'address_retired'); assert.strictEqual(e.retired_by, 'expiry');
+        assert.match(e.message, /retired after 7 days idle.*still retired after re-registering once/); return true;
+      });
+      assert.strictEqual(cd.registers.length, 1); assert.strictEqual(cd.posts.length, posts);
+    } finally { cd.stickyRetire = false; cd.retired.delete(PANE); }
+  });
+  await check('an address retired by its owner, or by an older relay that does not say why, is never revived automatically', async () => {
+    for (const why of ['owner', undefined]) {
+      cd.retired.set(PANE, why); cd.registers.length = 0; const posts = cd.posts.length;
+      await assert.rejects(demipass.conduitSend({ to: 'brain', body: 'deliberately retired' }), (e) => {
+        assert.strictEqual(e.status, 410); assert.strictEqual(e.code, 'address_retired'); assert.strictEqual(e.retired_by, why || null);
+        assert.match(e.message, new RegExp(`${PANE} was ${why === 'owner' ? 'retired by its owner' : 'retired \\(the relay did not say why\\)'}.*not revived automatically.*re-onboard deliberately with conduit_onboard`, 'i'));
+        return true;
+      });
+      assert.strictEqual(cd.registers.length, 0, `no re-register (retired_by ${why})`); assert.strictEqual(cd.posts.length, posts);
+      assert.ok(cd.retired.has(PANE), 'still retired');
+    }
+    // the deliberate path: an explicit conduit_onboard brings it back
+    const o = await demipass.conduitOnboard({ owns: ['pane-subject'] }); assert.strictEqual(o.ok, true, JSON.stringify(o));
+    assert.ok(!cd.retired.has(PANE)); assert.strictEqual((await demipass.conduitSend({ to: 'brain', body: 'back on purpose' })).ok, true);
+  });
+  await check('sending to a retired pane address is a clear recipient_retired error worded from retired_by, never a revive', async () => {
+    const ghost = 'fable-99999999-8888-4777-8666-555555555555';
+    const cases = [['expiry', /that pane address was retired after 7 days idle/], ['owner', /that pane address was retired by its owner/], [undefined, /that pane address was retired \(the relay did not say why\)/]];
+    try {
+      for (const [why, re] of cases) {
+        cd.retired.set(ghost, why); cd.registers.length = 0;
+        await assert.rejects(demipass.conduitSend({ to: ghost, body: 'hello?' }), (e) => {
+          assert.match(e.message, new RegExp(`"${ghost}" is gone`)); assert.match(e.message, re);
+          assert.strictEqual(e.code, 'recipient_retired'); assert.strictEqual(e.status, 410); assert.strictEqual(e.body.to, ghost);
+          return true;
+        });
+        assert.strictEqual(cd.registers.length, 0, 'never re-registers someone else\'s address');
+      }
+    } finally { cd.retired.delete(ghost); }
   });
   await check('pane mode refuses a relay that falls back to a different name', async () => {
     const old = http.createServer((req, res) => {

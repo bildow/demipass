@@ -701,14 +701,111 @@ function conduitPaneAddress({ model_family, session_id } = {}) {
 // incomplete or malformed identity is not thrown from every call (conduit_status "never throws"): it is reported as
 // conduitPaneError and leaves explicit conduit_onboard({model_family, session_id}) free to bind (review 2026-11-12).
 let conduitPaneError = null;
+let conduitPaneSource = null;
+// Precedence: a pane already selected in this process (explicit conduit_onboard, or an autobind once resolved) →
+// CONDUIT_MODEL_FAMILY / CONDUIT_SESSION_ID (an explicit launcher binding) → CONDUIT_AUTOBIND=claude → none.
 function _conduitPane() {
   if (conduitPane) return conduitPane;
-  if (process.env.CONDUIT_MODEL_FAMILY || process.env.CONDUIT_SESSION_ID) {
-    const p = { model_family: process.env.CONDUIT_MODEL_FAMILY,
-      session_id: String(process.env.CONDUIT_SESSION_ID || process.env.CODEX_THREAD_ID || process.env.CLAUDE_CODE_SESSION_ID || process.env.CLAUDE_SESSION_ID || '').toLowerCase() };
-    try { conduitPaneAddress(p); conduitPaneError = null; return p; }
-    catch (e) { conduitPaneError = 'pane identity from the environment is incomplete or malformed (CONDUIT_MODEL_FAMILY / session id): ' + e.message; return null; }
+  const env = _conduitEnvPane();
+  if (env !== undefined) return env;
+  if (process.env.CONDUIT_AUTOBIND) return _conduitAutobind();
+  return null;
+}
+// undefined = the environment names no pane; null = it names one that is malformed (conduitPaneError says why).
+function _conduitEnvPane() {
+  if (!(process.env.CONDUIT_MODEL_FAMILY || process.env.CONDUIT_SESSION_ID)) return undefined;
+  const p = { model_family: process.env.CONDUIT_MODEL_FAMILY,
+    session_id: String(process.env.CONDUIT_SESSION_ID || process.env.CODEX_THREAD_ID || process.env.CLAUDE_CODE_SESSION_ID || process.env.CLAUDE_SESSION_ID || '').toLowerCase() };
+  try { conduitPaneAddress(p); conduitPaneError = null; conduitPaneSource = 'env'; return p; }
+  catch (e) { conduitPaneError = 'pane identity from the environment is incomplete or malformed (CONDUIT_MODEL_FAMILY / session id): ' + e.message; return null; }
+}
+
+// ── Pane autobind (CONDUIT_AUTOBIND=claude, set by bin/demipass-pane-mcp.js under an unbound Claude Code pane) ──
+// The address is <family>-<CLAUDE_CODE_SESSION_ID>. The launcher never guesses the family: it is read here, lazily at the
+// first Conduit call, from the model Claude Code recorded in this session's own transcript
+// (~/.claude/projects/<slug>/<session-id>.jsonl, last non-synthetic assistant `message.model`, claude-<family>-…).
+// Once resolved it is cached for the life of this MCP process: a later /model switch does not move the address.
+// Only the tail of the file is read (512 KiB, widened once to at most 4 MiB when that holds no usable record), only the model string is taken, nothing from the file is logged, the path
+// is built only from a validated UUID, and symlinked project directories or transcript files are refused.
+const AUTOBIND_TAIL_BYTES = 512 * 1024;
+const AUTOBIND_WIDE_BYTES = 4 * 1024 * 1024;   // one widened read when the tail holds no usable record
+const AUTOBIND_RETRY_MS = 2000;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const FAMILY_RE = /^[a-z][a-z0-9]{0,14}$/;
+let _autobindMiss = { at: 0, error: null };
+
+/** Model family recorded for a Claude Code session: {family, model, bytes_read} or {error}. Never throws. */
+function _conduitClaudeFamily(sessionId, { home, maxBytes = AUTOBIND_TAIL_BYTES, maxWideBytes = AUTOBIND_WIDE_BYTES } = {}) {
+  const fs = require('fs'); const path = require('path');
+  const sid = String(sessionId || '');
+  if (!UUID_RE.test(sid)) return { error: 'CLAUDE_CODE_SESSION_ID is missing or not a full lowercase UUID' };
+  const projects = path.join(home || require('os').homedir(), '.claude', 'projects');
+  let dirs;
+  try { dirs = fs.readdirSync(projects, { withFileTypes: true }); } catch { return { error: 'no transcript for this session yet' }; }   // no ~/.claude/projects yet
+  let best = null;
+  for (const d of dirs) {
+    if (!d.isDirectory()) continue;   // Dirent is lstat-based: a symlinked project directory is not a directory here
+    const file = path.join(projects, d.name, sid + '.jsonl');
+    let fd;
+    try { fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | (fs.constants.O_NONBLOCK || 0)); }
+    catch (e) { if (e.code === 'ELOOP') best = best || { refused: true }; continue; }
+    try {
+      const st = fs.fstatSync(fd);
+      if (!st.isFile() || (typeof process.getuid === 'function' && st.uid !== process.getuid())) { best = best || { refused: true }; continue; }
+      if (!best || best.refused || st.mtimeMs > best.mtimeMs) { if (best && best.fd !== undefined) fs.closeSync(best.fd); best = { fd, size: st.size, mtimeMs: st.mtimeMs }; fd = undefined; }
+    } finally { if (fd !== undefined) fs.closeSync(fd); }
   }
+  if (!best) return { error: 'no transcript for this session yet' };
+  if (best.refused) return { error: 'transcript refused (symlink, not a regular file, or not owned by this user)' };
+  // Scan one tail window backwards for the last complete, usable assistant record.
+  const scan = (want) => {
+    const len = Math.min(best.size, want);
+    const start = best.size - len;
+    const buf = Buffer.alloc(len);
+    let got = 0;
+    while (got < len) { const n = fs.readSync(best.fd, buf, got, len - got, start + got); if (!n) break; got += n; }
+    let text = buf.toString('utf8', 0, got);
+    if (start > 0) { const nl = text.indexOf('\n'); text = nl < 0 ? '' : text.slice(nl + 1); }   // drop the cut first line
+    const lines = text.split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i];
+      if (!line.includes('"assistant"') || !line.includes('"model"')) continue;
+      let rec; try { rec = JSON.parse(line); } catch { continue; }
+      if (!rec || rec.type !== 'assistant' || rec.isSidechain === true || !rec.message || typeof rec.message.model !== 'string') continue;
+      const m = /^claude-([a-z][a-z0-9]*)(?:-|$)/.exec(rec.message.model);
+      if (!m || !FAMILY_RE.test(m[1])) continue;   // '<synthetic>' and old/unrecognised model ids are skipped (fail closed)
+      return { family: m[1], model: rec.message.model.slice(0, 64), bytes_read: got };
+    }
+    return { error: 'no model recorded for this session', bytes_read: got };
+  };
+  try {
+    const r = scan(maxBytes);
+    // Nothing usable in the tail (e.g. the newest assistant line is itself longer than the tail and was cut): widen
+    // once, capped, so the newest complete record is found. Anything older than the cap fails closed.
+    if (r.family || best.size <= maxBytes || maxWideBytes <= maxBytes) return r;
+    return scan(maxWideBytes);
+  } catch { return { error: 'transcript unreadable' }; }
+  finally { try { fs.closeSync(best.fd); } catch {} }
+}
+
+function _conduitAutobind() {
+  const mode = process.env.CONDUIT_AUTOBIND;
+  if (mode !== 'claude') {
+    conduitPaneError = `CONDUIT_AUTOBIND=${String(mode).slice(0, 16)} is not supported (only claude); call conduit_onboard with model_family and session_id`;
+    return null;
+  }
+  if (_autobindMiss.error && Date.now() - _autobindMiss.at < AUTOBIND_RETRY_MS) { conduitPaneError = _autobindMiss.error; return null; }
+  const sid = String(process.env.CLAUDE_CODE_SESSION_ID || '');
+  const r = _conduitClaudeFamily(sid);
+  if (r.family) {
+    conduitPane = { model_family: r.family, session_id: sid };
+    conduitPaneSource = 'autobind'; conduitPaneError = null; _autobindMiss = { at: 0, error: null };
+    return conduitPane;
+  }
+  const why = r.error === 'no transcript for this session yet' || r.error === 'no model recorded for this session'
+    ? 'no model recorded for this session' : r.error;
+  conduitPaneError = `pane identity not resolvable yet: ${why} (CONDUIT_AUTOBIND=claude); retry after this session's first reply, or call conduit_onboard with model_family and session_id`;
+  _autobindMiss = { at: Date.now(), error: conduitPaneError };
   return null;
 }
 function _conduitSharedFile() {
@@ -781,7 +878,8 @@ function conduitConfig() {
   cfg.token_valid = !!token && (!expiresAt || Date.parse(expiresAt) - Date.now() > CONDUIT_RENEW_BEFORE_MS);
   cfg.onboarded = !!(cfg.name && cfg.token);
   cfg.pane_address = _conduitPane() ? conduitPaneAddress(_conduitPane()) : null;
-  if (conduitPaneError) cfg.pane_error = conduitPaneError;
+  if (cfg.pane_address) cfg.pane_source = conduitPaneSource;
+  else if (conduitPaneError) cfg.pane_error = conduitPaneError;
   if (process.env.CONDUIT_REQUIRE_PANE === '1' && !cfg.pane_address) { cfg.onboarded = false; cfg.name = ''; cfg.pane_required = true; }
   if (envTok && !envTokOk && !f.token) cfg.env_token_ignored = 'CONDUIT_TOKEN is not a DemiPass service token for conduit (aud svc:conduit); run conduit_onboard';
   return cfg;
@@ -893,17 +991,69 @@ function _conduitHttp(method, path, body, token, baseUrl) {
 async function _conduit(method, path, body) {
   // A pane identity that is configured but malformed never falls back to the shared legacy address (Codex #19 P2).
   if (!_conduitPane() && conduitPaneError) throw new Error(conduitPaneError + ' — refusing to message as the shared legacy address; fix the identity or call conduit_onboard with model_family and session_id');
-  if (process.env.CONDUIT_REQUIRE_PANE === '1' && !_conduitPane()) throw new Error('Pane identity required: call conduit_onboard with model_family and full session_id before messaging');
+  if (process.env.CONDUIT_REQUIRE_PANE === '1' && !_conduitPane()) throw new Error('Pane identity required: call conduit_onboard with model_family and full session_id before messaging (panes with no automatic address, e.g. Codex, always need this)');
   const { url } = await _conduitResolveUrl();
   let token = await _conduitToken();
-  try { return await _conduitHttp(method, path, body, token, url); }
-  catch (e) {
-    if (e.status === 401 && config.bearerToken) {
-      token = await _conduitToken({ force: true });
-      return _conduitHttp(method, path, body, token, url);
+  const call = async () => {
+    try { return await _conduitHttp(method, path, body, token, url); }
+    catch (e) {
+      if (e.status === 401 && config.bearerToken) {
+        token = await _conduitToken({ force: true });
+        return _conduitHttp(method, path, body, token, url);
+      }
+      throw e;
     }
-    throw e;
+  };
+  try { return await call(); }
+  catch (e) {
+    // 410 address_retired on a call made AS this pane. Only an idle-expiry retirement (retired_by "expiry") is undone:
+    // the pane re-registers its own address once (same model_family/session_id, previous owns; only the owning wallet
+    // can) and retries the original call once; a second 410 is returned as is. A retirement by the owner, or one an
+    // older relay does not label, is deliberate: never revived here (#20 review M1).
+    if (_conduitErrCode(e) === 'address_retired' && _conduitPane()) {
+      if (e.body.retired_by !== 'expiry') throw _conduitRetiredError(e, body);
+      await _conduitRevive(token, url);
+      try { return await call(); } catch (e2) { throw _conduitRetiredError(e2, body); }
+    }
+    throw _conduitRetiredError(e, body);
   }
+}
+function _conduitErrCode(e) { return e && e.status === 410 && e.body && typeof e.body.error === 'string' ? e.body.error : null; }
+// A 410 said plainly, worded from the relay's retired_by; the relay's body stays on err.body. Other errors pass through.
+function _conduitRetiredError(e, body) {
+  const code = _conduitErrCode(e);
+  if (code !== 'recipient_retired' && code !== 'address_retired') return e;
+  const by = e.body.retired_by;
+  const how = by === 'expiry' ? 'retired after 7 days idle' : by === 'owner' ? 'retired by its owner' : 'retired (the relay did not say why)';
+  const when = ` (retired_at ${e.body.retired_at || 'unknown'})`;
+  let msg;
+  if (code === 'recipient_retired') {
+    const to = e.body.to || (body && body.to) || 'the recipient';
+    msg = `Conduit: "${to}" is gone: that pane address was ${how}${when}; only its own pane can bring it back. Find a live address with conduit_agents.`;
+  } else {
+    const name = e.body.name || (_conduitPane() ? conduitPaneAddress(_conduitPane()) : 'this address');
+    msg = by === 'expiry'
+      ? `Conduit: this pane address ${name} was ${how}${when} and is still retired after re-registering once; not retrying`
+      : `Conduit: this pane address ${name} was ${how}${when}; it is not revived automatically. Re-onboard deliberately with conduit_onboard (same model_family and session_id) if this pane should use it again.`;
+  }
+  const err = new Error(msg);
+  err.status = 410; err.code = code; err.retired_by = by || null; err.body = e.body; err.cause = e;
+  return err;
+}
+async function _conduitRevive(token, url) {
+  const pane = _conduitPane();
+  const address = conduitPaneAddress(pane);
+  const f = _conduitReadFile() || {};
+  let reg;
+  try {
+    reg = await _conduitHttp('POST', '/agents/register', { name: address, ...pane, owns: Array.isArray(f.owns) ? f.owns : [], description: f.description || undefined }, token, url);
+  } catch (e) {
+    const err = new Error(`Conduit: this pane's address ${address} was retired after 7 days idle and re-registering it failed: ${e.message}`);
+    err.status = e.status; err.code = 'address_retired'; err.body = e.body; throw err;
+  }
+  if (!reg || reg.name !== address) throw new Error(`Conduit: re-registering retired address ${address} returned a different name; not retrying`);
+  try { _conduitWriteFile({ ...f, name: reg.name, owns: Array.isArray(reg.owns) ? reg.owns : (f.owns || []), revived_at: new Date().toISOString() }); } catch {}
+  return reg;
 }
 
 /**
@@ -917,12 +1067,16 @@ async function conduitOnboard({ name, model_family, session_id, owns, descriptio
   if (model_family !== undefined || session_id !== undefined) {
     const proposed = { model_family, session_id };
     conduitPaneAddress(proposed);
-    const current = _conduitPane();
+    // An explicit identity outranks autobind: only a pane already in use by this process (or set by the launcher's
+    // explicit binding) blocks it. A pending autobind is not consulted, so a transcript is never read here.
+    const env = _conduitEnvPane();
+    const current = conduitPane || env;
     if (current && conduitPaneAddress(current) !== conduitPaneAddress(proposed)) throw new Error('this MCP process is bound to another pane; use a separate process');
-    conduitPane = proposed;
+    if (!conduitPane) conduitPaneSource = env ? 'env' : 'onboard';
+    conduitPane = proposed; conduitPaneError = null;
   }
   const pane = _conduitPane();
-  if (process.env.CONDUIT_REQUIRE_PANE === '1' && !pane) return { ok: false, step: 'pane_identity', error: 'model_family and full session_id required; shared legacy name is not a pane identity' };
+  if (process.env.CONDUIT_REQUIRE_PANE === '1' && !pane) return { ok: false, step: 'pane_identity', error: 'model_family and full session_id required; shared legacy name is not a pane identity', ...(conduitPaneError ? { pane_error: conduitPaneError } : {}) };
   if (pane && name && name !== conduitPaneAddress(pane)) throw new Error('name must match model-family-session-id');
   const steps = [];
   const fs = require('fs');
@@ -1061,6 +1215,8 @@ async function conduitStatus() {
   const out = { url: resolved.url, url_source: resolved.source, me: { onboarded: cfg.onboarded, name: cfg.name || null, wallet: cfg.wallet, token_id: cfg.token_id, token_expires_at: cfg.expires_at,
     token_valid: cfg.token_valid, cap_dd: cfg.cap_dd, consent_id: cfg.consent_id, daily_cap_dd: cfg.daily_cap_dd, config_file: cfg.file, config_present: cfg.file_present } };
   if (cfg.env_token_ignored) out.me.env_token_ignored = cfg.env_token_ignored;
+  if (cfg.pane_address) { out.me.pane_address = cfg.pane_address; out.me.pane_source = cfg.pane_source; }
+  if (cfg.pane_error) out.me.pane_error = cfg.pane_error;
   try { out.health = await _conduitHttp('GET', '/health', null, null, resolved.url); } catch (e) { out.health = { ok: false, error: e.message }; }
   if (!cfg.onboarded) out.next = 'run conduit_onboard';
   else if (out.health && out.health.ok) { try { out.agents = (await conduitAgents()).agents; } catch (e) { out.agents_error = e.message; } }
@@ -1115,6 +1271,7 @@ module.exports = {
   verifyServiceReceipt: require('./services').verifyReceipt,
   // Conduit (agent relay by name; docs/conduit.md)
   conduitPaneAddress,
+  _conduitClaudeFamily,
   conduitHistory,
   conduitReceipts,
   conduitConfig,
