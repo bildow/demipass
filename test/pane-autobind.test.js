@@ -56,12 +56,28 @@ test('a huge transcript: only the bounded tail is read', () => {
   const f = transcript(asst('claude-opus-5-5') + fill);
   assert.ok(fs.statSync(f).size > 5 * 1024 * 1024);
   let r = family();
-  assert.match(r.error, /no model recorded/, 'the opus record at the head is outside the tail window');
-  assert.ok(r.bytes_read <= 512 * 1024, `read ${r.bytes_read} bytes`);
+  assert.match(r.error, /no model recorded/, 'the opus record at the head is outside even the widened window');
+  assert.strictEqual(r.bytes_read, 4 * 1024 * 1024, 'one widened read, capped at 4 MiB, never the whole file');
   fs.appendFileSync(f, asst('claude-fable-5-2'));
   r = family();
   assert.strictEqual(r.family, 'fable'); assert.strictEqual(r.bytes_read, 512 * 1024);
   assert.strictEqual(family(SID, { maxBytes: 4096 }).family, 'fable', 'a cut first line is dropped, not parsed');
+});
+
+test('the newest assistant line longer than the tail: the read widens once (capped) and finds it, not an older record', () => {
+  const big = asst('claude-fable-5-2').replace('secret-looking content', 'z'.repeat(700 * 1024));
+  const f = transcript(asst('claude-opus-5-5') + big + user('after'));
+  let r = family();
+  assert.strictEqual(r.family, 'fable', JSON.stringify(r)); assert.ok(r.bytes_read <= 4 * 1024 * 1024 && r.bytes_read > 512 * 1024);
+  // newer than anything the cap can reach: fail closed rather than fall back to the older opus record
+  fs.writeFileSync(f, asst('claude-opus-5-5') + asst('claude-fable-5-2').replace('secret-looking content', 'z'.repeat(5 * 1024 * 1024)));
+  r = family();
+  assert.match(r.error, /no model recorded/); assert.strictEqual(r.bytes_read, 4 * 1024 * 1024);
+});
+
+test('old model ids (claude-3-5-sonnet-…) do not resolve: fail closed', () => {
+  transcript(asst('claude-3-5-sonnet-20241022') + asst('claude-3-opus-20240229') + asst('<synthetic>'));
+  assert.match(family().error, /no model recorded/);
 });
 
 test('symlinks are refused: a symlinked transcript file and a symlinked project directory', () => {

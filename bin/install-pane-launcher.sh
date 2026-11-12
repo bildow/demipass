@@ -42,6 +42,8 @@ sed "s/@@DEMIPASS_RELEASE_SHA@@/$sha/" "$src" > "$tmp"
 grep -q "const RELEASE = '$sha';" "$tmp" || { echo "install-pane-launcher: pin did not apply; refusing" >&2; exit 1; }
 node --check "$tmp"
 chmod 0700 "$tmp"
+# The old .bak (file or symlink) is removed first so the backup is never written through a symlink (#20 review).
+rm -f "$dest.bak"
 if [[ -e "$dest" ]]; then cp -p "$dest" "$dest.bak"; fi
 mv -f "$tmp" "$dest"
 echo "installed $dest (mode 0700) pinned to $sha"

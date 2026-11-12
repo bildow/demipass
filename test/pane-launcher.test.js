@@ -71,6 +71,14 @@ test('installer: refuses a bad sha or a missing release; installs 0700, pinned, 
   r = sh([SHA]); assert.strictEqual(r.status, 0); assert.ok(fs.existsSync(launcher + '.bak'));
 });
 
+test('installer: a symlinked .bak is replaced, never written through', () => {
+  const victim = path.join(home, 'victim.txt'); fs.writeFileSync(victim, 'untouched');
+  fs.rmSync(launcher + '.bak', { force: true }); fs.symlinkSync(victim, launcher + '.bak');
+  const r = sh([SHA]); assert.strictEqual(r.status, 0, r.stderr);
+  assert.strictEqual(fs.readFileSync(victim, 'utf8'), 'untouched');
+  assert.ok(fs.lstatSync(launcher + '.bak').isFile(), '.bak is a regular file now');
+});
+
 test('installer: a release that ships the launcher is installed from that release', () => {
   const relBin = path.join(home, '.local/share/demipass/releases', SHA, 'bin'); fs.mkdirSync(relBin);
   fs.writeFileSync(path.join(relBin, 'demipass-pane-mcp.js'), fs.readFileSync(path.join(REPO, 'bin/demipass-pane-mcp.js'), 'utf8').replace('// demipass-pane-mcp:', '// from-release demipass-pane-mcp:'));
@@ -83,6 +91,16 @@ test('installer: a release that ships the launcher is installed from that releas
 test('the repository copy (unpinned) refuses to start', () => {
   const r = spawnSync(process.execPath, [path.join(REPO, 'bin/demipass-pane-mcp.js')], { env: { PATH: process.env.PATH, HOME: home }, encoding: 'utf8' });
   assert.notStrictEqual(r.status, 0); assert.match(r.stderr, /not pinned to a release/); assert.strictEqual(r.stdout, '');
+});
+
+test('a malformed ~/.mcp.json is reported without quoting any of it', () => {
+  const f = path.join(home, '.mcp.json'); const saved = fs.readFileSync(f);
+  try {
+    fs.writeFileSync(f, `{"mcpServers":{"demipass":{"env":{"DEMIPASS_TOKEN":"${TOKEN}"}}},,}`);
+    const r = spawnSync(process.execPath, [launcher], { env: { PATH: process.env.PATH, HOME: home }, encoding: 'utf8' });
+    assert.strictEqual(r.status, 1); assert.match(r.stderr, /~\/\.mcp\.json is not valid JSON/);
+    for (const frag of [TOKEN, 'c2lnLXNlY3JldA', 'mcpServers', 'DEMIPASS_TOKEN']) assert.ok(!r.stderr.includes(frag) && !r.stdout.includes(frag), `stderr quotes ${frag}`);
+  } finally { fs.writeFileSync(f, saved); }
 });
 
 test('an explicit binding wins over autobind (pid + start time of the nearest agent)', () => {

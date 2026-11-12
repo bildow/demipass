@@ -25,9 +25,13 @@ const home = os.homedir();
 const role = process.argv[2] === '--buoy' ? 'buoy' : 'demipass';
 const key = role === 'buoy' ? 'BUOY_TOKEN' : 'DEMIPASS_TOKEN';
 const urlKey = role === 'buoy' ? 'BUOY_URL' : 'DEMIPASS_URL';
-const config = JSON.parse(fs.readFileSync(path.join(home, '.mcp.json'), 'utf8'));
-const env = (config.mcpServers && config.mcpServers[role] && config.mcpServers[role].env) || {};
-if (!env[key]) throw new Error('Missing configured ' + role + ' credential');
+// A malformed ~/.mcp.json is reported without quoting it: JSON.parse errors can echo the text, i.e. the credential.
+const fail = (msg) => { process.stderr.write('demipass-pane-mcp: ' + msg + '\n'); process.exit(1); };
+let config;
+{ let raw; try { raw = fs.readFileSync(path.join(home, '.mcp.json'), 'utf8'); } catch { fail('~/.mcp.json is missing or unreadable'); }
+  try { config = JSON.parse(raw); } catch { fail('~/.mcp.json is not valid JSON'); } }
+const env = (config && config.mcpServers && config.mcpServers[role] && config.mcpServers[role].env) || {};
+if (!env[key]) fail('Missing configured ' + role + ' credential');
 const claims = (t) => { try { return JSON.parse(Buffer.from(String(t).split('.')[1], 'base64url')); } catch { return {}; } };
 const readJson = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
 

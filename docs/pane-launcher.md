@@ -16,7 +16,8 @@ bin/install-pane-launcher.sh <release-sha>
   come from the same reviewed commit); an older release without it uses the copy beside the installer, and the output
   says which.
 - The sha is written into the launcher (`const RELEASE = '<sha>'`); the result is syntax-checked and installed to
-  `~/.local/bin/demipass-pane-mcp.js`, mode 0700, atomically. The previous launcher is kept as `.bak`.
+  `~/.local/bin/demipass-pane-mcp.js`, mode 0700, atomically. The previous launcher is kept as `.bak` (an existing
+  `.bak`, symlink or not, is removed first, so the backup is never written through a symlink).
 - The installer never reads `~/.mcp.json` or any credential and prints only paths and the sha.
 - The repository copy is unpinned and refuses to start, so nothing ever runs an unreviewed "latest".
 - Running panes keep the launcher they started with until their MCP server restarts (`/mcp` in Claude Code).
@@ -27,7 +28,9 @@ bin/install-pane-launcher.sh <release-sha>
 ## What it does at start
 
 1. **Credential.** Reads `DEMIPASS_TOKEN` (or `BUOY_TOKEN`) and the URL from `~/.mcp.json`'s matching server entry into
-   its own environment. The credential is never copied into another config, printed, or written to the receipt.
+   its own environment. The credential is never copied into another config, printed, or written to the receipt. A
+   missing or malformed `~/.mcp.json` exits with "~/.mcp.json is missing or unreadable" / "is not valid JSON", never
+   quoting the file.
 2. **Conduit gate.** Conduit is enabled only if `~/.config/demipass/conduit.json` belongs to the same wallet as that
    credential. A missing, unreadable or other-wallet file disables **Conduit only** (one stderr line naming the file,
    never its content); vault, ssh and `/use` keep working.
@@ -62,7 +65,9 @@ At the **first Conduit call** (not at startup) `_conduitPane()`:
    skipped); opens it with `O_NOFOLLOW` (a symlinked transcript is refused) and requires a regular file owned by this
    user; with several, the most recently modified wins;
 3. reads only the last 512 KiB, drops the cut first line, and scans backwards for the last assistant record that is not
-   a sidechain and whose model is `claude-<family>-…` (`<synthetic>` and other strings are skipped);
+   a sidechain and whose model is `claude-<family>-…` (`<synthetic>` and other strings are skipped). If that window holds
+   no usable record (e.g. the newest assistant line is itself longer than 512 KiB) it reads once more, at most the last
+   4 MiB. A record further back than that is not used: it fails closed rather than fall back to an older model;
 4. validates the family against `^[a-z][a-z0-9]{0,14}$` and binds `<family>-<sid>`.
 
 Only the model string is taken; transcript content is never logged or returned.
@@ -77,4 +82,7 @@ Only the model string is taken; transcript content is never logged or returned.
   resolved takes precedence and is used as-is; once a pane is in use, a different one is refused.
 - `conduit_status` / `conduitConfig()` report `pane_address` and `pane_source` (`env`, `autobind`, `onboard`), or
   `pane_error`.
+- **Old model ids do not resolve.** Only `claude-<family>-…` with a letter-first family maps (`claude-opus-5-5` →
+  opus). Pre-family ids such as `claude-3-5-sonnet-20241022` or `claude-3-opus-…` are skipped, so a session that only
+  recorded those stays unbound (fail closed); bind it explicitly.
 - Users who move `~/.claude` with `CLAUDE_CONFIG_DIR` are not searched; bind those panes explicitly.

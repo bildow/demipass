@@ -725,16 +725,17 @@ function _conduitEnvPane() {
 // first Conduit call, from the model Claude Code recorded in this session's own transcript
 // (~/.claude/projects/<slug>/<session-id>.jsonl, last non-synthetic assistant `message.model`, claude-<family>-…).
 // Once resolved it is cached for the life of this MCP process: a later /model switch does not move the address.
-// Only the tail of the file is read (bounded), only the model string is taken, nothing from the file is logged, the path
+// Only the tail of the file is read (512 KiB, widened once to at most 4 MiB when that holds no usable record), only the model string is taken, nothing from the file is logged, the path
 // is built only from a validated UUID, and symlinked project directories or transcript files are refused.
 const AUTOBIND_TAIL_BYTES = 512 * 1024;
+const AUTOBIND_WIDE_BYTES = 4 * 1024 * 1024;   // one widened read when the tail holds no usable record
 const AUTOBIND_RETRY_MS = 2000;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const FAMILY_RE = /^[a-z][a-z0-9]{0,14}$/;
 let _autobindMiss = { at: 0, error: null };
 
 /** Model family recorded for a Claude Code session: {family, model, bytes_read} or {error}. Never throws. */
-function _conduitClaudeFamily(sessionId, { home, maxBytes = AUTOBIND_TAIL_BYTES } = {}) {
+function _conduitClaudeFamily(sessionId, { home, maxBytes = AUTOBIND_TAIL_BYTES, maxWideBytes = AUTOBIND_WIDE_BYTES } = {}) {
   const fs = require('fs'); const path = require('path');
   const sid = String(sessionId || '');
   if (!UUID_RE.test(sid)) return { error: 'CLAUDE_CODE_SESSION_ID is missing or not a full lowercase UUID' };
@@ -756,8 +757,9 @@ function _conduitClaudeFamily(sessionId, { home, maxBytes = AUTOBIND_TAIL_BYTES 
   }
   if (!best) return { error: 'no transcript for this session yet' };
   if (best.refused) return { error: 'transcript refused (symlink, not a regular file, or not owned by this user)' };
-  try {
-    const len = Math.min(best.size, maxBytes);
+  // Scan one tail window backwards for the last complete, usable assistant record.
+  const scan = (want) => {
+    const len = Math.min(best.size, want);
     const start = best.size - len;
     const buf = Buffer.alloc(len);
     let got = 0;
@@ -771,10 +773,17 @@ function _conduitClaudeFamily(sessionId, { home, maxBytes = AUTOBIND_TAIL_BYTES 
       let rec; try { rec = JSON.parse(line); } catch { continue; }
       if (!rec || rec.type !== 'assistant' || rec.isSidechain === true || !rec.message || typeof rec.message.model !== 'string') continue;
       const m = /^claude-([a-z][a-z0-9]*)(?:-|$)/.exec(rec.message.model);
-      if (!m || !FAMILY_RE.test(m[1])) continue;   // '<synthetic>' and unrecognised model strings are skipped
+      if (!m || !FAMILY_RE.test(m[1])) continue;   // '<synthetic>' and old/unrecognised model ids are skipped (fail closed)
       return { family: m[1], model: rec.message.model.slice(0, 64), bytes_read: got };
     }
     return { error: 'no model recorded for this session', bytes_read: got };
+  };
+  try {
+    const r = scan(maxBytes);
+    // Nothing usable in the tail (e.g. the newest assistant line is itself longer than the tail and was cut): widen
+    // once, capped, so the newest complete record is found. Anything older than the cap fails closed.
+    if (r.family || best.size <= maxBytes || maxWideBytes <= maxBytes) return r;
+    return scan(maxWideBytes);
   } catch { return { error: 'transcript unreadable' }; }
   finally { try { fs.closeSync(best.fd); } catch {} }
 }
@@ -997,23 +1006,38 @@ async function _conduit(method, path, body) {
   };
   try { return await call(); }
   catch (e) {
-    // The relay retires a pane address idle 7 days (410 address_retired on calls made AS it). Only the owning wallet can
-    // re-register it, so this pane revives its own address once (same model_family/session_id, previous owns) and
-    // retries the original call once. A second 410 is returned as is.
+    // 410 address_retired on a call made AS this pane. Only an idle-expiry retirement (retired_by "expiry") is undone:
+    // the pane re-registers its own address once (same model_family/session_id, previous owns; only the owning wallet
+    // can) and retries the original call once; a second 410 is returned as is. A retirement by the owner, or one an
+    // older relay does not label, is deliberate: never revived here (#20 review M1).
     if (_conduitErrCode(e) === 'address_retired' && _conduitPane()) {
+      if (e.body.retired_by !== 'expiry') throw _conduitRetiredError(e, body);
       await _conduitRevive(token, url);
-      try { return await call(); } catch (e2) { throw _conduitRecipientRetired(e2, body); }
+      try { return await call(); } catch (e2) { throw _conduitRetiredError(e2, body); }
     }
-    throw _conduitRecipientRetired(e, body);
+    throw _conduitRetiredError(e, body);
   }
 }
 function _conduitErrCode(e) { return e && e.status === 410 && e.body && typeof e.body.error === 'string' ? e.body.error : null; }
-// 410 recipient_retired: the address sent to is gone. Said plainly; the relay's body stays on err.body.
-function _conduitRecipientRetired(e, body) {
-  if (_conduitErrCode(e) !== 'recipient_retired') return e;
-  const to = (e.body && e.body.to) || (body && body.to) || 'the recipient';
-  const err = new Error(`Conduit: "${to}" is gone: that pane address was retired after 7 days idle (retired_at ${e.body.retired_at || 'unknown'}); only its own pane can revive it. Find a live address with conduit_agents.`);
-  err.status = 410; err.code = 'recipient_retired'; err.body = e.body; err.cause = e;
+// A 410 said plainly, worded from the relay's retired_by; the relay's body stays on err.body. Other errors pass through.
+function _conduitRetiredError(e, body) {
+  const code = _conduitErrCode(e);
+  if (code !== 'recipient_retired' && code !== 'address_retired') return e;
+  const by = e.body.retired_by;
+  const how = by === 'expiry' ? 'retired after 7 days idle' : by === 'owner' ? 'retired by its owner' : 'retired (the relay did not say why)';
+  const when = ` (retired_at ${e.body.retired_at || 'unknown'})`;
+  let msg;
+  if (code === 'recipient_retired') {
+    const to = e.body.to || (body && body.to) || 'the recipient';
+    msg = `Conduit: "${to}" is gone: that pane address was ${how}${when}; only its own pane can bring it back. Find a live address with conduit_agents.`;
+  } else {
+    const name = e.body.name || (_conduitPane() ? conduitPaneAddress(_conduitPane()) : 'this address');
+    msg = by === 'expiry'
+      ? `Conduit: this pane address ${name} was ${how}${when} and is still retired after re-registering once; not retrying`
+      : `Conduit: this pane address ${name} was ${how}${when}; it is not revived automatically. Re-onboard deliberately with conduit_onboard (same model_family and session_id) if this pane should use it again.`;
+  }
+  const err = new Error(msg);
+  err.status = 410; err.code = code; err.retired_by = by || null; err.body = e.body; err.cause = e;
   return err;
 }
 async function _conduitRevive(token, url) {

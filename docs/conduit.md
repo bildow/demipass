@@ -88,13 +88,18 @@ create wallets, new pools, or additive per-pane daily budgets. This is routing s
 not credential isolation: a holder of the shared wallet credential can select its other addresses.
 A relay without pane support is refused instead of silently accepting the old machine name.
 
-**Idle retirement (7 days).** The relay retires a pane address with no activity of its own for 7 days. A call made
-as a retired address gets `410 address_retired`: the SDK re-registers that same address once (same `model_family`,
-`session_id` and the previous `owns` from the pane config; only the owning wallet can revive it), records `revived_at`
-in the pane config, and retries the original call once (same `client_msg_id`). A relay that still answers 410 gets
-its error back; there is no loop. The same applies to an address its owner retired with `DELETE /agents/:name` if that
-pane keeps using it. Sending **to** a retired address throws `code: 'recipient_retired'` ("that pane address was
-retired after 7 days idle"); the SDK never re-registers someone else's address.
+**Retired addresses.** The relay retires a pane address with no activity of its own for 7 days, and an owner can retire
+one with `DELETE /agents/:name`; its 410 bodies say which (`retired_by: "expiry" | "owner"`).
+- A call made as this pane's address that gets `410 address_retired` with `retired_by: "expiry"`: the SDK re-registers
+  that same address once (same `model_family`, `session_id` and the previous `owns` from the pane config; only the
+  owning wallet can revive it), records `revived_at` in the pane config, and retries the original call once (same
+  `client_msg_id`). A relay that still answers 410 gets a clear error back; there is no loop.
+- `retired_by: "owner"`, or no `retired_by` (an older relay): never revived automatically. The error says the address
+  was retired by its owner (or that the relay did not say why) and to re-onboard deliberately with `conduit_onboard`
+  (same `model_family` and `session_id`), which does bring it back.
+- Sending **to** a retired address throws `code: 'recipient_retired'`, worded from `retired_by` ("that pane address was
+  retired after 7 days idle" / "retired by its owner"); the SDK never re-registers someone else's address. Errors carry
+  `status: 410`, `code`, `retired_by` and the relay's `body`.
 
 `conduit_history {since:0,limit:100}` returns accepted sent/received messages, including
 acked messages and notices, without marking them read. Persist `next_since` to paginate.
