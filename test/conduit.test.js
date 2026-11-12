@@ -28,7 +28,8 @@ const body = (req) => new Promise((r) => { let raw = ''; req.on('data', (c) => (
 const dp = { consentActive: false, mints: 0, issued: new Set(), seen: [] };
 const dpSrv = http.createServer(async (req, res) => {
   const b = await body(req); dp.seen.push({ m: req.method, p: req.url, b, auth: req.headers.authorization });
-  if (req.headers.authorization !== 'Bearer ' + SESSION) return json(res, 401, { error: 'bad session' });
+  if (req.headers.authorization !== 'Bearer ' + SESSION && req.headers.authorization !== 'Bearer ' + SESSION_B) return json(res, 401, { error: 'bad session' });
+  const sub = req.headers.authorization === 'Bearer ' + SESSION_B ? 'did:key:zOther' : 'did:key:zTester';
   if (req.method === 'GET' && req.url === '/api/services/consents') return json(res, 200, { ok: true, mine: dp.consentActive ? [{ id: 3, service: 'conduit', status: 'active', daily_cap_dd: 300 }] : [], approved_by_me: [] });
   if (req.method === 'POST' && req.url === '/api/services/consent') {
     if (!b.approval_id) return json(res, 202, { status: 'approval_pending', approval_id: 11, expires_at: '2026-11-10T00:00:00Z' });
@@ -37,13 +38,14 @@ const dpSrv = http.createServer(async (req, res) => {
   if (req.method === 'POST' && req.url === '/api/services/token') {
     if (!dp.consentActive) return json(res, 403, { error: 'consent to pay conduit first', consent_required: true });
     dp.mints++; const exp = Math.floor(Date.now() / 1000) + 3600; const jti = `tok${dp.mints}`;
-    const token = jwt({ sub: 'did:key:zTester', aud: 'svc:conduit', scope: 'transact', jti, exp, cap_dd: b.cap_dd || 200 });
+    const token = jwt({ sub, aud: 'svc:conduit', scope: 'transact', jti, exp, cap_dd: b.cap_dd || 200 });
     dp.issued.add(token);
     return json(res, 201, { ok: true, token, token_id: jti, service: 'conduit', cap_dd: b.cap_dd || 200, expires_at: new Date(exp * 1000).toISOString() });
   }
   json(res, 404, { error: 'not_found' });
 });
 const SESSION = jwt({ sub: 'did:key:zTester', username: 'tester', scope: 'admin', exp: Math.floor(Date.now() / 1000) + 86400 });
+const SESSION_B = jwt({ sub: 'did:key:zOther', username: 'other', scope: 'admin', exp: Math.floor(Date.now() / 1000) + 86400 });
 
 // ── fake Conduit ──
 const cd = { agents: new Map(), walletName: null, revoked: new Set(), posts: [], reads: 0 };
@@ -133,11 +135,27 @@ dpSrv.listen(0, '127.0.0.1', () => cdSrv.listen(0, '127.0.0.1', async () => {
     const note = r.steps.find((s) => s.step === 'register' && s.note); assert.ok(note && note.requested === 'workbench', JSON.stringify(r.steps));
     assert.deepStrictEqual(r.owns, ['atlas/incus-dashboard', 'kodiak']);
   });
-  await check('relay down → ok:false at step health, nothing filed', async () => {
+  await check('relay down → ok:false at step health, nothing filed, and the working relay URL is kept (#16 review P2)', async () => {
     const before = dp.seen.length;
     const r = await demipass.conduitOnboard({ url: 'http://127.0.0.1:9' });
     assert.strictEqual(r.ok, false); assert.strictEqual(r.step, 'health'); assert.strictEqual(dp.seen.length, before);
-    await demipass.conduitOnboard({ url: cdBase }); // restore the file's url
+    assert.strictEqual(JSON.parse(fs.readFileSync(process.env.CONDUIT_CONFIG, 'utf8')).url, cdBase);
+    assert.strictEqual(demipass.conduitConfig().url, cdBase);
+  });
+  await check('another wallet signed in on the same machine never uses the previous wallet\'s token (#16 review P1)', async () => {
+    const mints = dp.mints;
+    demipass.configure({ baseUrl: dpBase, bearerToken: SESSION_B });
+    const r = await demipass.conduitOnboard({});
+    assert.strictEqual(r.ok, true, JSON.stringify(r));
+    assert.strictEqual(dp.mints, mints + 1, 'a token was minted for the new wallet');
+    const f = JSON.parse(fs.readFileSync(process.env.CONDUIT_CONFIG, 'utf8'));
+    assert.strictEqual(JSON.parse(Buffer.from(f.token.split('.')[1], 'base64url')).sub, 'did:key:zOther');
+    assert.strictEqual(f.wallet, 'did:key:zOther');
+    demipass.configure({ baseUrl: dpBase, bearerToken: SESSION });
+    const m2 = dp.mints;
+    await demipass.conduitSend({ to: 'kodiak', body: 'back' });
+    assert.strictEqual(dp.mints, m2 + 1, 'the first wallet again: its own token is minted, not the other\'s reused');
+    assert.strictEqual(cd.posts.pop().body, 'back');
   });
 
   dpSrv.close(); cdSrv.close(); fs.rmSync(tmp, { recursive: true, force: true });

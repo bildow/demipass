@@ -772,9 +772,16 @@ async function _conduitMint({ ttl, capDd } = {}) {
   return next;
 }
 
+// A cached service token is this session's only if it was minted for the same wallet: another identity on the same
+// machine must not message (and be charged) as the previous one (#16 review P1).
+function _conduitTokenIsMine(token) {
+  if (!config.bearerToken) return true;   // nothing to mint from: the configured token is all there is
+  const me = (_jwtClaims(config.bearerToken) || {}).sub, owner = (_jwtClaims(token) || {}).sub;
+  return !!me && !!owner && me === owner;
+}
 async function _conduitToken({ force } = {}) {
   const cfg = conduitConfig();
-  if (!force && cfg.token_valid) return cfg.token;
+  if (!force && cfg.token_valid && _conduitTokenIsMine(cfg.token)) return cfg.token;
   return (await _conduitMint()).token;
 }
 
@@ -835,7 +842,7 @@ async function conduitOnboard({ name, owns, description, daily_cap_dd, cap_dd, t
   const fs = require('fs');
   const prior = _conduitReadFile() || {};
   const baseUrl = String(url || conduitConfig().url).replace(/\/+$/, '');
-  if (url && url !== prior.url) { _conduitWriteFile({ ...prior, url: baseUrl }); }
+  // The URL is saved only with a working setup (step 5): a mistyped one never replaces the relay every pane uses (#16 review P2).
 
   // 1. relay up?
   let health;
@@ -858,7 +865,7 @@ async function conduitOnboard({ name, owns, description, daily_cap_dd, cap_dd, t
     if (c.pending) {
       return { ok: false, status: 'approval_pending', step: 'consent', approval_id: c.pending.approval_id, expires_at: c.pending.expires_at,
         daily_cap_dd: cap, wallet: me.sub || null, steps,
-        next: `Approve "let a wallet pay conduit" (${cap} DD/day) in the DemiPass app, then call conduit_onboard again with approval_id=${c.pending.approval_id} and the same name/owns.` };
+        next: `Approve "let a wallet pay conduit" (${cap} DD/day) in the DemiPass app, then call conduit_onboard again with approval_id=${c.pending.approval_id} and the same name/owns${url ? '/url' : ''}.` };
     }
     consent = c.consent;
     steps.push({ step: 'consent', ok: true, consent_id: consent.id, daily_cap_dd: consent.daily_cap_dd, existing: c.existing, approval_id: c.existing ? undefined : (approval_id || null) });
@@ -870,7 +877,7 @@ async function conduitOnboard({ name, owns, description, daily_cap_dd, cap_dd, t
   // 4. token
   let cfg = conduitConfig();
   let minted = false;
-  if (renew || !cfg.token_valid || (cap_dd && cap_dd !== cfg.cap_dd) || (ttl && ttl !== cfg.ttl)) {
+  if (renew || !cfg.token_valid || !_conduitTokenIsMine(cfg.token) || (cap_dd && cap_dd !== cfg.cap_dd) || (ttl && ttl !== cfg.ttl)) {
     try { await _conduitMint({ ttl, capDd: cap_dd }); minted = true; }
     catch (e) { return { ok: false, step: 'token', status: e.status, error: (e.body && e.body.error) || e.message, steps }; }
   }
