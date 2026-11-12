@@ -160,9 +160,12 @@ dpSrv.listen(0, '127.0.0.1', () => cdSrv.listen(0, '127.0.0.1', async () => {
   });
   await check('onboarding with a cached token Conduit has revoked mints once and registers (#16 review round 2)', async () => {
     const f = JSON.parse(fs.readFileSync(process.env.CONDUIT_CONFIG, 'utf8')); cd.revoked.add(f.token);
+    // the directory is the truth for what the name owns; the file's copy is stale (#16 review, after merge)
+    const mine = cd.agents.get(cd.walletName); mine.owns = ['dir-owned']; f.owns = ['stale']; fs.writeFileSync(process.env.CONDUIT_CONFIG, JSON.stringify(f));
     const m = dp.mints;
     const r = await demipass.conduitOnboard({});
     assert.strictEqual(r.ok, true, JSON.stringify(r)); assert.strictEqual(dp.mints, m + 1);
+    assert.deepStrictEqual(r.owns, ['dir-owned'], 'owns from the directory, looked up with the fresh token');
     assert.notStrictEqual(JSON.parse(fs.readFileSync(process.env.CONDUIT_CONFIG, 'utf8')).token, f.token);
   });
   await check('a token only in CONDUIT_TOKEN is minted into the shared file by onboarding (#16 review round 2)', async () => {

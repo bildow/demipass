@@ -930,7 +930,9 @@ async function conduitOnboard({ name, owns, description, daily_cap_dd, cap_dd, t
   const register = async (n, o) => withToken((t) => _conduitHttp('POST', '/agents/register', { name: n, owns: o, description: description || prior.description || undefined }, t, baseUrl));
   const ownsFor = async (n) => {
     if (Array.isArray(owns)) return owns;
-    try { const dir = await _conduitHttp('GET', '/agents', null, cfg.token, baseUrl); const mine = (dir.agents || dir || []).find(a => a.name === n); if (mine) return mine.owns || []; } catch {}
+    // Through withToken: a revoked cached token is minted again here too, so the directory answer (not a stale fallback)
+    // decides what this name owns (#16 review, after merge). Only a lookup that still fails falls back.
+    try { const dir = await withToken((t) => _conduitHttp('GET', '/agents', null, t, baseUrl)); const mine = (dir.agents || dir || []).find(a => a.name === n); if (mine) return mine.owns || []; } catch {}
     return prior.owns || [];
   };
   try { reg = await register(wantName, await ownsFor(wantName)); }
