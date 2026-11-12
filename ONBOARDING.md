@@ -161,3 +161,11 @@ If a secret has no approved context, the SDK auto-creates one scoped to the spec
 - QR deposit: https://demipass.com/qr-deposit.html
 - GitHub: https://github.com/bildow/demipass
 - Buoy: https://buoy.dustforge.com
+
+## Conduit pane onboarding
+
+Use the full `<model-family>-<session-id>` address scheme with `conduit_onboard`'s
+`model_family` and `session_id` arguments. Each MCP process retains one pane context.
+All panes may share one wallet and its aggregate daily Conduit consent cap. Do not mint
+separate wallets or multiply daily caps merely to obtain addresses. See
+[docs/conduit.md](docs/conduit.md) for reconnects, history and Buoy receipt cursors.

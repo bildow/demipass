@@ -18,7 +18,7 @@
  *      server reads this machine's live DemiPass session when it needs one (no copies to go stale or sprawl, M2).
  *      An existing entry of that name pointing elsewhere is never overwritten (M1). Every pane started afterwards has
  *      the tools; a running pane picks them up with /mcp (reconnect).
- *   4. Service tokens are not minted here: the service's MCP server mints its own (aud svc:<slug>), in memory, on first
+ *   4. Fleetgate checks free admission with a short-lived memory-only token. For normal calls, the service's MCP server mints its own (aud svc:<slug>), in memory, on first
  *      use, and re-mints on expiry. A token therefore never sits in a config file.
  *
  * Also exported for the demipass MCP tool `demipass_onboard_service`.
@@ -156,7 +156,8 @@ async function onboardService({ service, capDd, approvalId, wait = true, waitMs 
   }
   if (c.pending) return { ok: false, status: 'approval_pending', service: slug, approval_id: c.pending.approval_id, daily_cap_dd: cap,
     next: `Approve it in the DemiPass app, then call again with approval_id ${c.pending.approval_id} and daily_cap_dd ${cap} (CLI: demipass-onboard ${slug} --cap ${cap} --approval ${c.pending.approval_id})` };
-  const low = dearest && c.consent.daily_cap_dd < dearest;
+  const intake = slug === 'fleetgate' ? ((t.actions || []).find(a => a.action === 'submit') || {}).price_dd : dearest;
+  const low = intake && c.consent.daily_cap_dd < intake;
 
   let mcp = { attached: false, reason: 'the service names no MCP server yet (its owner sets mcp_server)' };
   if (t.mcp_server && register) {
@@ -164,9 +165,17 @@ async function onboardService({ service, capDd, approvalId, wait = true, waitMs 
     if (!r || r.error) mcp = { attached: false, reason: r ? r.error : `bad mcp_server "${t.mcp_server}"` };
     else { const g = registerMcp({ slug, file: r.file, mcpConfig, did: didOf(token) }); mcp = g.error ? { attached: false, reason: g.error } : { attached: true, config: mcpConfig, entry: g.name, changed: g.changed }; }
   }
-  return { ok: true, service: slug, name: t.name, endpoint: t.endpoint || null,
+  let readiness = null;
+  if (slug === 'fleetgate') {
+    // The old generic setup returned success for payment consent even when the submitting bot had no lane.
+    // A short-lived, memory-only service token checks the real door; never send the wallet session there.
+    const probe = await dp.mintToken({ service: slug, ttl: '5m', followUpDd: c.consent.daily_cap_dd });
+    readiness = await require('./fleetgate-admission').fleetgateAdmission({ endpoint: t.endpoint, token: probe.token, wallet: didOf(token) });
+    if (!readiness.ok) return { ...readiness, service: slug, mcp, consent: { id: c.consent.id, daily_cap_dd: c.consent.daily_cap_dd } };
+  }
+  return { ok: true, service: slug, name: t.name, endpoint: t.endpoint || null, ...(readiness ? { admission: readiness.admission } : {}),
     consent: { id: c.consent.id, daily_cap_dd: c.consent.daily_cap_dd, existing: Boolean(c.existing) }, mcp,
-    ...(low ? { warning: `the daily consent (${c.consent.daily_cap_dd} DD) is below one ${slug} call (${dearest} DD); call again with a higher daily_cap_dd (--cap) to file a replacement for approval` } : {}),
+    ...(low ? { warning: `the daily consent (${c.consent.daily_cap_dd} DD) is below one ${slug} call (${intake} DD); call again with a higher daily_cap_dd (--cap) to file a replacement for approval` } : {}),
     next: mcp.attached ? (mcp.changed ? 'New panes have the tools. In a running pane: /mcp → reconnect.' : 'Already attached; nothing to restart.') : 'Consent is in place.' };
 }
 

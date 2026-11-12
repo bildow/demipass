@@ -282,10 +282,12 @@ const TOOLS = [
   },
   {
     name: 'conduit_onboard',
-    description: 'CONDUIT SETUP (run once per machine, safe to repeat): join Conduit, the agent-to-agent relay addressed by registered name, through the normal DemiPass path. Checks the relay, confirms or files this wallet\'s standing consent to pay conduit (a missing consent comes back as approval_pending with an approval_id: approve it in the DemiPass app, then call again with approval_id), mints a conduit service token, registers your name (one name per wallet; a wallet that already has a name keeps it) and writes ~/.config/demipass/conduit.json (0600). Every conduit_* call re-reads that file and re-mints an expired token by itself, so nothing needs a restart afterwards. Prices: post 2, forward 2, read 1, ack 1 DD.',
+    description: 'CONDUIT SETUP: use model_family + full session_id to register <family>-<session-id>. Separate pane config and routing address; all panes can share one DemiPass wallet and its aggregate Conduit daily consent cap. Does not provision a new wallet. Existing legacy machine mode is retained when no pane metadata is supplied. Requires a relay supporting pane addresses. Pending consent needs DemiPass app approval. No silent fallback to another name.',
     inputSchema: {
       type: 'object',
       properties: {
+        model_family: { type: 'string', description: 'Lowercase model family, e.g. astra, sol, fable, opus; pair with session_id' },
+        session_id: { type: 'string', description: 'Full session UUID, never a tmux slot number; pair with model_family' },
         name:         { type: 'string', description: 'Name to register (default: the DemiPass username). Lower-case; it is how others address you.' },
         owns:         { type: 'array', items: { type: 'string' }, description: 'Subjects this agent owns (e.g. "kodiak", "atlas/incus-dashboard"): a message whose subject you own is forwarded to you. Omitted = keep the current list.' },
         description:  { type: 'string', description: 'Directory description (≤500 chars)' },
@@ -300,7 +302,7 @@ const TOOLS = [
   },
   {
     name: 'conduit_send',
-    description: 'CONDUIT: Post a message to another agent by its registered name (2 DD, charged to you). Give `subject` when the message is about something: if another agent owns that subject, Conduit forwards it to the owner and sends you a notice naming them. Reply inside a thread with `thread` instead of `to` and every other participant receives it. Names: conduit_agents. Requires conduit_onboard once per machine.',
+    description: 'CONDUIT: Post a message to another agent by its registered name (2 DD, charged to you). Give `subject` when the message is about something: if another agent owns that subject, Conduit forwards it to the owner and sends you a notice naming them. Reply inside a thread with `thread` instead of `to` and every other participant receives it. Names: conduit_agents. Requires conduit_onboard for this pane.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -367,6 +369,16 @@ const TOOLS = [
     name: 'conduit_threads',
     description: 'CONDUIT (legacy view): the threads you take part in, as the pre-rebuild clients saw them. Prefer conduit_inbox.',
     inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'conduit_history',
+    description: 'CONDUIT: durable sent and received message history for this address, including acknowledged messages. Does not mark read. since is a message sequence cursor; advance to next_since. Includes sent/delivered timestamps and current Buoy receipt.',
+    inputSchema: { type: 'object', properties: { since: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 500 } } },
+  },
+  {
+    name: 'conduit_receipts',
+    description: 'CONDUIT: Buoy delivery receipts visible to both sender and recipient. Separate receipt since cursor, advance to next_since. Delivery means durable relay inbox, NOT human/pane read. Pending/unconfigured/uncertain is not an anchored tick.',
+    inputSchema: { type: 'object', properties: { since: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 500 } } },
   },
   {
     name: 'conduit_status',
@@ -505,6 +517,8 @@ const HANDLERS = {
   async conduit_threads() {
     return await demipass.conduitThreads();
   },
+  async conduit_history(args) { return await demipass.conduitHistory(args); },
+  async conduit_receipts(args) { return await demipass.conduitReceipts(args); },
   async conduit_status() {
     return await demipass.conduitStatus();
   },

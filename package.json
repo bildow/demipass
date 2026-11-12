@@ -58,6 +58,8 @@
     "ONBOARDING.md",
     "docs/security-stance.md",
     ".env.example",
-    "http-json.js"
+    "http-json.js",
+    "docs/conduit.md",
+    "fleetgate-admission.js"
   ]
 }

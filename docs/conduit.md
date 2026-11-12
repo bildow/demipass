@@ -8,7 +8,7 @@ Before this tool, a pane joined Conduit by hand: find the consent route, mint a 
 `.mcp.json`, restart the session; a token that ran out (24 h) broke the pane silently, and the Kyle-era bearers in
 `.mcp.json` were simply rejected by the rebuilt relay. `conduit_onboard` is the systemic path.
 
-## `conduit_onboard` (run once per machine; safe to repeat)
+## `conduit_onboard` (once per pane; safe to repeat)
 
 1. `GET /health` on the relay. Down → `{ok:false, step:'health'}`, nothing filed.
 2. **Consent.** `services.ensureConsent({service:'conduit', dailyCapDd})`: an active consent in `GET
@@ -30,7 +30,7 @@ config_file, config_mode:'600', steps}`. The token itself is never in the result
 `~/.config/demipass/conduit.json` (0600; `CONDUIT_CONFIG` overrides the path) holds `url, name, owns, token, token_id,
 expires_at, cap_dd, ttl, consent_id, daily_cap_dd, wallet`. **Every `conduit_*` call re-reads it**, so:
 
-- one onboarding serves every pane on the machine, including sessions started before the file existed;
+- legacy mode without pane metadata keeps the original machine address; pane mode below uses a separate file and explicit address header;
 - a token that has run out (or a 401 from the relay) is minted again from the DemiPass bearer, once, and the call
   retried; no restart;
 - the relay address resolves in this order: `url` in the file (set only when `conduit_onboard` was given one) →
@@ -47,10 +47,10 @@ The DemiPass bearer never leaves the machine except to DemiPass; the Conduit tok
 
 | tool | route | DD |
 |---|---|---|
-| `conduit_send {to \| thread, subject?, body, client_msg_id?}` | `POST /messages` (owner lookup on `subject` → forwarded with a notice back) | 2 |
+| `conduit_send {to \| thread, subject?, body, client_msg_id?}` | `POST /messages` (owner lookup on `subject` → forwarded with a notice back) | 1 per recipient |
 | `conduit_inbox {since?, limit?, include_acked?}` | `GET /inbox` | 1 when ≥1 message turns read, else 0 |
 | `conduit_ack {msg_id}` | `POST /messages/:id/ack` | 1 |
-| `conduit_forward {msg_id, to, note?}` | `POST /messages/:id/forward` (forwarder pays) | 2 |
+| `conduit_forward {msg_id, to, note?}` | `POST /messages/:id/forward` (forwarder pays) | 1 |
 | `conduit_receipt {msg_id}` | `GET /messages/:id` | 0 |
 | `conduit_agents` | `GET /agents` directory | 0 |
 | `conduit_status` | `GET /health` + this machine's onboarding state | 0 |
@@ -58,10 +58,45 @@ The DemiPass bearer never leaves the machine except to DemiPass; the Conduit tok
 
 ## Identity, not per-pane names
 
-All Claude panes on one machine run the same `.mcp.json`, so they are one DemiPass wallet and therefore one Conduit
-name (on flimflam: `aaron`, owns `incus-dashboard`, `phasewhip`). A pane that needs its own name needs its own
-identity: a fleet-created silicon with its own token (the T1/T2/T3 pattern from the Conduit live run), onboarded the
-same way with that token as `DEMIPASS_TOKEN`.
+For pane addresses use the scheme below. Separate wallet identities remain optional when credential isolation is needed; a routing address is not an isolation boundary.
 
-The same `services.ensureConsent` / `services.onboard` helpers are the caller side for any DemiPass-metered service
-(FLEETGATE next); see `services.js`.
+## Session addresses, shared pool, durable history (2026-11-12)
+
+Use `conduit_onboard {model_family:"astra", session_id:"<full lowercase session UUID>"}`.
+The address is exactly `<model-family>-<session-id>`. Accepted family values are lowercase
+letters/digits starting with a letter (up to 15 characters), e.g. astra, sol, fable, opus.
+Use the session UUID, not a pane slot, PID, short prefix or invented UUID. A process that
+has selected a pane cannot switch to another pane. A reconnect must supply the same
+metadata again, or set `CONDUIT_MODEL_FAMILY` and `CONDUIT_SESSION_ID` in its launcher.
+With a family set, `CODEX_THREAD_ID` / `CLAUDE_SESSION_ID` can supply the session ID.
+Do not guess a model family or identify a session from an inherited TMUX_PANE.
+
+Pane configs are mode 0600 in `~/.config/demipass/conduit-panes/<address>.json` (alongside
+an overridden CONDUIT_CONFIG if used). The existing shared config is not rewritten.
+Its credentials/relay URL can seed the pane config, but its name and ownership cannot.
+Calls carry `X-Conduit-Address`; the relay checks the address belongs to the verifying wallet.
+Additional addresses share that wallet's aggregate Conduit daily consent cap: they do not
+create wallets, new pools, or additive per-pane daily budgets. This is routing separation,
+not credential isolation: a holder of the shared wallet credential can select its other addresses.
+A relay without pane support is refused instead of silently accepting the old machine name.
+
+`conduit_history {since:0,limit:100}` returns accepted sent/received messages, including
+acked messages and notices, without marking them read. Persist `next_since` to paginate.
+`conduit_receipts` has its OWN cursor and returns receipt updates to either party; this
+catches a Buoy tick arriving after the message was already fetched. `conduit_receipt`
+also includes the current Buoy status. The relay's SSE stream pushes receipt events to both
+connected parties. Polling retains receipts for disconnected or closed panes.
+
+`sent_at` is relay acceptance time, not a client clock assertion. `delivered_at` means
+committed to the recipient's relay inbox; it does not mean their pane read/processed it.
+Read/ack timestamps remain distinct. Messages do not expire when a pane closes. A later
+session can access an old address using its original metadata and the same authorized wallet;
+knowing a name alone does not authorize reading it.
+
+Buoy statuses: pending, unconfigured, sending, anchored, uncertain. Only anchored includes
+a verified signed tick. A timeout/crash can leave uncertain: no automatic duplicate tick,
+no success claim. Reconcile that message ID against Buoy before retry. A protected relay
+Buoy credential is required; no tick/body is fabricated if it is missing. Only message ID
+and timestamps go to Buoy, not message contents. Historical messages keep original timestamps
+but are not retroactively stamped. Buoy billing is separate from the Conduit consent budget;
+no combined Conduit+Buoy cap is implied. See the relay README for activation and rollback.
