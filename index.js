@@ -746,13 +746,15 @@ function conduitConfig() {
 // Relay address resolution: conduit.json url → CONDUIT_URL → the tenant registry's `endpoint` (GET /api/services/conduit,
 // set by the tenant owner under app approval; dustforge #87) → the built-in default. A relay move then takes one
 // approval and no client edits. The registry answer is cached for an hour and never persisted into the file.
-let _registryCache = { at: 0, endpoint: null };
+// The cache belongs to the registry that answered: configure({ baseUrl }) to another DemiPass asks that one (#18 review P2).
+let _registryCache = { at: 0, endpoint: null, base: null };
 async function _conduitRegistryEndpoint() {
-  if (Date.now() - _registryCache.at < 3600000) return _registryCache.endpoint;
+  const base = config.baseUrl || 'https://api.dustforge.com';
+  if (_registryCache.base === base && Date.now() - _registryCache.at < 3600000) return _registryCache.endpoint;
   let endpoint = null;
-  try { const d = await _conduitHttp('GET', '/api/services/conduit', null, null, config.baseUrl || 'https://api.dustforge.com'); endpoint = d && d.endpoint ? String(d.endpoint).replace(/\/+$/, '') : null; }
+  try { const d = await _conduitHttp('GET', '/api/services/conduit', null, null, base); endpoint = d && d.endpoint ? String(d.endpoint).replace(/\/+$/, '') : null; }
   catch { endpoint = null; }
-  _registryCache = { at: Date.now(), endpoint };
+  _registryCache = { at: Date.now(), endpoint, base };
   return endpoint;
 }
 async function _conduitResolveUrl() {
@@ -1036,7 +1038,7 @@ module.exports = {
   verifyServiceReceipt: require('./services').verifyReceipt,
   // Conduit (agent relay by name; docs/conduit.md)
   conduitConfig,
-  _conduitRegistryReset: () => { _registryCache = { at: 0, endpoint: null }; },
+  _conduitRegistryReset: () => { _registryCache = { at: 0, endpoint: null, base: null }; },
   conduitOnboard,
   conduitSend,
   conduitInbox,

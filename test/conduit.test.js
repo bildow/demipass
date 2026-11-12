@@ -185,6 +185,15 @@ dpSrv.listen(0, '127.0.0.1', () => cdSrv.listen(0, '127.0.0.1', async () => {
     const f2 = JSON.parse(fs.readFileSync(process.env.CONDUIT_CONFIG, 'utf8')); assert.strictEqual(f2.url, undefined);
     assert.strictEqual(dp.registryHits, 2, 'registry answer is cached');
   });
+  await check('configure({ baseUrl }) to another DemiPass asks that registry, not the cached answer (#18 review P2)', async () => {
+    const other = http.createServer((req, res) => json(res, 200, { slug: 'conduit', endpoint: 'http://127.0.0.1:7' }));
+    await new Promise((r) => other.listen(0, '127.0.0.1', r));
+    demipass.configure({ baseUrl: `http://127.0.0.1:${other.address().port}`, bearerToken: SESSION });
+    const s = await demipass.conduitStatus();
+    assert.strictEqual(s.url, 'http://127.0.0.1:7'); assert.strictEqual(s.url_source, 'registry');
+    other.close(); demipass.configure({ baseUrl: dpBase, bearerToken: SESSION });
+    assert.strictEqual((await demipass.conduitStatus()).url, cdBase, 'back on the first DemiPass: its own registry answer');
+  });
   await check('an explicit url wins over the registry and is persisted', async () => {
     const r = await demipass.conduitOnboard({ url: cdBase }); assert.strictEqual(r.url_source, 'argument');
     assert.strictEqual(JSON.parse(fs.readFileSync(process.env.CONDUIT_CONFIG, 'utf8')).url, cdBase);
