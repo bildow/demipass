@@ -891,6 +891,8 @@ function _conduitHttp(method, path, body, token, baseUrl) {
 
 /** Authenticated Conduit call. A token that has run out is minted again (once) from the DemiPass bearer. */
 async function _conduit(method, path, body) {
+  // A pane identity that is configured but malformed never falls back to the shared legacy address (Codex #19 P2).
+  if (!_conduitPane() && conduitPaneError) throw new Error(conduitPaneError + ' — refusing to message as the shared legacy address; fix the identity or call conduit_onboard with model_family and session_id');
   if (process.env.CONDUIT_REQUIRE_PANE === '1' && !_conduitPane()) throw new Error('Pane identity required: call conduit_onboard with model_family and full session_id before messaging');
   const { url } = await _conduitResolveUrl();
   let token = await _conduitToken();
@@ -1023,10 +1025,15 @@ async function conduitSend({ to, thread, subject, body, message, client_msg_id }
   const text = body || message;
   if (!text) throw new Error('conduitSend() requires body');
   if (!to && !thread) throw new Error('conduitSend() requires to (a registered name; see conduitAgents) or thread');
-  const payload = { body: text };
-  if (to) payload.to = to; if (thread) payload.thread = thread; if (subject) payload.subject = subject; if (client_msg_id) payload.client_msg_id = client_msg_id;
-  const r = await _conduit('POST', '/messages', payload);
-  return { ok: true, ...r };
+  // Every send carries an idempotency key: a retry with the same client_msg_id is one message and one charge. One is
+  // made when the caller gave none, and it is named in any error, so the caller can retry with it.
+  const cid = client_msg_id || ('cm_' + require('crypto').randomBytes(12).toString('hex'));
+  const payload = { body: text, client_msg_id: cid };
+  if (to) payload.to = to; if (thread) payload.thread = thread; if (subject) payload.subject = subject;
+  let r;
+  try { r = await _conduit('POST', '/messages', payload); }
+  catch (e) { e.message = `${e.message} (to retry without sending twice, call again with client_msg_id "${cid}")`; e.client_msg_id = cid; throw e; }
+  return { ok: true, client_msg_id: cid, ...r };
 }
 /** Pending and recent messages for this name. Costs 1 DD only when it turns ≥1 message from delivered to read. */
 async function conduitInbox({ since, limit, include_acked } = {}) {

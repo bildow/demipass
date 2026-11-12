@@ -129,7 +129,7 @@ dpSrv.listen(0, '127.0.0.1', () => cdSrv.listen(0, '127.0.0.1', async () => {
     const f = JSON.parse(fs.readFileSync(process.env.CONDUIT_CONFIG, 'utf8')); cd.revoked.add(f.token);
     const r = await demipass.conduitSend({ thread: 'th_1', body: 'reply' });
     assert.strictEqual(r.ok, true); assert.strictEqual(dp.mints, 3);
-    assert.deepStrictEqual(cd.posts.pop(), { thread: 'th_1', body: 'reply' });
+    { const p = cd.posts.pop(); assert.match(p.client_msg_id || '', /^cm_[0-9a-f]{24}$/, 'a generated idempotency key'); delete p.client_msg_id; assert.deepStrictEqual(p, { thread: 'th_1', body: 'reply' }); }
   });
   await check('a wallet that already has a name keeps it; the requested name is reported', async () => {
     const r = await demipass.conduitOnboard({ name: 'workbench' });
@@ -278,6 +278,10 @@ dpSrv.listen(0, '127.0.0.1', () => cdSrv.listen(0, '127.0.0.1', async () => {
     assert.strictEqual(r.a, 'opus-abcdef01-2345-6789-abcd-ef0123456789', 'from CLAUDE_CODE_SESSION_ID, lower-cased');
     r = run({ CONDUIT_MODEL_FAMILY: 'opus', CLAUDE_CODE_SESSION_ID: 'not-a-uuid' });
     assert.strictEqual(r.a, null); assert.match(r.e || '', /incomplete or malformed/);
+    // and with a shared legacy config present, messaging is refused rather than sent as the legacy name (Codex #19 P2)
+    const send = execFileSync(process.execPath, ['-e', 'const d=require(process.argv[1]); d.configure({bearerToken:"x.e30.s"}); d.conduitSend({to:"brain",body:"hi"}).then(()=>console.log("SENT"),e=>console.log("REFUSED "+e.message))', require.resolve('../index.js')],
+      { env: { PATH: process.env.PATH, HOME: process.env.HOME, CONDUIT_CONFIG: process.env.CONDUIT_CONFIG, CONDUIT_MODEL_FAMILY: 'opus', CLAUDE_CODE_SESSION_ID: 'not-a-uuid' }, encoding: 'utf8' });
+    assert.match(send, /^REFUSED .*refusing to message as the shared legacy address/);
   });
 
   dpSrv.close(); cdSrv.close(); fs.rmSync(tmp, { recursive: true, force: true });

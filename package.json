@@ -59,6 +59,7 @@
     "docs/security-stance.md",
     ".env.example",
     "http-json.js",
-    "docs/conduit.md"
+    "docs/conduit.md",
+    "fleetgate-admission.js"
   ]
 }
