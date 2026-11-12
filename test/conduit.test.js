@@ -198,6 +198,14 @@ dpSrv.listen(0, '127.0.0.1', () => cdSrv.listen(0, '127.0.0.1', async () => {
     const h = hits; await demipass.conduitStatus(); assert.strictEqual(hits, h, 'an answer is cached');
     flaky.close(); demipass.configure({ baseUrl: dpBase, bearerToken: SESSION });
   });
+  await check('a DemiPass hosted under a path keeps that path in the registry lookup (#18 review round 3)', async () => {
+    const sub = http.createServer((req, res) => req.url === '/dp/api/services/conduit' ? json(res, 200, { slug: 'conduit', endpoint: 'http://127.0.0.1:9' }) : json(res, 404, {}));
+    await new Promise((r) => sub.listen(0, '127.0.0.1', r));
+    demipass.configure({ baseUrl: `http://127.0.0.1:${sub.address().port}/dp/`, bearerToken: SESSION });
+    const s = await demipass.conduitStatus();
+    assert.strictEqual(s.url, 'http://127.0.0.1:9'); assert.strictEqual(s.url_source, 'registry');
+    sub.close(); demipass.configure({ baseUrl: dpBase, bearerToken: SESSION });
+  });
   await check('configure({ baseUrl }) to another DemiPass asks that registry, not the cached answer (#18 review P2)', async () => {
     const other = http.createServer((req, res) => json(res, 200, { slug: 'conduit', endpoint: 'http://127.0.0.1:7' }));
     await new Promise((r) => other.listen(0, '127.0.0.1', r));

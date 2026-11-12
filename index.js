@@ -754,7 +754,8 @@ async function _conduitRegistryEndpoint() {
   // Only an answer is cached (an endpoint, or "none set"); a failed lookup (timeout, 5xx) is not, so the next call asks
   // again instead of using the default for an hour (#18 review round 2).
   let d;
-  try { d = await _conduitHttp('GET', '/api/services/conduit', null, null, base); }
+  // Relative to the base (not "/api/..."), so a DemiPass hosted under a path keeps it (#18 review round 3).
+  try { d = await _conduitHttp('GET', 'api/services/conduit', null, null, String(base).replace(/\/+$/, '')); }
   catch { return null; }
   const endpoint = d && d.endpoint ? String(d.endpoint).replace(/\/+$/, '') : null;
   _registryCache = { at: Date.now(), endpoint, base };
