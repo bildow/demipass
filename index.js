@@ -690,11 +690,47 @@ async function rotateBlind({ ref, target_host, target_user, reason } = {}) {
 const CONDUIT_DEFAULT_URL = 'http://phasewhip.taildb5a42.ts.net:8080';
 const CONDUIT_RENEW_BEFORE_MS = 5 * 60 * 1000;
 
-function _conduitConfigFile() {
+let conduitPane = null;
+function conduitPaneAddress({ model_family, session_id } = {}) {
+  if (!/^[a-z][a-z0-9]{0,14}$/.test(model_family || '') ||
+      !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(session_id || ''))
+    throw new Error('model_family (lowercase family) and full lowercase UUID session_id required');
+  return `${model_family}-${session_id}`;
+}
+function _conduitPane() {
+  if (conduitPane) return conduitPane;
+  if (process.env.CONDUIT_MODEL_FAMILY || process.env.CONDUIT_SESSION_ID) {
+    const p = { model_family: process.env.CONDUIT_MODEL_FAMILY,
+      session_id: process.env.CONDUIT_SESSION_ID || process.env.CODEX_THREAD_ID || process.env.CLAUDE_SESSION_ID };
+    conduitPaneAddress(p); return p;
+  }
+  return null;
+}
+function _conduitSharedFile() {
   return process.env.CONDUIT_CONFIG || require('path').join(require('os').homedir(), '.config', 'demipass', 'conduit.json');
 }
+function _conduitConfigFile() {
+  const p = _conduitPane();
+  return p ? require('path').join(require('path').dirname(_conduitSharedFile()), 'conduit-panes', conduitPaneAddress(p) + '.json') : _conduitSharedFile();
+}
+function _conduitLoad(file) {
+  try {
+    const value = JSON.parse(require('fs').readFileSync(file, 'utf8'));
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid Conduit config');
+    return value;
+  } catch (e) { if (e.code === 'ENOENT') return null; throw new Error('Conduit config unreadable or malformed: ' + file); }
+}
 function _conduitReadFile() {
-  try { return JSON.parse(require('fs').readFileSync(_conduitConfigFile(), 'utf8')); } catch { return null; }
+  const pane = _conduitPane();
+  const own = _conduitLoad(_conduitConfigFile());
+  if (!pane) return own;
+  if (own && own.name && own.name !== conduitPaneAddress(pane)) throw new Error('pane config address mismatch');
+  const shared = _conduitLoad(_conduitSharedFile()) || {};
+  const inherited = {};
+  // Same payer/consent, separate routing addresses. Never inherit another pane's name or ownership.
+  for (const k of ['token', 'token_id', 'expires_at', 'cap_dd', 'ttl', 'consent_id', 'daily_cap_dd', 'wallet', 'url', 'minted_at'])
+    if (shared[k] !== undefined) inherited[k] = shared[k];
+  return { ...inherited, ...(own || {}) };
 }
 function _conduitWriteFile(cfg) {
   const fs = require('fs'); const path = require('path'); const file = _conduitConfigFile();
@@ -723,9 +759,9 @@ function conduitConfig() {
   const expiresAt = f.expires_at || (claims && claims.exp ? new Date(claims.exp * 1000).toISOString() : null);
   const cfg = {
     file: _conduitConfigFile(),
-    file_present: !!_conduitReadFile(),
+    file_present: require('fs').existsSync(_conduitConfigFile()),
     url: String(f.url || process.env.CONDUIT_URL || CONDUIT_DEFAULT_URL).replace(/\/+$/, ''),
-    name: f.name || process.env.CONDUIT_SENDER || '',
+    name: _conduitPane() ? (f.name || '') : (f.name || process.env.CONDUIT_SENDER || ''),
     token,
     token_id: f.token_id || (claims && claims.jti) || null,
     expires_at: expiresAt,
@@ -739,6 +775,7 @@ function conduitConfig() {
   };
   cfg.token_valid = !!token && (!expiresAt || Date.parse(expiresAt) - Date.now() > CONDUIT_RENEW_BEFORE_MS);
   cfg.onboarded = !!(cfg.name && cfg.token);
+  cfg.pane_address = _conduitPane() ? conduitPaneAddress(_conduitPane()) : null;
   if (envTok && !envTokOk && !f.token) cfg.env_token_ignored = 'CONDUIT_TOKEN is not a DemiPass service token for conduit (aud svc:conduit); run conduit_onboard';
   return cfg;
 }
@@ -824,6 +861,7 @@ function _conduitHttp(method, path, body, token, baseUrl) {
       timeout: 15000,
     };
     if (token) opts.headers['Authorization'] = 'Bearer ' + token;
+    if (_conduitPane()) opts.headers['X-Conduit-Address'] = conduitPaneAddress(_conduitPane());
     if (postData) opts.headers['Content-Length'] = Buffer.byteLength(postData);
     const req = proto.request(opts, (res) => {
       let data = '';
@@ -865,7 +903,16 @@ async function _conduit(method, path, body) {
  * A missing consent returns {status:'approval_pending', approval_id}: approve it in the DemiPass app, then call again
  * with approval_id. Idempotent otherwise: run it any time to confirm or repair the setup.
  */
-async function conduitOnboard({ name, owns, description, daily_cap_dd, cap_dd, ttl, approval_id, url, renew } = {}) {
+async function conduitOnboard({ name, model_family, session_id, owns, description, daily_cap_dd, cap_dd, ttl, approval_id, url, renew } = {}) {
+  if (model_family !== undefined || session_id !== undefined) {
+    const proposed = { model_family, session_id };
+    conduitPaneAddress(proposed);
+    const current = _conduitPane();
+    if (current && conduitPaneAddress(current) !== conduitPaneAddress(proposed)) throw new Error('this MCP process is bound to another pane; use a separate process');
+    conduitPane = proposed;
+  }
+  const pane = _conduitPane();
+  if (pane && name && name !== conduitPaneAddress(pane)) throw new Error('name must match model-family-session-id');
   const steps = [];
   const fs = require('fs');
   const prior = _conduitReadFile() || {};
@@ -882,7 +929,7 @@ async function conduitOnboard({ name, owns, description, daily_cap_dd, cap_dd, t
   // 2. identity
   if (!config.bearerToken) return { ok: false, step: 'identity', error: 'DEMIPASS_TOKEN is not set; Conduit tokens are minted from this session\'s DemiPass identity', steps };
   const me = _jwtClaims(config.bearerToken) || {};
-  const wantName = String(name || prior.name || process.env.CONDUIT_SENDER || me.username || '').trim();
+  const wantName = String((pane && conduitPaneAddress(pane)) || name || prior.name || process.env.CONDUIT_SENDER || me.username || '').trim();
   if (!wantName) return { ok: false, step: 'name', error: 'name required (no CONDUIT_SENDER, no username in the DemiPass token)', steps };
   const dp = _conduitServices();
 
@@ -927,7 +974,7 @@ async function conduitOnboard({ name, owns, description, daily_cap_dd, cap_dd, t
       return fn(cfg.token);
     }
   };
-  const register = async (n, o) => withToken((t) => _conduitHttp('POST', '/agents/register', { name: n, owns: o, description: description || prior.description || undefined }, t, baseUrl));
+  const register = async (n, o) => withToken((t) => _conduitHttp('POST', '/agents/register', { name: n, ...(pane || {}), owns: o, description: description || prior.description || undefined }, t, baseUrl));
   const ownsFor = async (n) => {
     if (Array.isArray(owns)) return owns;
     // Through withToken: a revoked cached token is minted again here too, so the directory answer (not a stale fallback)
@@ -937,6 +984,7 @@ async function conduitOnboard({ name, owns, description, daily_cap_dd, cap_dd, t
   };
   try { reg = await register(wantName, await ownsFor(wantName)); }
   catch (e) {
+    if (pane) return { ok: false, step: 'register', status: e.status, error: e.message, requested: wantName, steps };
     if (e.status === 409 && e.body && e.body.error === 'wallet_has_name' && e.body.name) {
       finalName = e.body.name;
       steps.push({ step: 'register', note: `this wallet is already "${finalName}" on Conduit (one name per wallet); keeping it`, requested: wantName });
@@ -945,6 +993,7 @@ async function conduitOnboard({ name, owns, description, daily_cap_dd, cap_dd, t
       return { ok: false, step: 'register', status: 409, error: `name "${wantName}" belongs to another wallet; choose another`, steps };
     } else return { ok: false, step: 'register', status: e.status, error: e.message, steps };
   }
+  if (pane && reg.name !== wantName) return { ok: false, step: 'register', error: 'relay returned a different address', steps };
   steps.push({ step: 'register', ok: true, name: reg.name, owns: reg.owns, via: reg.via });
   _conduitWriteFile({ ...(_conduitReadFile() || {}), ...(url ? { url: baseUrl } : {}), name: reg.name, owns: reg.owns, description: reg.description || '', consent_id: consent.id, daily_cap_dd: consent.daily_cap_dd, wallet: me.sub || cfg.wallet || null, onboarded_at: prior.onboarded_at || new Date().toISOString() });
 
@@ -955,7 +1004,7 @@ async function conduitOnboard({ name, owns, description, daily_cap_dd, cap_dd, t
 
   const final = conduitConfig();
   const mode = fs.statSync(final.file).mode & 0o777;
-  return { ok: true, url: baseUrl, url_source: resolved.source, name: reg.name, owns: reg.owns, wallet: final.wallet, consent: { id: consent.id, daily_cap_dd: consent.daily_cap_dd },
+  return { ok: listed, url: baseUrl, url_source: resolved.source, name: reg.name, owns: reg.owns, wallet: final.wallet, consent: { id: consent.id, daily_cap_dd: consent.daily_cap_dd },
     token: { token_id: final.token_id, expires_at: final.expires_at, cap_dd: final.cap_dd, minted }, config_file: final.file, config_mode: mode.toString(8), steps,
     note: 'Every conduit_* call re-reads this file and mints a new token from the DemiPass session when this one runs out; no restart needed. Panes started before this file existed keep working through it too.' };
 }
@@ -978,6 +1027,12 @@ async function conduitInbox({ since, limit, include_acked } = {}) {
   return _conduit('GET', '/inbox' + (s ? `?${s}` : ''));
 }
 async function conduitAck({ msg_id } = {}) { if (!msg_id) throw new Error('msg_id required'); return _conduit('POST', `/messages/${encodeURIComponent(msg_id)}/ack`, {}); }
+async function conduitHistory({ since = 0, limit = 100 } = {}) {
+  return _conduit('GET', `/history?since=${encodeURIComponent(since)}&limit=${encodeURIComponent(limit)}`);
+}
+async function conduitReceipts({ since = 0, limit = 100 } = {}) {
+  return _conduit('GET', `/receipts?since=${encodeURIComponent(since)}&limit=${encodeURIComponent(limit)}`);
+}
 async function conduitReceipt({ msg_id } = {}) { if (!msg_id) throw new Error('msg_id required'); return _conduit('GET', `/messages/${encodeURIComponent(msg_id)}`); }
 async function conduitForward({ msg_id, to, note } = {}) { if (!msg_id || !to) throw new Error('msg_id and to required'); return _conduit('POST', `/messages/${encodeURIComponent(msg_id)}/forward`, { to, note }); }
 async function conduitAgents() { const r = await _conduit('GET', '/agents'); return { agents: r.agents || r }; }
@@ -1043,6 +1098,9 @@ module.exports = {
   ServiceError: require('./services').ServiceError,
   verifyServiceReceipt: require('./services').verifyReceipt,
   // Conduit (agent relay by name; docs/conduit.md)
+  conduitPaneAddress,
+  conduitHistory,
+  conduitReceipts,
   conduitConfig,
   _conduitRegistryReset: () => { _registryCache = { at: 0, endpoint: null, base: null }; },
   conduitOnboard,

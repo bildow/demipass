@@ -56,13 +56,14 @@ const cdSrv = http.createServer(async (req, res) => {
   const tok = (req.headers.authorization || '').replace(/^Bearer /, '');
   if (!dp.issued.has(tok) || cd.revoked.has(tok)) return json(res, 401, { error: 'invalid_token' });
   if (req.method === 'POST' && req.url === '/agents/register') {
-    if (cd.walletName && cd.walletName !== b.name) return json(res, 409, { error: 'wallet_has_name', name: cd.walletName });
-    const existed = cd.agents.has(b.name); cd.walletName = b.name;
+    if (!b.session_id && cd.walletName && cd.walletName !== b.name) return json(res, 409, { error: 'wallet_has_name', name: cd.walletName });
+    const existed = cd.agents.has(b.name); if (!b.session_id) cd.walletName = b.name;
     cd.agents.set(b.name, { name: b.name, owns: (b.owns || []).map((s) => s.toLowerCase()).sort(), description: b.description || '' });
     return json(res, existed ? 200 : 201, { ...cd.agents.get(b.name), via: 'own' });
   }
   if (req.method === 'GET' && req.url === '/agents') return json(res, 200, { agents: [...cd.agents.values()] });
   if (req.method === 'POST' && req.url === '/messages') { cd.posts.push(b); return json(res, 201, { msg_id: `msg_${cd.posts.length}`, thread: 'th_1', to: b.to, state: 'delivered', charge_id: 'sc_1' }); }
+  if (req.method === 'GET' && (req.url.startsWith('/history?') || req.url.startsWith('/receipts?'))) return json(res, 200, { address: req.headers['x-conduit-address'], route: req.url });
   if (req.method === 'GET' && req.url.startsWith('/inbox')) { cd.reads++; return json(res, 200, { agent: cd.walletName, messages: [], next_since: 0 }); }
   json(res, 404, { error: 'not_found' });
 });
@@ -222,6 +223,38 @@ dpSrv.listen(0, '127.0.0.1', () => cdSrv.listen(0, '127.0.0.1', async () => {
     const r = await demipass.conduitOnboard({ url: cdBase }); assert.strictEqual(r.url_source, 'argument');
     assert.strictEqual(JSON.parse(fs.readFileSync(process.env.CONDUIT_CONFIG, 'utf8')).url, cdBase);
     assert.strictEqual((await demipass.conduitStatus()).url_source, 'config_file');
+  });
+
+  await check('pane onboarding keeps shared payer/cap, exact UUID address, separate file and header', async () => {
+    const before = fs.readFileSync(process.env.CONDUIT_CONFIG, 'utf8');
+    const shared = JSON.parse(before);
+    const family = 'astra', sid = '11111111-2222-3333-4444-555555555555';
+    const expected = `${family}-${sid}`;
+    const r = await demipass.conduitOnboard({ model_family: family, session_id: sid, url: cdBase });
+    assert.strictEqual(r.ok, true); assert.strictEqual(r.name, expected);
+    assert.strictEqual(r.wallet, shared.wallet);
+    assert.strictEqual(r.consent.daily_cap_dd, shared.daily_cap_dd);
+    assert.notStrictEqual(r.config_file, process.env.CONDUIT_CONFIG);
+    assert.strictEqual(fs.readFileSync(process.env.CONDUIT_CONFIG, 'utf8'), before);
+    assert.strictEqual(fs.statSync(r.config_file).mode & 0o777, 0o600);
+    assert.strictEqual((await demipass.conduitHistory({ since: 7, limit: 2 })).address, expected);
+    assert.strictEqual((await demipass.conduitReceipts({ since: 8 })).route, '/receipts?since=8&limit=100');
+    await assert.rejects(demipass.conduitOnboard({ model_family: 'sol', session_id: sid }), /another pane/);
+    assert.throws(() => demipass.conduitPaneAddress({ model_family: '../bad', session_id: sid }));
+    assert.throws(() => demipass.conduitPaneAddress({ model_family: family, session_id: 'short-prefix' }));
+  });
+  await check('pane mode refuses a relay that falls back to a different name', async () => {
+    const old = http.createServer((req, res) => {
+      if (req.url === '/health') return json(res, 200, { ok: true });
+      if (req.url === '/agents') return json(res, 200, []);
+      return json(res, 409, { error: 'wallet_has_name', name: 'aaron' });
+    });
+    await new Promise(r => old.listen(0, '127.0.0.1', r));
+    try {
+      const r = await demipass.conduitOnboard({ url: `http://127.0.0.1:${old.address().port}` });
+      assert.strictEqual(r.ok, false); assert.strictEqual(r.step, 'register');
+      assert.notStrictEqual(demipass.conduitConfig().name, 'aaron');
+    } finally { old.close(); }
   });
 
   dpSrv.close(); cdSrv.close(); fs.rmSync(tmp, { recursive: true, force: true });
