@@ -92,6 +92,7 @@ class DemiPassMeter {
       v.charge.service !== this.service ||
       v.charge.idempotency_key !== key ||
       v.charge.payer !== who.wallet ||
+      v.charge.token_id !== who.token_id ||
       v.charge.action !== "release" ||
       v.charge.dd !== 2 ||
       v.charge.cost_dd !== 2

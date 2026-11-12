@@ -39,6 +39,9 @@ test("DemiPass adapter binds issuer, service, exact 2-DD price, approval, charge
   f.state.badLookup = false;
   f.state.badReceipt = true;
   await assert.rejects(m.charge(who, 2, "one"), /receipt/);
+  f.state.badReceipt = false;
+  f.state.wrongToken = true;
+  await assert.rejects(m.charge(who, 2, "one"), /receipt/);
   await assert.rejects(m.identify("unknown-token", {}));
   assert.throws(() => new DemiPassMeter({ ...f.config, service: "conduit" }));
   assert.throws(() => request("http://example.com", {}, {}), /HTTPS/);

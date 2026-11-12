@@ -38,6 +38,7 @@ async function meterFixture() {
         type: "dustforge_service_charge",
         issuer,
         ...charge,
+        ...(state.wrongToken ? { token_id: "another-token" } : {}),
       }),
       sig = c
         .sign(
