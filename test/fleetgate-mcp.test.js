@@ -148,6 +148,16 @@ test('the session switching while a token is minted: the token stays bound to th
   assert.strictEqual((await call('fleetgate_status')).onboarded, true, "…and A keeps it");
 });
 
+test('an expired session: submit returns DemiPass\'s own refusal, not "the door could not be reached" (#17 review round 5)', async () => {
+  const doorBefore = state.doorCalls.length;
+  process.env.DEMIPASS_TOKEN = jwt('did:key:zExpired');   // DemiPass answers 401 to it
+  const r = await call('fleetgate_submit', { repo: 'boltcluster', title: 't', files: [{ path: 'c.md', content: 'z' }], submission_id: 'sub-expired-1' });
+  process.env.DEMIPASS_TOKEN = SESSION_A;
+  assert.strictEqual(r.ok, false); assert.strictEqual(r.http_status, 401, JSON.stringify(r));
+  assert.doesNotMatch(JSON.stringify(r), /could not be reached/); assert.match(r.note, /nothing was sent to the door/);
+  assert.strictEqual(r.submission_id, 'sub-expired-1'); assert.strictEqual(state.doorCalls.length, doorBefore);
+});
+
 test('prices and status', async () => {
   const p = await call('fleetgate_prices'); assert.strictEqual(p.ok, true); assert.strictEqual(p.actions[0].price_dd, 696);
   const s = await call('fleetgate_status'); assert.strictEqual(s.onboarded, true); assert.strictEqual(s.door_health.ok, true); assert.ok(s.token_id);

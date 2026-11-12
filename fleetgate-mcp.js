@@ -129,10 +129,17 @@ async function submit({ repo, title, body, files, submission_id }) {
   if (!SUBMISSION_RE.test(sid)) return { ok: false, error: 'submission_id: 8-64 letters, digits, _ or -, starting with a letter or digit' };
   const payload = { submission_id: sid, repo, title, ...(body ? { body } : {}), files };
   const url = (await door()) + '/v1/pulls';
+  // Minting is DemiPass's answer, not the door's: its refusal (an expired session, no consent) comes back as it is, with
+  // the submission id, and says the door was not contacted (#17 review round 5).
+  const mint = async () => { try { return { auth: await token() }; } catch (e) { return { refused: { ...errBody(e), submission_id: sid, note: 'DemiPass refused the token; nothing was sent to the door.' } }; } };
   let r;
+  let m = await mint(); if (m.refused) return m.refused;
   try {
-    r = await http('POST', url, { auth: await token(), body: payload });
-    if (r.status === 401) { held = null; r = await http('POST', url, { auth: await token(), body: payload }); }   // expired or revoked: re-mint once
+    r = await http('POST', url, { auth: m.auth, body: payload });
+    if (r.status === 401) {   // expired or revoked: re-mint once
+      held = null; m = await mint(); if (m.refused) return m.refused;
+      r = await http('POST', url, { auth: m.auth, body: payload });
+    }
   } catch (e) {
     // The door may have charged before the connection dropped: hand back the id, so the retry replays (#17 review H1).
     if (e.result) return { ...e.result, submission_id: sid };
