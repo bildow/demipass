@@ -48,7 +48,7 @@ async function door() {
 const DEFAULT_CAP = Number(process.env.FLEETGATE_DAILY_CAP_DD || 3000);   // one submission is ~700 DD (submit + review round)
 const SERVICE = 'fleetgate';
 
-function dp() { return services({ token: sessionToken(), baseUrl: DEMIPASS_URL }); }
+function dp(token = sessionToken()) { return services({ token, baseUrl: DEMIPASS_URL }); }
 
 // The service token: memory only.
 let held = null;   // { token, token_id, expires_at, cap_dd }
@@ -59,19 +59,24 @@ const TOKEN_RE = /^[A-Za-z0-9_.-]{20,4096}$/;
 // The wallet the live session is for (the JWT's sub). A held token is used only by that same wallet: if the machine's
 // session changes to another wallet while this server runs, the held token is dropped and one is minted for the new
 // wallet (#17 review round 2, P1).
-const sessionSub = () => { try { const t = sessionToken(); return t ? JSON.parse(Buffer.from(String(t).split('.')[1], 'base64url').toString()).sub || null : null; } catch (_) { return null; } };
-const live = () => { if (!held) return false; const me = sessionSub(); if (!me || me !== held.wallet) { held = null; return false; } return Date.parse(held.expires_at) - Date.now() > 60 * 1000; };
+const subOf = (t) => { try { return t ? JSON.parse(Buffer.from(String(t).split('.')[1], 'base64url').toString()).sub || null : null; } catch (_) { return null; } };
+const sessionSub = () => subOf(sessionToken());
+// Kept for its wallet, never used for another (no re-mint, no extra charge, when that wallet's session comes back).
+const live = () => { if (!held) return false; const me = sessionSub(); if (!me || me !== held.wallet) return false; return Date.parse(held.expires_at) - Date.now() > 60 * 1000; };
 
 async function onboard({ daily_cap_dd, approval_id } = {}, { fileConsent = true } = {}) {
-  if (!sessionToken()) return { ok: false, error: process.env.DEMIPASS_EXPECT_DID ? `no DemiPass session for ${process.env.DEMIPASS_EXPECT_DID} (the wallet this server was onboarded as) on this machine` : 'no DemiPass session on this machine: sign in first (demipass_login, or set DEMIPASS_TOKEN)' };
+  // One session for the whole onboarding: the token is minted with it and held for its wallet, even if the machine's
+  // session changes while this runs (#17 review round 3).
+  const session = sessionToken();
+  const api = dp(session), wallet = subOf(session);
+  if (!session) return { ok: false, error: process.env.DEMIPASS_EXPECT_DID ? `no DemiPass session for ${process.env.DEMIPASS_EXPECT_DID} (the wallet this server was onboarded as) on this machine` : 'no DemiPass session on this machine: sign in first (demipass_login, or set DEMIPASS_TOKEN)' };
   if (approval_id && !daily_cap_dd && pendingCaps.has(Number(approval_id))) daily_cap_dd = pendingCaps.get(Number(approval_id));
   if (!fileConsent) {
     // Submitting never files a consent (#17 review L3): after a person said no, a submit must not ask their phone again.
-    const all = await dp().consents();
+    const all = await api.consents();
     if (!(all.mine || []).some(c => c.service === SERVICE && c.status === 'active')) return { ok: false, status: 'not_onboarded', error: 'not onboarded: run fleetgate_onboard and approve it in the DemiPass app' };
   }
   // services().onboard's two steps; the token carries a follow-up budget so the submission's review rounds can bill.
-  const api = dp();
   const c = await consentAtLeast(api, { service: SERVICE, cap: daily_cap_dd || DEFAULT_CAP, explicit: Boolean(daily_cap_dd), approvalId: approval_id });
   let r = c;
   if (!c.pending) {
@@ -86,7 +91,7 @@ async function onboard({ daily_cap_dd, approval_id } = {}, { fileConsent = true 
              next: `Approve "let a wallet pay fleetgate" (${r.pending.daily_cap_dd} DD/day) in the DemiPass app (Requests), then call fleetgate_onboard again with approval_id ${r.pending.approval_id} and daily_cap_dd ${r.pending.daily_cap_dd}.` };
   }
   if (!TOKEN_RE.test(String(r.token.token || ''))) return { ok: false, error: 'DemiPass returned a malformed service token; not held' };
-  held = { token: r.token.token, token_id: r.token.token_id, expires_at: r.token.expires_at, cap_dd: r.token.cap_dd, wallet: sessionSub() };
+  held = { token: r.token.token, token_id: r.token.token_id, expires_at: r.token.expires_at, cap_dd: r.token.cap_dd, wallet };
   consentSeen = r.consent || consentSeen;
   const price = await submitPrice();
   const low = price && r.consent && r.consent.daily_cap_dd < price;

@@ -26,6 +26,7 @@ const dpSrv = http.createServer(async (req, res) => {
   }
   if (req.method === 'POST' && req.url === '/api/services/token') {
     const n = state.minted.length + 1; state.minted.push(b);
+    if (state.switchDuringMint) { state.switchDuringMint = false; process.env.DEMIPASS_TOKEN = SESSION_B; }   // the machine's session changes mid-mint
     return json(res, 201, { ok: true, token: 'svc-token-SECRET-aaaaaaaaaaaa-' + n, token_id: 'jti-' + n, service: b.service, cap_dd: b.cap_dd, expires_at: new Date(Date.now() + 3600e3).toISOString() });
   }
   json(res, 404, { error: 'no route' });
@@ -134,6 +135,17 @@ test('another wallet signed in while the server runs: the held token is not used
   process.env.DEMIPASS_TOKEN = SESSION_A;
   assert.strictEqual((await call('fleetgate_status')).onboarded, false, "back on wallet A: B's held token is not A's");
   assert.strictEqual((await call('fleetgate_onboard', { daily_cap_dd: 5000 })).ok, true, 'A gets its own token again');
+});
+
+test('the session switching while a token is minted: the token stays bound to the wallet that minted it (#17 review round 3)', async () => {
+  process.env.DEMIPASS_TOKEN = SESSION_A;
+  state.switchDuringMint = true;
+  const r = await call('fleetgate_onboard', { daily_cap_dd: 5000, renew: true });
+  assert.strictEqual(r.ok, true, JSON.stringify(r));
+  assert.strictEqual(process.env.DEMIPASS_TOKEN, SESSION_B, 'the switch happened during the mint');
+  assert.strictEqual((await call('fleetgate_status')).onboarded, false, "B does not get A's freshly minted token");
+  process.env.DEMIPASS_TOKEN = SESSION_A;
+  assert.strictEqual((await call('fleetgate_status')).onboarded, true, "…and A keeps it");
 });
 
 test('prices and status', async () => {
