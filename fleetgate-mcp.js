@@ -11,7 +11,7 @@
  *
  *   fleetgate_onboard({daily_cap_dd?, approval_id?})   consent (one app approval, once per wallet) + token
  *   fleetgate_prices()                                  the door's public price list
- *   fleetgate_submit({repo, title, files, body?, submission_id?})   one PR into atlas/<repo>; charged once (submit + review round)
+ *   fleetgate_submit({repo, title, files, body?, submission_id?})   one PR into atlas/<repo>; intake charged once; review calls metered separately
  *   fleetgate_status()                                  onboarded? token expiry, consent, door health
  *
  * The gate decides: a submitted PR is evaluated by the release controller under the signed charter like any other.
@@ -25,6 +25,7 @@ const { services } = require('./services.js');
 // This machine's live DemiPass session (DEMIPASS_TOKEN, else the demipass MCP entry, else the SDK login), read each
 // time it is needed: the MCP config entry holds no copy of it (#17 review M2).
 const { sessionToken, consentAtLeast } = require('./onboard.js');
+const { fleetgateAdmission } = require('./fleetgate-admission.js');
 
 const DEMIPASS_URL = (process.env.DEMIPASS_URL || 'https://api.dustforge.com').replace(/\/$/, '');
 const DOOR_DEFAULT = 'https://repo.dustroot.com/-/fleetgate/door';
@@ -45,7 +46,7 @@ async function door() {
   const bad = doorRefusal(u); if (bad) throw new Error(`FLEETGATE door ${u}: ${bad}`);
   return (doorCached = u);
 }
-const DEFAULT_CAP = Number(process.env.FLEETGATE_DAILY_CAP_DD || 3000);   // one submission is ~700 DD (submit + review round)
+const DEFAULT_CAP = Number(process.env.FLEETGATE_DAILY_CAP_DD || 3000);   // preserved default ceiling; an existing smaller consent is never silently raised
 const SERVICE = 'fleetgate';
 
 function dp(token = sessionToken()) { return services({ token, baseUrl: DEMIPASS_URL }); }
@@ -53,6 +54,7 @@ function dp(token = sessionToken()) { return services({ token, baseUrl: DEMIPASS
 // The service token: memory only.
 let held = null;   // { token, token_id, expires_at, cap_dd }
 let consentSeen = null;
+let admissionSeen = null;
 const pendingCaps = new Map();   // approval_id → the daily cap asked for: redeeming must repeat it (#17 review L4)
 // Token check before holding it: what the door accepts, so a malformed mint can never end up in a header error (L1).
 const TOKEN_RE = /^[A-Za-z0-9_.-]{20,4096}$/;
@@ -91,18 +93,21 @@ async function onboard({ daily_cap_dd, approval_id } = {}, { fileConsent = true 
              next: `Approve "let a wallet pay fleetgate" (${r.pending.daily_cap_dd} DD/day) in the DemiPass app (Requests), then call fleetgate_onboard again with approval_id ${r.pending.approval_id} and daily_cap_dd ${r.pending.daily_cap_dd}.` };
   }
   if (!TOKEN_RE.test(String(r.token.token || ''))) return { ok: false, error: 'DemiPass returned a malformed service token; not held' };
+  const ready = await fleetgateAdmission({ endpoint: await door(), token: r.token.token, wallet });
+  if (!ready.ok) { held = null; admissionSeen = null; return { ...ready, consent: { id: r.consent.id, daily_cap_dd: r.consent.daily_cap_dd } }; }
+  admissionSeen = ready.admission;
   held = { token: r.token.token, token_id: r.token.token_id, expires_at: r.token.expires_at, cap_dd: r.token.cap_dd, wallet };
   consentSeen = r.consent || consentSeen;
   const price = await submitPrice();
   const low = price && r.consent && r.consent.daily_cap_dd < price;
-  return { ok: true, service: SERVICE, consent: r.consent ? { id: r.consent.id, daily_cap_dd: r.consent.daily_cap_dd, existing: Boolean(r.existing) } : null,
+  return { ok: true, service: SERVICE, admission: admissionSeen, consent: r.consent ? { id: r.consent.id, daily_cap_dd: r.consent.daily_cap_dd, existing: Boolean(r.existing) } : null,
            token_id: held.token_id, expires_at: held.expires_at, cap_dd: held.cap_dd,
            ...(low ? { warning: `your daily consent (${r.consent.daily_cap_dd} DD) is below one submission (${price} DD): every submit would be refused. Call fleetgate_onboard with a higher daily_cap_dd to replace it (one approval).` } : {}) };
 }
 
 // A live token, minting one when the consent already exists; an onboarding that needs an approval is reported, not waited on.
 async function submitPrice() {
-  try { const r = await http('GET', (await door()) + '/v1/prices'); const a = ((r.data && r.data.actions) || []); return a.filter(x => ['submit', 'review'].includes(x.action)).reduce((n, x) => n + (x.price_dd || 0), 0) || null; }
+  try { const r = await http('GET', (await door()) + '/v1/prices'); const a = ((r.data && r.data.actions) || []); return a.filter(x => x.action === 'submit').reduce((n, x) => n + (x.price_dd || 0), 0) || null; }
   catch (_) { return null; }
 }
 async function token() {
@@ -153,26 +158,34 @@ async function submit({ repo, title, body, files, submission_id }) {
 
 async function status() {
   const health = await http('GET', (await door()) + '/health').catch(e => ({ status: 0, data: { error: e.message } }));
-  return { ok: true, door: await door(), door_health: health.status === 200 ? health.data : { http_status: health.status, ...(health.data || {}) },
-           onboarded: Boolean(live()), token_id: live() ? held.token_id : null, expires_at: live() ? held.expires_at : null,
-           consent: consentSeen ? { id: consentSeen.id, daily_cap_dd: consentSeen.daily_cap_dd } : null };
+  let ready;
+  try {
+    // Existing users self-reconcile on their next status call without filing consent or spending.
+    ready = held && held.wallet !== sessionSub() ? { ok:false, status:'wallet_changed', error:'The held token belongs to another wallet; onboard explicitly' } : live() ? await fleetgateAdmission({ endpoint: await door(), token: held.token, wallet: held.wallet }) : await onboard({}, { fileConsent: false });
+  } catch (e) { ready = errBody(e); }
+  admissionSeen = ready.ok ? ready.admission : null;
+  return { ok: health.status === 200 && health.data && health.data.ok === true && Boolean(ready.ok), door: await door(),
+    door_health: health.status === 200 ? health.data : { http_status: health.status, ...(health.data || {}) },
+    onboarded: Boolean(live() && ready.ok), admission: admissionSeen, ...(ready.ok ? {} : { readiness: ready }),
+    token_id: live() ? held.token_id : null, expires_at: live() ? held.expires_at : null,
+    consent: consentSeen ? { id: consentSeen.id, daily_cap_dd: consentSeen.daily_cap_dd } : null };
 }
 
 const TOOLS = [
   { name: 'fleetgate_onboard',
-    description: 'FLEETGATE: put this pane on the FLEETGATE release gate as its own DemiPass wallet. Checks for a consent to pay fleetgate; if there is none it files one (status approval_pending + approval_id) — the person approves it in the DemiPass app, then call again with approval_id. Then mints a fleetgate service token held only inside this MCP server (never shown). Run once per pane; re-minting after expiry is automatic.',
+    description: 'FLEETGATE: put this pane on the FLEETGATE release gate as its own DemiPass wallet. Checks for a consent to pay fleetgate; if there is none it files one (status approval_pending + approval_id) — the person approves it in the DemiPass app, then call again with approval_id. Then mints a fleetgate service token held only inside this MCP server (never shown). Also verifies the signed intake lane for this identity. Payment consent alone is not readiness. Re-minting and admission checks are automatic; this grants no merge authority.',
     inputSchema: { type: 'object', properties: {
-      daily_cap_dd: { type: 'integer', description: `Most fleetgate may charge this wallet per 24 h (default ${DEFAULT_CAP}; one submission is about 700 DD)` },
+      daily_cap_dd: { type: 'integer', description: `Most fleetgate may charge this wallet per 24 h (default ${DEFAULT_CAP}; intake and metered reviews share this cap; see prices)` },
       approval_id: { type: 'integer', description: 'The approval_id from an earlier approval_pending answer, once approved in the app' } } } },
   { name: 'fleetgate_prices', description: 'FLEETGATE: the door\'s public price list (DD per action, margin included).', inputSchema: { type: 'object', properties: {} } },
   { name: 'fleetgate_submit',
-    description: 'FLEETGATE: submit a pull request to a chartered repo under atlas/ through the door. Charged once (submit + one review round, see fleetgate_prices) to this pane\'s wallet. The gate evaluates it under the signed charter; this never merges or reviews. Not allowed: dotfiles, charters/, fleet/{controller,review,ci,door}/; at most 20 files, 128 KB each, 384 KB in all.',
+    description: 'FLEETGATE: submit a pull request to a chartered repo under atlas/ through the door. Intake charged once; review model calls billed separately (see fleetgate_prices) to this pane\'s wallet. The gate evaluates it under the signed charter; this never merges or reviews. Not allowed: dotfiles, charters/, fleet/{controller,review,ci,door}/; at most 20 files, 128 KB each, 384 KB in all.',
     inputSchema: { type: 'object', required: ['repo', 'title', 'files'], properties: {
       repo: { type: 'string', description: 'Repo name under atlas/ (e.g. boltcluster)' },
       title: { type: 'string' }, body: { type: 'string', description: 'PR description' },
       files: { type: 'array', items: { type: 'object', required: ['path', 'content'], properties: { path: { type: 'string' }, content: { type: 'string', description: 'The whole new file content' } } } },
       submission_id: { type: 'string', description: 'Idempotency key (8-64 of A-Z a-z 0-9 _ -). Reuse it to retry the same submission without a second charge; omitted → a fresh one, returned.' } } } },
-  { name: 'fleetgate_status', description: 'FLEETGATE: is this pane onboarded (token id and expiry, consent), and is the door up.', inputSchema: { type: 'object', properties: {} } },
+  { name: 'fleetgate_status', description: 'FLEETGATE: free readiness check: repairs existing consented sessions, verifies current signed admission and door health. No payment consent is filed.', inputSchema: { type: 'object', properties: {} } },
 ];
 const HANDLERS = {
   fleetgate_onboard: onboard,

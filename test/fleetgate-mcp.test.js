@@ -8,6 +8,8 @@ const http = require('http');
 // Sessions shaped like DemiPass JWTs: the server reads the wallet (sub) to bind a held token to it.
 const jwt = (sub) => 'eyJhbGciOiJFZERTQSJ9.' + Buffer.from(JSON.stringify({ sub, scope: 'transact' })).toString('base64url') + '.sig';
 const SESSION_A = jwt('did:key:zPaneA'), SESSION_B = jwt('did:key:zPaneB');
+const wallets = new Map();
+const admission = { ok:true,protocol:1,release_authorized:false,charter_sha256:'a'.repeat(64),lanes:[{name:'intake',repos:['boltcluster'],paths:['docs/**'],add_only:[],deny:[]}] };
 const state = { consents: [], approved: false, minted: [], doorCalls: [], doorRejectFirst: true, consentPosts: [], dropNext: false };
 function json(res, status, body) { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); }
 function readBody(req) { return new Promise(ok => { let b = ''; req.on('data', c => { b += c; }); req.on('end', () => ok(b ? JSON.parse(b) : {})); }); }
@@ -26,6 +28,7 @@ const dpSrv = http.createServer(async (req, res) => {
   }
   if (req.method === 'POST' && req.url === '/api/services/token') {
     const n = state.minted.length + 1; state.minted.push(b);
+    wallets.set('Bearer svc-token-SECRET-aaaaaaaaaaaa-' + n, req.headers.authorization === 'Bearer '+SESSION_A ? 'did:key:zPaneA':'did:key:zPaneB');
     if (state.switchDuringMint) { state.switchDuringMint = false; process.env.DEMIPASS_TOKEN = SESSION_B; }   // the machine's session changes mid-mint
     return json(res, 201, { ok: true, token: 'svc-token-SECRET-aaaaaaaaaaaa-' + n, token_id: 'jti-' + n, service: b.service, cap_dd: b.cap_dd, expires_at: new Date(Date.now() + 3600e3).toISOString() });
   }
@@ -33,6 +36,10 @@ const dpSrv = http.createServer(async (req, res) => {
 });
 const doorSrv = http.createServer(async (req, res) => {
   const b = await readBody(req);
+  if (req.url === '/door/v1/onboard') {
+    if(state.admissionRefused)return json(res,403,{ok:false,error:'no signed lane'});
+    return json(res,200,{ok:true,wallet:state.wrongWallet ? 'did:key:zWrong' : wallets.get(req.headers.authorization),admission});
+  }
   if (req.url === '/door/health') return json(res, 200, { ok: true, version: 'test', tenant: 'fleetgate' });
   if (req.url === '/door/v1/prices') return json(res, 200, { slug: 'fleetgate', actions: [{ action: 'submit', price_dd: 696 }] });
   if (req.url === '/door/v1/pulls' && req.method === 'POST') {
@@ -161,4 +168,20 @@ test('an expired session: submit returns DemiPass\'s own refusal, not "the door 
 test('prices and status', async () => {
   const p = await call('fleetgate_prices'); assert.strictEqual(p.ok, true); assert.strictEqual(p.actions[0].price_dd, 696);
   const s = await call('fleetgate_status'); assert.strictEqual(s.onboarded, true); assert.strictEqual(s.door_health.ok, true); assert.ok(s.token_id);
+});
+
+test('payment consent alone is not onboarded; refusal recovers on next status without more consent',async()=>{
+ const n=state.consentPosts.length, paid=state.doorCalls.length;
+ state.admissionRefused=true;
+ let r=await call('fleetgate_onboard');assert.strictEqual(r.ok,false);assert.strictEqual(r.status,'admission_required');
+ r=await call('fleetgate_status');assert.strictEqual(r.onboarded,false);assert.strictEqual(r.ok,false);
+ state.admissionRefused=false;
+ r=await call('fleetgate_status');assert.strictEqual(r.onboarded,true,JSON.stringify(r));assert.strictEqual(r.admission.release_authorized,false);
+ assert.strictEqual(state.consentPosts.length,n);assert.strictEqual(state.doorCalls.length,paid,'readiness never submits');
+ state.admissionRefused=true;
+ r=await call('fleetgate_status');assert.strictEqual(r.onboarded,false,'cached token cannot conceal removed authority');
+ state.admissionRefused=false;
+});
+test('a wrong-wallet admission result never counts',async()=>{
+ state.wrongWallet=true;const r=await call('fleetgate_onboard');assert.strictEqual(r.ok,false);assert.match(r.error,/wrong-wallet/);state.wrongWallet=false;
 });

@@ -9,6 +9,7 @@ const os = require('os');
 const path = require('path');
 
 const SESSION = 'eyJhbGciOiJFZERTQSJ9.' + Buffer.from(JSON.stringify({ sub: 'did:key:zPaneWallet' })).toString('base64url') + '.c2ln';
+const admission = {ok:true,protocol:1,release_authorized:false,charter_sha256:'a'.repeat(64),lanes:[{name:'intake',repos:['boltcluster'],paths:['docs/**'],add_only:[],deny:[]}]};
 const st = { consents: [], approveAfter: 2, polls: 0, posts: [] };
 const tenants = {
   kodiak: { slug: 'kodiak', name: 'Not Kodiak', endpoint: 'https://k.example', mcp_server: 'demipass#demipass-onboard', actions: [{ action: 'x', open: true, price_dd: 5 }] },
@@ -26,7 +27,12 @@ const srv = http.createServer((req, res) => {
     const m = /^\/api\/services\/([a-z-]+)$/.exec(req.url);
     if (req.method === 'GET' && req.url === '/api/services') return j(200, { tenants: Object.values(tenants) });
     if (req.method === 'GET' && m && !['consents'].includes(m[1])) return tenants[m[1]] ? j(200, tenants[m[1]]) : j(404, { error: 'no such service' });
+    if(req.url==='/door/v1/onboard') {
+      if(req.headers.authorization!=='Bearer service-admission-probe')return j(401,{error:'wrong scoped token'});
+      return st.refuseAdmission?j(403,{ok:false,error:'no lane'}):j(200,{ok:true,wallet:'did:key:zPaneWallet',admission});
+    }
     if (req.headers.authorization !== 'Bearer ' + SESSION) return j(401, { error: 'bad session' });
+    if(req.url==='/api/services/token' && req.method==='POST')return j(201,{token:'service-admission-probe',token_id:'probe',expires_at:new Date(Date.now()+300000).toISOString()});
     if (req.method === 'GET' && req.url === '/api/services/consents') return j(200, { ok: true, mine: st.consents });
     if (req.method === 'POST' && req.url === '/api/services/consent') {
       st.posts.push(body);
@@ -41,6 +47,7 @@ let ob, dir, cfg;
 test.before(async () => {
   await new Promise(ok => srv.listen(0, '127.0.0.1', ok));
   process.env.DEMIPASS_URL = `http://127.0.0.1:${srv.address().port}`;
+  tenants.fleetgate.endpoint=process.env.DEMIPASS_URL+'/door';
   delete process.env.DEMIPASS_TOKEN;
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'onboard-test-'));
   cfg = path.join(dir, 'mcp.json');
@@ -57,7 +64,7 @@ test('fleetgate: consent filed and waited for, then the MCP server is registered
   assert.strictEqual(st.posts[0].daily_cap_dd, 3480, 'default cap: five of the dearest open action');
   assert.match(logs[0], /Approve .* in the DemiPass app/);
   assert.ok(!JSON.stringify(r).includes(SESSION), 'the session never appears in the answer');
-  assert.strictEqual(r.mcp.attached, true); assert.strictEqual(r.mcp.changed, true); assert.strictEqual(r.endpoint, 'https://repo.example/-/fleetgate/door');
+  assert.strictEqual(r.mcp.attached, true); assert.strictEqual(r.mcp.changed, true); assert.strictEqual(r.endpoint, tenants.fleetgate.endpoint);
   const c = JSON.parse(fs.readFileSync(cfg, 'utf8'));
   assert.deepStrictEqual(c.mcpServers.fleetgate.args, [path.resolve(__dirname, '..', 'fleetgate-mcp.js')]);
   assert.strictEqual(c.mcpServers.fleetgate.env.DEMIPASS_TOKEN, undefined, 'no session copy in the entry: the server reads the live one');
@@ -163,4 +170,12 @@ test('an explicit higher cap than the existing consent files a replacement for a
 test('list', async () => {
   const l = await ob.listServices();
   assert.deepStrictEqual(l.find(x => x.service === 'fleetgate').prices, { submit: 696 });
+});
+
+test('generic onboarding checks live admission for an already-consented wallet and fails closed',async()=>{
+ st.refuseAdmission=true;const before=st.posts.length;
+ let r=await ob.onboardService({service:'fleetgate',mcpConfig:cfg,wait:false});
+ assert.strictEqual(r.ok,false);assert.strictEqual(r.status,'admission_required');assert.strictEqual(r.mcp.attached,true);
+ st.refuseAdmission=false;r=await ob.onboardService({service:'fleetgate',mcpConfig:cfg,wait:false});
+ assert.strictEqual(r.ok,true);assert.strictEqual(r.admission.protocol,1);assert.strictEqual(st.posts.length,before);
 });
