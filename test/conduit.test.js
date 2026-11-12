@@ -275,11 +275,13 @@ dpSrv.listen(0, '127.0.0.1', () => cdSrv.listen(0, '127.0.0.1', async () => {
     assert.strictEqual((await demipass.conduitOnboard()).route.generation,1);
     assert.strictEqual((await demipass.conduitStatus()).me.stable_address,'audit-brain');
     assert.strictEqual((await demipass.conduitOnboard({session_name:'another role'})).ok,false);
+    await demipass.conduitOnboard({owns:['review']});
     delete require.cache[require.resolve('../index.js')];
     const successor=require('../index.js');successor.configure({baseUrl:dpBase,bearerToken:SESSION});
     const next=await successor.conduitOnboard({model_family:'sol',session_id:'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',session_name:'audit | brain',url:cdBase});
-    assert.strictEqual(next.ok,true,JSON.stringify(next));assert.strictEqual(next.route.previous,r.name);assert.strictEqual(next.route.generation,2);
+    assert.strictEqual(next.ok,true,JSON.stringify(next));assert.strictEqual(next.route.previous,r.name);assert.strictEqual(next.route.generation,2);assert.deepStrictEqual(next.owns,['review']);
     assert.strictEqual((await successor.conduitOnboard()).route.generation,2);
+    assert.deepStrictEqual((await successor.conduitOnboard({owns:[]})).owns,[]);
     const stale=await demipass.conduitOnboard();assert.strictEqual(stale.ok,false);assert.strictEqual(stale.status,410);
     assert.strictEqual(cd.routes.get('audit-brain').current,next.name);
     assert.strictEqual(JSON.parse(fs.readFileSync(next.config_file)).session_name,'audit | brain');

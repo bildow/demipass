@@ -1014,7 +1014,7 @@ async function conduitOnboard({ name, model_family, session_id, session_name, ow
     if (Array.isArray(owns)) return owns;
     // Through withToken: a revoked cached token is minted again here too, so the directory answer (not a stale fallback)
     // decides what this name owns (#16 review, after merge). Only a lookup that still fails falls back.
-    try { const dir = await withToken((t) => _conduitHttp('GET', '/agents', null, t, baseUrl)); const mine = (dir.agents || dir || []).find(a => a.name === n); if (mine) return mine.owns || []; } catch {}
+    try { const dir = await withToken((t) => _conduitHttp('GET', '/agents', null, t, baseUrl)); const agents = dir.agents || dir || []; const mine = agents.find(a => a.name === n); if (mine) return mine.owns || []; const predecessor = stableAlias && agents.find(a => a.route && a.route.alias === stableAlias); if (predecessor) return predecessor.owns || []; } catch {}
     return prior.owns || [];
   };
   try { reg = await register(wantName, await ownsFor(wantName)); }
