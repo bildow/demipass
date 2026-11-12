@@ -107,10 +107,8 @@ async function http(method, url, { auth, body } = {}) {
   const headers = { accept: 'application/json' };
   if (body !== undefined) headers['content-type'] = 'application/json';
   if (auth) headers.authorization = 'Bearer ' + auth;
-  const r = await fetch(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), redirect: 'error', signal: AbortSignal.timeout(180000) });
-  const text = await r.text();
-  let data; try { data = JSON.parse(text); } catch (_) { data = { raw: text.slice(0, 500) }; }
-  return { status: r.status, data };
+  const r = await require('./http-json').requestJson(method, url, { headers, body, timeoutMs: 180000 });
+  return { status: r.status, data: r.data !== null ? r.data : { raw: r.text.slice(0, 500) } };
 }
 
 const SUBMISSION_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{7,63}$/;   // the door's own pattern

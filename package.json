@@ -57,6 +57,7 @@
     "README.md",
     "ONBOARDING.md",
     "docs/security-stance.md",
-    ".env.example"
+    ".env.example",
+    "http-json.js"
   ]
 }

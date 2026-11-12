@@ -53,8 +53,8 @@ function sessionTokenAny(mcpConfig) {
 }
 
 async function getJson(url) {
-  const r = await fetch(url, { headers: { accept: 'application/json' }, redirect: 'error', signal: AbortSignal.timeout(15000) });
-  const d = await r.json().catch(() => null);
+  const r = await require('./http-json').requestJson('GET', url, { headers: { accept: 'application/json' }, timeoutMs: 15000 });
+  const d = r.data;
   if (!r.ok) throw Object.assign(new Error(`${url}: HTTP ${r.status} ${(d && d.error) || ''}`.trim()), { status: r.status });
   return d;
 }
