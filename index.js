@@ -751,9 +751,12 @@ let _registryCache = { at: 0, endpoint: null, base: null };
 async function _conduitRegistryEndpoint() {
   const base = config.baseUrl || 'https://api.dustforge.com';
   if (_registryCache.base === base && Date.now() - _registryCache.at < 3600000) return _registryCache.endpoint;
-  let endpoint = null;
-  try { const d = await _conduitHttp('GET', '/api/services/conduit', null, null, base); endpoint = d && d.endpoint ? String(d.endpoint).replace(/\/+$/, '') : null; }
-  catch { endpoint = null; }
+  // Only an answer is cached (an endpoint, or "none set"); a failed lookup (timeout, 5xx) is not, so the next call asks
+  // again instead of using the default for an hour (#18 review round 2).
+  let d;
+  try { d = await _conduitHttp('GET', '/api/services/conduit', null, null, base); }
+  catch { return null; }
+  const endpoint = d && d.endpoint ? String(d.endpoint).replace(/\/+$/, '') : null;
   _registryCache = { at: Date.now(), endpoint, base };
   return endpoint;
 }

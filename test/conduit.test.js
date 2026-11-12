@@ -185,6 +185,19 @@ dpSrv.listen(0, '127.0.0.1', () => cdSrv.listen(0, '127.0.0.1', async () => {
     const f2 = JSON.parse(fs.readFileSync(process.env.CONDUIT_CONFIG, 'utf8')); assert.strictEqual(f2.url, undefined);
     assert.strictEqual(dp.registryHits, 2, 'registry answer is cached');
   });
+  await check('a failed registry lookup is not cached: the next call asks again (#18 review round 2)', async () => {
+    const f = JSON.parse(fs.readFileSync(process.env.CONDUIT_CONFIG, 'utf8')); delete f.url; fs.writeFileSync(process.env.CONDUIT_CONFIG, JSON.stringify(f));
+    let up = false, hits = 0;
+    const flaky = http.createServer((req, res) => { if (req.url !== '/api/services/conduit') return json(res, 404, {}); hits++; if (!up) { res.writeHead(503); return res.end(); } json(res, 200, { slug: 'conduit', endpoint: 'http://127.0.0.1:8' }); });
+    await new Promise((r) => flaky.listen(0, '127.0.0.1', r));
+    demipass.configure({ baseUrl: `http://127.0.0.1:${flaky.address().port}`, bearerToken: SESSION });
+    assert.strictEqual((await demipass.conduitStatus()).url_source, 'default', 'registry down: default for now');
+    up = true;
+    const s = await demipass.conduitStatus();
+    assert.strictEqual(s.url, 'http://127.0.0.1:8'); assert.strictEqual(s.url_source, 'registry');
+    const h = hits; await demipass.conduitStatus(); assert.strictEqual(hits, h, 'an answer is cached');
+    flaky.close(); demipass.configure({ baseUrl: dpBase, bearerToken: SESSION });
+  });
   await check('configure({ baseUrl }) to another DemiPass asks that registry, not the cached answer (#18 review P2)', async () => {
     const other = http.createServer((req, res) => json(res, 200, { slug: 'conduit', endpoint: 'http://127.0.0.1:7' }));
     await new Promise((r) => other.listen(0, '127.0.0.1', r));
