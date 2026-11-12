@@ -129,7 +129,9 @@ function services({ token, baseUrl = DEFAULT_BASE, timeoutMs = 15000 } = {}) {
     },
     revokeConsent({ consentId } = {}) { return req('POST', `/api/services/consents/${Number(consentId)}/revoke`, {}); },
     /** A service token for one tenant: send it to the service as `Authorization: Bearer …`. It opens nothing at DemiPass. */
-    mintToken({ service, ttl, scopes, capDd } = {}) { return req('POST', '/api/services/token', opt({ service, ttl, scopes, cap_dd: capDd })); },
+    /** followUpDd: what work this token starts may keep billing after it expires (e.g. FLEETGATE review rounds after a
+     *  door submission), at most the daily consent. Default 0: nothing bills after the token. */
+    mintToken({ service, ttl, scopes, capDd, followUpDd } = {}) { return req('POST', '/api/services/token', opt({ service, ttl, scopes, cap_dd: capDd, follow_up_dd: followUpDd })); },
     revokeToken({ tokenId } = {}) { return req('POST', '/api/services/token/revoke', { token_id: tokenId }); },
     /** 3. delegate: a person lets one of their agents use a service scope (use-only). Another fleet's agent → 403 + PIN intent. */
     delegate({ service, scope, delegateDid, expiresIn } = {}) {
