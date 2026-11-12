@@ -877,7 +877,10 @@ async function conduitOnboard({ name, owns, description, daily_cap_dd, cap_dd, t
   // 4. token
   let cfg = conduitConfig();
   let minted = false;
-  if (renew || !cfg.token_valid || !_conduitTokenIsMine(cfg.token) || (cap_dd && cap_dd !== cfg.cap_dd) || (ttl && ttl !== cfg.ttl)) {
+  // A token only in CONDUIT_TOKEN (not in the shared file) is minted into the file, so every pane's later calls have it
+  // (#16 review round 2).
+  const fileHasToken = !!(_conduitReadFile() || {}).token;
+  if (renew || !fileHasToken || !cfg.token_valid || !_conduitTokenIsMine(cfg.token) || (cap_dd && cap_dd !== cfg.cap_dd) || (ttl && ttl !== cfg.ttl)) {
     try { await _conduitMint({ ttl, capDd: cap_dd }); minted = true; }
     catch (e) { return { ok: false, step: 'token', status: e.status, error: (e.body && e.body.error) || e.message, steps }; }
   }
@@ -886,7 +889,16 @@ async function conduitOnboard({ name, owns, description, daily_cap_dd, cap_dd, t
 
   // 5. register (one name per wallet; a wallet that already has a name keeps it)
   let reg; let finalName = wantName;
-  const register = async (n, o) => _conduitHttp('POST', '/agents/register', { name: n, owns: o, description: description || prior.description || undefined }, cfg.token, baseUrl);
+  // A cached token Conduit rejects (revoked before its expiry) is minted again once, as _conduit() does (#16 review round 2).
+  const withToken = async (fn) => {
+    try { return await fn(cfg.token); }
+    catch (e) {
+      if (e.status !== 401 || !config.bearerToken) throw e;
+      await _conduitMint({ ttl, capDd: cap_dd }); minted = true; cfg = conduitConfig();
+      return fn(cfg.token);
+    }
+  };
+  const register = async (n, o) => withToken((t) => _conduitHttp('POST', '/agents/register', { name: n, owns: o, description: description || prior.description || undefined }, t, baseUrl));
   const ownsFor = async (n) => {
     if (Array.isArray(owns)) return owns;
     try { const dir = await _conduitHttp('GET', '/agents', null, cfg.token, baseUrl); const mine = (dir.agents || dir || []).find(a => a.name === n); if (mine) return mine.owns || []; } catch {}

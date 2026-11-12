@@ -157,6 +157,22 @@ dpSrv.listen(0, '127.0.0.1', () => cdSrv.listen(0, '127.0.0.1', async () => {
     assert.strictEqual(dp.mints, m2 + 1, 'the first wallet again: its own token is minted, not the other\'s reused');
     assert.strictEqual(cd.posts.pop().body, 'back');
   });
+  await check('onboarding with a cached token Conduit has revoked mints once and registers (#16 review round 2)', async () => {
+    const f = JSON.parse(fs.readFileSync(process.env.CONDUIT_CONFIG, 'utf8')); cd.revoked.add(f.token);
+    const m = dp.mints;
+    const r = await demipass.conduitOnboard({});
+    assert.strictEqual(r.ok, true, JSON.stringify(r)); assert.strictEqual(dp.mints, m + 1);
+    assert.notStrictEqual(JSON.parse(fs.readFileSync(process.env.CONDUIT_CONFIG, 'utf8')).token, f.token);
+  });
+  await check('a token only in CONDUIT_TOKEN is minted into the shared file by onboarding (#16 review round 2)', async () => {
+    const f = JSON.parse(fs.readFileSync(process.env.CONDUIT_CONFIG, 'utf8'));
+    process.env.CONDUIT_TOKEN = f.token; delete f.token; delete f.token_id; delete f.expires_at; fs.writeFileSync(process.env.CONDUIT_CONFIG, JSON.stringify(f));
+    const m = dp.mints;
+    const r = await demipass.conduitOnboard({});
+    assert.strictEqual(r.ok, true, JSON.stringify(r)); assert.strictEqual(dp.mints, m + 1);
+    assert.ok(JSON.parse(fs.readFileSync(process.env.CONDUIT_CONFIG, 'utf8')).token, 'the file now holds a token');
+    delete process.env.CONDUIT_TOKEN;
+  });
 
   dpSrv.close(); cdSrv.close(); fs.rmSync(tmp, { recursive: true, force: true });
   console.log(failures ? `\n${failures} failing` : '\nall passing');
