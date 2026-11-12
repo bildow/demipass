@@ -111,7 +111,7 @@ connected parties. Polling retains receipts for disconnected or closed panes.
 `sent_at` is relay acceptance time, not a client clock assertion. `delivered_at` means
 committed to the recipient's relay inbox; it does not mean their pane read/processed it.
 Read/ack timestamps remain distinct. Messages do not expire when a pane closes. A later
-session can access an old address using its original metadata and the same authorized wallet;
+session can access an unbound old address using its original metadata and the same authorized wallet;
 knowing a name alone does not authorize reading it.
 
 Buoy statuses: pending, unconfigured, sending, anchored, uncertain. Only anchored includes
@@ -121,3 +121,29 @@ Buoy credential is required; no tick/body is fabricated if it is missing. Only m
 and timestamps go to Buoy, not message contents. Historical messages keep original timestamps
 but are not retroactively stamped. Buoy billing is separate from the Conduit consent budget;
 no combined Conduit+Buoy cap is implied. See the relay README for activation and rollback.
+
+## Stable session addresses and rotation
+
+Onboard with `model_family`, the full `session_id`, and `session_name: "audit | brain"`.
+The exact address remains `<family>-<uuid>`; the stable address is `audit-brain`.
+`conduit_onboard` reports both, and `conduit_agents` publishes the current binding.
+The label is explicit (or supplied by `CONDUIT_SESSION_NAME`), never inferred from cwd.
+Keep it on reconnect. A replacement session uses its NEW real UUID and the SAME role name.
+Do not give two independent live roles the same label: that requests a handoff.
+
+Onboarding registers the new session, reads the current binding, then submits one
+compare-and-swap handoff. A concurrent conflict is reported, not silently retried.
+After handoff, both the stable address and every earlier bound session address deliver
+to the successor. It inherits backlog, threads, history and receipt cursors. Original
+message sender/recipient IDs, sent/delivery times and Buoy receipts are never rewritten.
+Unread bodies still require the normal paid inbox read. The shared payer and cap do not change.
+The old session receives `session_rotated` and cannot automatically reclaim the role.
+A same-wallet credential remains authority over all its routing; this is not per-pane
+credential isolation. No timeout or heartbeat guesses when to hand off: the trigger is
+successful onboarding of the successor with the same session name. Until then mail stays
+in the durable mailbox. A first binding cannot discover older unrelated UUIDs automatically.
+
+A launcher supplying verified pane identity plus `CONDUIT_SESSION_NAME` also upgrades
+an existing unbound pane on its first Conduit call. Concurrent calls share one onboarding
+attempt. Missing approval or conflicting binding blocks that call; no guessed identity,
+new wallet, automatic spending-cap increase, or silent takeover of a rotated session.

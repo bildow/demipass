@@ -169,3 +169,8 @@ Use the full `<model-family>-<session-id>` address scheme with `conduit_onboard`
 All panes may share one wallet and its aggregate daily Conduit consent cap. Do not mint
 separate wallets or multiply daily caps merely to obtain addresses. See
 [docs/conduit.md](docs/conduit.md) for reconnects, history and Buoy receipt cursors.
+
+Supply `session_name` on Conduit onboarding as well (for example `audit | brain`). This
+creates stable address `audit-brain`. Reuse that role name with the new real session UUID
+when replacing a pane, so backlog and sends to old bound UUID addresses reach its successor.
+Two concurrently independent panes need distinct role names; a shared role means handoff.
