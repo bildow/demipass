@@ -5,13 +5,16 @@ const test = require('node:test');
 const assert = require('node:assert');
 const http = require('http');
 
+// Sessions shaped like DemiPass JWTs: the server reads the wallet (sub) to bind a held token to it.
+const jwt = (sub) => 'eyJhbGciOiJFZERTQSJ9.' + Buffer.from(JSON.stringify({ sub, scope: 'transact' })).toString('base64url') + '.sig';
+const SESSION_A = jwt('did:key:zPaneA'), SESSION_B = jwt('did:key:zPaneB');
 const state = { consents: [], approved: false, minted: [], doorCalls: [], doorRejectFirst: true, consentPosts: [], dropNext: false };
 function json(res, status, body) { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); }
 function readBody(req) { return new Promise(ok => { let b = ''; req.on('data', c => { b += c; }); req.on('end', () => ok(b ? JSON.parse(b) : {})); }); }
 
 const dpSrv = http.createServer(async (req, res) => {
   const b = await readBody(req);
-  if (req.headers.authorization !== 'Bearer pane-session') return json(res, 401, { error: 'bad session' });
+  if (req.headers.authorization !== 'Bearer ' + SESSION_A && req.headers.authorization !== 'Bearer ' + SESSION_B) return json(res, 401, { error: 'bad session' });
   if (req.method === 'GET' && req.url === '/api/services/consents') return json(res, 200, { ok: true, mine: state.consents, approved_by_me: [] });
   if (req.method === 'POST' && req.url === '/api/services/consent') {
     state.consentPosts.push(b);
@@ -51,7 +54,7 @@ const call = async (name, args = {}) => {
 
 test.before(async () => {
   await new Promise(ok => dpSrv.listen(0, '127.0.0.1', ok)); await new Promise(ok => doorSrv.listen(0, '127.0.0.1', ok));
-  process.env.DEMIPASS_TOKEN = 'pane-session';
+  process.env.DEMIPASS_TOKEN = SESSION_A;
   process.env.DEMIPASS_URL = `http://127.0.0.1:${dpSrv.address().port}`;
   process.env.FLEETGATE_DOOR_URL = `http://127.0.0.1:${doorSrv.address().port}/door`;
   process.env.FLEETGATE_DAILY_CAP_DD = '3000';
@@ -118,6 +121,19 @@ test('the connection drops after the door may have charged: the answer carries t
   assert.strictEqual(r.ok, false); assert.match(r.submission_id, /^[a-f0-9]{24}$/); assert.match(r.next, new RegExp(r.submission_id));
   const again = await call('fleetgate_submit', { repo: 'boltcluster', title: 't', files: [{ path: 'a.md', content: 'x' }], submission_id: r.submission_id });
   assert.strictEqual(again.ok, true); assert.strictEqual(state.doorCalls.at(-1).body.submission_id, r.submission_id);
+});
+
+test('another wallet signed in while the server runs: the held token is not used for it (#17 review round 2, P1)', async () => {
+  const before = state.minted.length;
+  process.env.DEMIPASS_TOKEN = SESSION_B;
+  state.consents.push({ id: 10, service: 'fleetgate', daily_cap_dd: 5000, status: 'active' });
+  const r = await call('fleetgate_submit', { repo: 'boltcluster', title: 't', files: [{ path: 'b.md', content: 'y' }], submission_id: 'sub-walletB-1' });
+  assert.strictEqual(r.ok, true, JSON.stringify(r));
+  assert.strictEqual(state.minted.length, before + 1, 'a token was minted for wallet B');
+  assert.strictEqual(state.doorCalls.at(-1).auth, 'Bearer svc-token-SECRET-aaaaaaaaaaaa-' + state.minted.length);
+  process.env.DEMIPASS_TOKEN = SESSION_A;
+  assert.strictEqual((await call('fleetgate_status')).onboarded, false, "back on wallet A: B's held token is not A's");
+  assert.strictEqual((await call('fleetgate_onboard', { daily_cap_dd: 5000 })).ok, true, 'A gets its own token again');
 });
 
 test('prices and status', async () => {

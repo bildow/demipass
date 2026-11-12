@@ -68,7 +68,7 @@ function resolveMcpServer(spec) {
   let own; try { own = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')); } catch (_) { return { error: 'this package has no package.json' }; }
   if (own.name !== pkg) return { error: `${pkg}#${bin} is not a first-party DemiPass server; only ${own.name}#<bin> servers are attached` };
   if (!MCP_BINS.has(bin)) return { error: `${pkg}#${bin} is not one of its MCP servers (${[...MCP_BINS].join(', ')})` };
-  const rel = own.bin && typeof own.bin === 'object' && Object.hasOwn(own.bin, bin) && typeof own.bin[bin] === 'string' ? own.bin[bin] : null;
+  const rel = own.bin && typeof own.bin === 'object' && Object.prototype.hasOwnProperty.call(own.bin, bin) && typeof own.bin[bin] === 'string' ? own.bin[bin] : null;
   if (!rel) return { error: `${pkg} has no bin "${bin}"` };
   const file = path.resolve(__dirname, rel);
   const inside = path.relative(__dirname, file);
