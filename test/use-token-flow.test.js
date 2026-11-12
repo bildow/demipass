@@ -146,6 +146,57 @@ function startRecorder() {
     assert.strictEqual(t.body.target_url, 'https://example.com/a');
   });
 
+  console.log('\naccount-binding override_reason — Shadow round #2 item 3');
+
+  // use() forwards override_reason both top-level and inside params, so the
+  // server's action_params-flatten picks it up regardless of which case handler
+  // reads it. Dropping either would silently defeat the resolver's override rule.
+  seen.length = 0;
+  await demipass.use({
+    ref: 'r', action: 'ssh_exec', target_host: '10.0.0.1',
+    target_user: 'root', command: 'whoami',
+    override_reason: 'rotating sudoers',
+  });
+  const useOR = seen.filter(s => s.path.endsWith('/use')).pop();
+
+  check('use() forwards override_reason top-level', () => {
+    assert.strictEqual(useOR.body.override_reason, 'rotating sudoers');
+  });
+
+  check('use() also nests override_reason inside params', () => {
+    assert(useOR.body.params, 'params object missing');
+    assert.strictEqual(useOR.body.params.override_reason, 'rotating sudoers');
+  });
+
+  // execute() must match use() exactly — see the earlier "SAME shape" invariant.
+  seen.length = 0;
+  await demipass.execute({
+    use_token: 'tok_test', action: 'ssh_exec',
+    target_user: 'root', command: 'whoami',
+    override_reason: 'rotating sudoers',
+  });
+  const execOR = seen.filter(s => s.path.endsWith('/use')).pop();
+
+  check('execute() forwards override_reason top-level', () => {
+    assert.strictEqual(execOR.body.override_reason, 'rotating sudoers');
+  });
+
+  check('execute() also nests override_reason inside params', () => {
+    assert.strictEqual(execOR.body.params.override_reason, 'rotating sudoers');
+  });
+
+  // ssh() no longer defaults target_user to 'root' (the SDK-layer default
+  // silently overrode the server-side resolver). When target_user is omitted,
+  // the body must NOT carry a 'target_user' field, so the server resolver decides.
+  seen.length = 0;
+  await demipass.ssh({ ref: 'r', target_host: '10.0.0.1', command: 'whoami' });
+  const sshBody = seen.filter(s => s.path.endsWith('/use')).pop().body;
+
+  check("ssh() no longer defaults target_user='root' — omitted stays omitted", () => {
+    assert.strictEqual(sshBody.target_user, undefined,
+      "SDK-side 'root' default would override the server-side resolver — kill it");
+  });
+
   server.close();
   console.log(failures ? `\n${failures} FAILED\n` : '\nall passed\n');
   process.exit(failures ? 1 : 0);
