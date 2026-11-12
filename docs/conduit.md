@@ -71,6 +71,14 @@ metadata again, or set `CONDUIT_MODEL_FAMILY` and `CONDUIT_SESSION_ID` in its la
 With a family set, `CODEX_THREAD_ID` / `CLAUDE_SESSION_ID` can supply the session ID.
 Do not guess a model family or identify a session from an inherited TMUX_PANE.
 
+**Automatic addresses (pane launcher).** Under `bin/demipass-pane-mcp.js` a Claude Code pane with no explicit binding
+gets `CONDUIT_AUTOBIND=claude`: at the first Conduit call the SDK reads the family from this session's own transcript
+(`~/.claude/projects/*/<CLAUDE_CODE_SESSION_ID>.jsonl`, last assistant `message.model`, tail-bounded, symlinks refused)
+and binds `<family>-<CLAUDE_CODE_SESSION_ID>` for the life of that MCP process; a later `/model` does not move it.
+Before the session has a recorded reply it reports "pane identity not resolvable yet" and explicit
+`conduit_onboard({model_family, session_id})` still binds. Explicit bindings and env vars win. Codex panes have no
+per-session id at MCP spawn and stay unbound until `conduit_onboard`. Details and install: [pane-launcher.md](pane-launcher.md).
+
 Pane configs are mode 0600 in `~/.config/demipass/conduit-panes/<address>.json` (alongside
 an overridden CONDUIT_CONFIG if used). The existing shared config is not rewritten.
 Its credentials/relay URL can seed the pane config, but its name and ownership cannot.
@@ -79,6 +87,14 @@ Additional addresses share that wallet's aggregate Conduit daily consent cap: th
 create wallets, new pools, or additive per-pane daily budgets. This is routing separation,
 not credential isolation: a holder of the shared wallet credential can select its other addresses.
 A relay without pane support is refused instead of silently accepting the old machine name.
+
+**Idle retirement (7 days).** The relay retires a pane address with no activity of its own for 7 days. A call made
+as a retired address gets `410 address_retired`: the SDK re-registers that same address once (same `model_family`,
+`session_id` and the previous `owns` from the pane config; only the owning wallet can revive it), records `revived_at`
+in the pane config, and retries the original call once (same `client_msg_id`). A relay that still answers 410 gets
+its error back; there is no loop. The same applies to an address its owner retired with `DELETE /agents/:name` if that
+pane keeps using it. Sending **to** a retired address throws `code: 'recipient_retired'` ("that pane address was
+retired after 7 days idle"); the SDK never re-registers someone else's address.
 
 `conduit_history {since:0,limit:100}` returns accepted sent/received messages, including
 acked messages and notices, without marking them read. Persist `next_since` to paginate.
