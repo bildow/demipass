@@ -1228,6 +1228,26 @@ async function conduitSend({ to, thread, subject, body, message, client_msg_id }
   catch (e) { e.message = `${e.message} (to retry without sending twice, call again with client_msg_id "${cid}")`; e.client_msg_id = cid; throw e; }
   return { ok: true, client_msg_id: cid, ...r };
 }
+// Opt-in, local endpoint operations. Ordinary onboarding neither generates keys nor activates release.
+function conduitSealedClient() {
+  if(process.env.DEMIPASS_SEALED_ENABLE!=='1')throw new Error('sealed messaging is opt-in; set DEMIPASS_SEALED_ENABLE=1 in the endpoint launcher');
+  const cfg=conduitConfig();
+  return new (require('./sealed/client').Client)({mailbox:cfg.stable_address || cfg.name,directory:process.env.DEMIPASS_SEALED_DIRECTORY});
+}
+async function conduitSealedIdentity(){return conduitSealedClient().initialize();}
+async function conduitSealedPrepare(args){
+  if(args.policy || args.fixture)throw new Error('MCP guardian enrollment/release is disabled until independent custodians are selected');
+  return conduitSealedClient().prepare(args);
+}
+async function conduitSealedSend({id}){
+  const payload=conduitSealedClient().transport(id);
+  // Refuse an older relay that would silently ignore payload_type and forward ciphertext as ordinary text.
+  const card=await _conduit('GET','/readme?format=json');
+  if(!Array.isArray(card.payload_types)||!card.payload_types.includes(payload.payload_type))throw new Error('relay lacks sealed transport capability; no message sent');
+  return _conduit('POST','/messages',payload);
+}
+async function conduitSealedOpen(args){return {plaintext:await conduitSealedClient().open(args)};}
+async function conduitSealedCapsule({id}){return {capsule:conduitSealedClient().capsule(id),note:'Recipient-encrypted capsule; publish later through your separately selected channel. It is not a plaintext key.'};}
 /** Pending and recent messages for this name. Costs 1 DD only when it turns ≥1 message from delivered to read. */
 async function conduitInbox({ since, limit, include_acked } = {}) {
   const q = new URLSearchParams();
@@ -1317,6 +1337,11 @@ module.exports = {
   _conduitRegistryReset: () => { _registryCache = { at: 0, endpoint: null, base: null }; },
   conduitOnboard,
   conduitSend,
+  conduitSealedIdentity,
+  conduitSealedPrepare,
+  conduitSealedSend,
+  conduitSealedOpen,
+  conduitSealedCapsule,
   conduitInbox,
   conduitAck,
   conduitReceipt,
