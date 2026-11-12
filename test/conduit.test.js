@@ -270,6 +270,16 @@ dpSrv.listen(0, '127.0.0.1', () => cdSrv.listen(0, '127.0.0.1', async () => {
     assert.strictEqual(child.status,0,child.stderr);
   });
 
+  await check('Claude Code\'s CLAUDE_CODE_SESSION_ID is read; a partial env identity is reported, not thrown (fresh process)', async () => {
+    const { execFileSync } = require('child_process');
+    const run = (env) => JSON.parse(execFileSync(process.execPath, ['-e', 'const d=require(process.argv[1]); const c=d.conduitConfig(); console.log(JSON.stringify({a:c.pane_address,e:c.pane_error||null}))', require.resolve('../index.js')],
+      { env: { PATH: process.env.PATH, HOME: process.env.HOME, CONDUIT_CONFIG: process.env.CONDUIT_CONFIG, ...env }, encoding: 'utf8' }));
+    let r = run({ CONDUIT_MODEL_FAMILY: 'opus', CLAUDE_CODE_SESSION_ID: 'ABCDEF01-2345-6789-abcd-ef0123456789' });
+    assert.strictEqual(r.a, 'opus-abcdef01-2345-6789-abcd-ef0123456789', 'from CLAUDE_CODE_SESSION_ID, lower-cased');
+    r = run({ CONDUIT_MODEL_FAMILY: 'opus', CLAUDE_CODE_SESSION_ID: 'not-a-uuid' });
+    assert.strictEqual(r.a, null); assert.match(r.e || '', /incomplete or malformed/);
+  });
+
   dpSrv.close(); cdSrv.close(); fs.rmSync(tmp, { recursive: true, force: true });
   console.log(failures ? `\n${failures} failing` : '\nall passing');
   process.exit(failures ? 1 : 0);

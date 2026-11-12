@@ -697,12 +697,17 @@ function conduitPaneAddress({ model_family, session_id } = {}) {
     throw new Error('model_family (lowercase family) and full lowercase UUID session_id required');
   return `${model_family}-${session_id}`;
 }
+// The pane identity from the environment. Claude Code exports CLAUDE_CODE_SESSION_ID (not CLAUDE_SESSION_ID). An
+// incomplete or malformed identity is not thrown from every call (conduit_status "never throws"): it is reported as
+// conduitPaneError and leaves explicit conduit_onboard({model_family, session_id}) free to bind (review 2026-11-12).
+let conduitPaneError = null;
 function _conduitPane() {
   if (conduitPane) return conduitPane;
   if (process.env.CONDUIT_MODEL_FAMILY || process.env.CONDUIT_SESSION_ID) {
     const p = { model_family: process.env.CONDUIT_MODEL_FAMILY,
-      session_id: process.env.CONDUIT_SESSION_ID || process.env.CODEX_THREAD_ID || process.env.CLAUDE_SESSION_ID };
-    conduitPaneAddress(p); return p;
+      session_id: String(process.env.CONDUIT_SESSION_ID || process.env.CODEX_THREAD_ID || process.env.CLAUDE_CODE_SESSION_ID || process.env.CLAUDE_SESSION_ID || '').toLowerCase() };
+    try { conduitPaneAddress(p); conduitPaneError = null; return p; }
+    catch (e) { conduitPaneError = 'pane identity from the environment is incomplete or malformed (CONDUIT_MODEL_FAMILY / session id): ' + e.message; return null; }
   }
   return null;
 }
@@ -776,6 +781,7 @@ function conduitConfig() {
   cfg.token_valid = !!token && (!expiresAt || Date.parse(expiresAt) - Date.now() > CONDUIT_RENEW_BEFORE_MS);
   cfg.onboarded = !!(cfg.name && cfg.token);
   cfg.pane_address = _conduitPane() ? conduitPaneAddress(_conduitPane()) : null;
+  if (conduitPaneError) cfg.pane_error = conduitPaneError;
   if (process.env.CONDUIT_REQUIRE_PANE === '1' && !cfg.pane_address) { cfg.onboarded = false; cfg.name = ''; cfg.pane_required = true; }
   if (envTok && !envTokOk && !f.token) cfg.env_token_ignored = 'CONDUIT_TOKEN is not a DemiPass service token for conduit (aud svc:conduit); run conduit_onboard';
   return cfg;
