@@ -47,6 +47,30 @@ srv.listen(0, '127.0.0.1', async () => {
     await assert.rejects(dp.charge({ action: 'post', costDd: 2, tokenId: 'ab12cd34', idempotencyKey: 'msg:2' }),
       e => e instanceof ServiceError && e.status === 402 && e.body.required_dd === 3);
   });
+  await check('ensureConsent: a live consent is returned as existing without filing', async () => {
+    next = [[200, { ok: true, mine: [{ id: 3, service: 'conduit', status: 'active', daily_cap_dd: 300 }], approved_by_me: [] }]];
+    const c = await dp.ensureConsent({ service: 'conduit' });
+    assert.strictEqual(c.existing, true); assert.strictEqual(c.consent.id, 3); assert.strictEqual(seen.pop().path, '/api/services/consents');
+  });
+  await check('ensureConsent: none → files it → 202 comes back as pending with approval_id; then approvalId completes it', async () => {
+    next = [[200, { ok: true, mine: [] }], [202, { status: 'approval_pending', approval_id: 11 }]];
+    const p = await dp.ensureConsent({ service: 'conduit', dailyCapDd: 200 });
+    assert.strictEqual(p.pending.approval_id, 11); assert.match(p.pending.next, /approvalId=11/);
+    assert.deepStrictEqual(seen.pop().body, { service: 'conduit', daily_cap_dd: 200 });
+    next = [[200, { ok: true, mine: [] }], [201, { ok: true, consent_id: 4, service: 'conduit', daily_cap_dd: 200 }]];
+    const c = await dp.ensureConsent({ service: 'conduit', dailyCapDd: 200, approvalId: 11 });
+    assert.strictEqual(c.consent.id, 4); assert.strictEqual(c.existing, false);
+    assert.deepStrictEqual(seen.pop().body, { service: 'conduit', daily_cap_dd: 200, approval_id: 11 });
+  });
+  await check('onboard = ensureConsent + mintToken; stops at pending without minting', async () => {
+    next = [[200, { ok: true, mine: [] }], [202, { status: 'approval_pending', approval_id: 12 }]];
+    const p = await dp.onboard({ service: 'fleetgate' });
+    assert.strictEqual(p.pending.approval_id, 12); assert.strictEqual(seen.length && seen[seen.length - 1].path, '/api/services/consent');
+    next = [[200, { ok: true, mine: [{ id: 5, service: 'fleetgate', status: 'active', daily_cap_dd: 300 }] }], [201, { ok: true, token: 'svc.tok.en', token_id: 'ab', expires_at: '2026-11-10T00:00:00Z', cap_dd: 100 }]];
+    const r = await dp.onboard({ service: 'fleetgate', ttl: '1h', capDd: 100 });
+    assert.strictEqual(r.token.token, 'svc.tok.en'); assert.strictEqual(r.consent.id, 5);
+    assert.deepStrictEqual(seen.pop().body, { service: 'fleetgate', ttl: '1h', cap_dd: 100 });
+  });
   await check('a 202 from verify throws with pending + approval_id', async () => {
     next = [[202, { ok: false, status: 'approval_pending', approval_id: 41 }]];
     await assert.rejects(dp.verify({ token: 'c', action: 'broadcast' }), e => e.pending === true && e.body.approval_id === 41);

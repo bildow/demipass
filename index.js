@@ -555,7 +555,7 @@ async function doctor() {
     configured: !!config.baseUrl && !!config.bearerToken,
     base_url: config.baseUrl || 'NOT SET',
     token_present: !!config.bearerToken,
-    conduit_configured: !!process.env.CONDUIT_TOKEN,
+    conduit_configured: conduitConfig().onboarded,
   };
 
   // Identity
@@ -616,7 +616,7 @@ async function doctor() {
   if (!report.configured) report.recommendations.push('Run demipass.configure({ baseUrl, bearerToken }) or set DEMIPASS_URL + DEMIPASS_TOKEN env vars');
   if (report.identity?.expired) report.recommendations.push('Bearer token expired — re-authenticate via POST /api/identity/auth-fingerprint');
   if (report.trust?.recovery_email === 'NOT SET') report.recommendations.push('Set a recovery email in Settings — required for password recovery');
-  if (!report.conduit_configured) report.recommendations.push('Set CONDUIT_TOKEN env var to enable agent-to-agent messaging');
+  if (!report.conduit_configured) report.recommendations.push('Run conduit_onboard to join Conduit (agent relay by name, metered through DemiPass)');
   if (report.secrets?.total === 0) report.recommendations.push('No secrets stored — use demipass_store to deposit your first credential');
   // This flag gets set to true when called via MCP handler
   report.called_via_mcp = false;
@@ -677,107 +677,291 @@ async function rotateBlind({ ref, target_host, target_user, reason } = {}) {
   return _request('POST', '/api/demipass/rotate-blind', { ref, target_host, target_user, reason });
 }
 
-// ── Conduit — agent-to-agent messaging ──
+// ── Conduit — agent-to-agent relay addressed by name (atlas/conduit v0.1) ──
+//
+// Every hop presents a DemiPass *service token* for the tenant `conduit` (post 2 / forward 2 / read 1 / ack 1 DD).
+// The token comes from this session's own DemiPass bearer: consent to pay conduit (approved once in the app), then
+// POST /api/services/token. conduitOnboard() walks that path and leaves the result in a 0600 config file that every
+// call re-reads, so one onboarding serves every pane on the machine and a token that runs out is minted again
+// without a restart. The file is the source of truth; CONDUIT_URL / CONDUIT_SENDER / CONDUIT_TOKEN env vars are
+// fallbacks for a machine that has no file yet (a CONDUIT_TOKEN that is not a DemiPass service token for conduit —
+// the pre-rebuild bearers — is ignored, with the reason reported by conduitStatus()).
 
-const CONDUIT_URL = process.env.CONDUIT_URL || 'http://100.69.1.78:8080';
-const CONDUIT_TOKEN = process.env.CONDUIT_TOKEN || '';
-const CONDUIT_SENDER = process.env.CONDUIT_SENDER || 'phasewhip';
+const CONDUIT_DEFAULT_URL = 'http://phasewhip.taildb5a42.ts.net:8080';
+const CONDUIT_RENEW_BEFORE_MS = 5 * 60 * 1000;
 
-function _conduit(method, path, body) {
-  if (!CONDUIT_TOKEN) throw new Error('CONDUIT_TOKEN env var required for Conduit messaging');
-  const url = new URL(path, CONDUIT_URL);
-  const proto = url.protocol === 'https:' ? require('https') : require('http');
+function _conduitConfigFile() {
+  return process.env.CONDUIT_CONFIG || require('path').join(require('os').homedir(), '.config', 'demipass', 'conduit.json');
+}
+function _conduitReadFile() {
+  try { return JSON.parse(require('fs').readFileSync(_conduitConfigFile(), 'utf8')); } catch { return null; }
+}
+function _conduitWriteFile(cfg) {
+  const fs = require('fs'); const path = require('path'); const file = _conduitConfigFile();
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2) + '\n', { mode: 0o600 });
+  fs.renameSync(tmp, file);
+  try { fs.chmodSync(file, 0o600); } catch {}
+  return file;
+}
+function _jwtClaims(token) {
+  try { return JSON.parse(Buffer.from(String(token).split('.')[1], 'base64url').toString('utf8')); } catch { return null; }
+}
+function _isConduitServiceToken(token) {
+  const c = _jwtClaims(token);
+  return !!(c && c.aud === 'svc:conduit');
+}
+
+/** The effective Conduit settings: file first, env fallbacks second. Never throws. */
+function conduitConfig() {
+  const f = _conduitReadFile() || {};
+  const envTok = process.env.CONDUIT_TOKEN || '';
+  const envTokOk = envTok ? _isConduitServiceToken(envTok) : false;
+  const token = f.token || (envTokOk ? envTok : '');
+  const claims = token ? _jwtClaims(token) : null;
+  const expiresAt = f.expires_at || (claims && claims.exp ? new Date(claims.exp * 1000).toISOString() : null);
+  const cfg = {
+    file: _conduitConfigFile(),
+    file_present: !!_conduitReadFile(),
+    url: String(f.url || process.env.CONDUIT_URL || CONDUIT_DEFAULT_URL).replace(/\/+$/, ''),
+    name: f.name || process.env.CONDUIT_SENDER || '',
+    token,
+    token_id: f.token_id || (claims && claims.jti) || null,
+    expires_at: expiresAt,
+    cap_dd: f.cap_dd || (claims && claims.cap_dd) || null,
+    ttl: f.ttl || '24h',
+    consent_id: f.consent_id || null,
+    daily_cap_dd: f.daily_cap_dd || null,
+    wallet: f.wallet || (claims && claims.sub) || null,
+    owns: Array.isArray(f.owns) ? f.owns : [],
+    minted_at: f.minted_at || null,
+  };
+  cfg.token_valid = !!token && (!expiresAt || Date.parse(expiresAt) - Date.now() > CONDUIT_RENEW_BEFORE_MS);
+  cfg.onboarded = !!(cfg.name && cfg.token);
+  if (envTok && !envTokOk && !f.token) cfg.env_token_ignored = 'CONDUIT_TOKEN is not a DemiPass service token for conduit (aud svc:conduit); run conduit_onboard';
+  return cfg;
+}
+
+function _conduitServices() {
+  if (!config.bearerToken) throw new Error('DEMIPASS_TOKEN is not set: Conduit tokens are minted from this session\'s DemiPass identity');
+  return require('./services').services({ token: config.bearerToken, baseUrl: config.baseUrl });
+}
+
+/** Mint a fresh service token for conduit from this session's DemiPass bearer and persist it. */
+async function _conduitMint({ ttl, capDd } = {}) {
+  const f = _conduitReadFile() || {};
+  const cfg = conduitConfig();
+  let r;
+  try {
+    r = await _conduitServices().mintToken({ service: 'conduit', ttl: ttl || cfg.ttl || '24h', capDd: capDd || cfg.cap_dd || undefined });
+  } catch (e) {
+    if (e && e.status === 403 && e.body && e.body.consent_required) {
+      const err = new Error('this wallet has no standing consent to pay conduit; run conduit_onboard (it files the consent for approval in the DemiPass app)');
+      err.status = 403; err.body = e.body; throw err;
+    }
+    if (e && e.status === 400 && e.body && /cap_dd/.test(e.body.error || '')) {
+      // the stored cap is above the (new) consent cap: let the server pick its default
+      r = await _conduitServices().mintToken({ service: 'conduit', ttl: ttl || cfg.ttl || '24h' });
+    } else throw e;
+  }
+  const next = { ...f, url: cfg.url, token: r.token, token_id: r.token_id, expires_at: r.expires_at, cap_dd: r.cap_dd, ttl: ttl || cfg.ttl || '24h',
+    wallet: (_jwtClaims(r.token) || {}).sub || f.wallet || null, minted_at: new Date().toISOString() };
+  if (cfg.name) next.name = cfg.name;
+  _conduitWriteFile(next);
+  return next;
+}
+
+// A cached service token is this session's only if it was minted for the same wallet: another identity on the same
+// machine must not message (and be charged) as the previous one (#16 review P1).
+function _conduitTokenIsMine(token) {
+  if (!config.bearerToken) return true;   // nothing to mint from: the configured token is all there is
+  const me = (_jwtClaims(config.bearerToken) || {}).sub, owner = (_jwtClaims(token) || {}).sub;
+  return !!me && !!owner && me === owner;
+}
+async function _conduitToken({ force } = {}) {
+  const cfg = conduitConfig();
+  if (!force && cfg.token_valid && _conduitTokenIsMine(cfg.token)) return cfg.token;
+  return (await _conduitMint()).token;
+}
+
+function _conduitHttp(method, path, body, token, baseUrl) {
+  const url = new URL(path, (baseUrl || conduitConfig().url) + '/');
+  const proto = url.protocol === 'https:' ? https : http;
   const postData = body ? JSON.stringify(body) : null;
   return new Promise((resolve, reject) => {
     const opts = {
       hostname: url.hostname, port: url.port || (url.protocol === 'https:' ? 443 : 80),
       path: url.pathname + url.search, method,
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + CONDUIT_TOKEN },
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json', 'X-DemiPass-Agent': AGENT_HEADER },
       timeout: 15000,
     };
+    if (token) opts.headers['Authorization'] = 'Bearer ' + token;
     if (postData) opts.headers['Content-Length'] = Buffer.byteLength(postData);
     const req = proto.request(opts, (res) => {
       let data = '';
       res.on('data', c => data += c);
       res.on('end', () => {
+        let parsed; try { parsed = data ? JSON.parse(data) : {}; } catch { parsed = { raw: data.slice(0, 300) }; }
         if (res.statusCode >= 400) {
-          try { reject(new Error(JSON.parse(data).detail || JSON.parse(data).error || `Conduit HTTP ${res.statusCode}`)); }
-          catch { reject(new Error(`Conduit HTTP ${res.statusCode}: ${data.slice(0, 100)}`)); }
-          return;
+          const err = new Error(`Conduit ${method} ${url.pathname} → ${res.statusCode} ${parsed.error || parsed.detail || parsed.raw || ''}`.trim());
+          err.status = res.statusCode; err.body = parsed; return reject(err);
         }
-        try { resolve(JSON.parse(data)); } catch { resolve({ raw: data, status: res.statusCode }); }
+        resolve(parsed);
       });
     });
-    req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('conduit timeout')); });
+    req.on('error', (e) => { const err = new Error(`Conduit unreachable at ${url.origin}: ${e.message}`); err.status = 0; reject(err); });
+    req.on('timeout', () => { req.destroy(); const err = new Error('Conduit timeout'); err.status = 0; reject(err); });
     if (postData) req.write(postData);
     req.end();
   });
 }
 
-async function conduitSend({ to, message, thread_id } = {}) {
-  if (!to || !message) throw new Error('conduitSend() requires to (agent_id) and message');
-
-  let tid = thread_id;
-
-  // Find or create thread
-  if (!tid) {
-    const threads = await _conduit('GET', '/threads');
-    const existing = (Array.isArray(threads) ? threads : threads.data || []).find(t => {
-      const p = t.participants || t.agents || [];
-      return p.includes(to) && p.includes(CONDUIT_SENDER);
-    });
-    if (existing) {
-      tid = existing.id || existing.thread_id;
-    } else {
-      try {
-        const created = await _conduit('POST', '/threads', {
-          participants: [CONDUIT_SENDER, to],
-          label: CONDUIT_SENDER + ' <-> ' + to,
-        });
-        tid = created.id || created.thread_id;
-      } catch (e) {
-        // If permission denied, auto-file handshake and explain
-        if (e.message && e.message.includes('Permission required')) {
-          try {
-            const hs = await _conduit('POST', '/handshakes/request', { to_agent_id: to, message: 'Requesting operational thread from ' + CONDUIT_SENDER });
-            return {
-              ok: false,
-              handshake_pending: true,
-              request_id: hs.request_id,
-              note: `Handshake filed with ${to}. The target agent must approve before messaging works. They need to call POST /handshakes/approve with their token and request_id: ${hs.request_id}`,
-            };
-          } catch (hsErr) {
-            // Handshake might already be pending
-            if (hsErr.message && hsErr.message.includes('pending')) {
-              return { ok: false, handshake_pending: true, note: `Handshake already pending with ${to}. Waiting for their approval.` };
-            }
-            throw hsErr;
-          }
-        }
-        throw e;
-      }
+/** Authenticated Conduit call. A token that has run out is minted again (once) from the DemiPass bearer. */
+async function _conduit(method, path, body) {
+  let token = await _conduitToken();
+  try { return await _conduitHttp(method, path, body, token); }
+  catch (e) {
+    if (e.status === 401 && config.bearerToken) {
+      token = await _conduitToken({ force: true });
+      return _conduitHttp(method, path, body, token);
     }
+    throw e;
+  }
+}
+
+/**
+ * Join Conduit through the normal DemiPass path and leave a working config behind:
+ *   1. GET /health (is the relay up)       2. standing consent to pay conduit (filed for app approval if missing)
+ *   3. service token (minted; reused while valid)   4. POST /agents/register {name, owns}   5. GET /agents (is it there)
+ * A missing consent returns {status:'approval_pending', approval_id}: approve it in the DemiPass app, then call again
+ * with approval_id. Idempotent otherwise: run it any time to confirm or repair the setup.
+ */
+async function conduitOnboard({ name, owns, description, daily_cap_dd, cap_dd, ttl, approval_id, url, renew } = {}) {
+  const steps = [];
+  const fs = require('fs');
+  const prior = _conduitReadFile() || {};
+  const baseUrl = String(url || conduitConfig().url).replace(/\/+$/, '');
+  // The URL is saved only with a working setup (step 5): a mistyped one never replaces the relay every pane uses (#16 review P2).
+
+  // 1. relay up?
+  let health;
+  try { health = await _conduitHttp('GET', '/health', null, null, baseUrl); }
+  catch (e) { return { ok: false, step: 'health', url: baseUrl, error: e.message }; }
+  steps.push({ step: 'health', ok: true, version: health.version, agents: health.agents, prices_dd: health.prices_dd });
+
+  // 2. identity
+  if (!config.bearerToken) return { ok: false, step: 'identity', error: 'DEMIPASS_TOKEN is not set; Conduit tokens are minted from this session\'s DemiPass identity', steps };
+  const me = _jwtClaims(config.bearerToken) || {};
+  const wantName = String(name || prior.name || process.env.CONDUIT_SENDER || me.username || '').trim();
+  if (!wantName) return { ok: false, step: 'name', error: 'name required (no CONDUIT_SENDER, no username in the DemiPass token)', steps };
+  const dp = _conduitServices();
+
+  // 3. consent (services.ensureConsent: the same helper every caller-side onboarding uses)
+  let consent = null;
+  const cap = Number.isInteger(daily_cap_dd) ? daily_cap_dd : 300;
+  try {
+    const c = await dp.ensureConsent({ service: 'conduit', dailyCapDd: cap, approvalId: approval_id });
+    if (c.pending) {
+      return { ok: false, status: 'approval_pending', step: 'consent', approval_id: c.pending.approval_id, expires_at: c.pending.expires_at,
+        daily_cap_dd: cap, wallet: me.sub || null, steps,
+        next: `Approve "let a wallet pay conduit" (${cap} DD/day) in the DemiPass app, then call conduit_onboard again with approval_id=${c.pending.approval_id} and the same name/owns${url ? '/url' : ''}.` };
+    }
+    consent = c.consent;
+    steps.push({ step: 'consent', ok: true, consent_id: consent.id, daily_cap_dd: consent.daily_cap_dd, existing: c.existing, approval_id: c.existing ? undefined : (approval_id || null) });
+  } catch (e) {
+    return { ok: false, step: 'consent', status: e.status, error: (e.body && e.body.error) || e.message, steps,
+      hint: e.status === 403 ? 'an identity no fleet created has no person to consent for it: use a person session or a fleet-created silicon' : undefined };
   }
 
-  if (!tid) throw new Error('failed to find or create thread with ' + to);
+  // 4. token
+  let cfg = conduitConfig();
+  let minted = false;
+  // A token only in CONDUIT_TOKEN (not in the shared file) is minted into the file, so every pane's later calls have it
+  // (#16 review round 2).
+  const fileHasToken = !!(_conduitReadFile() || {}).token;
+  if (renew || !fileHasToken || !cfg.token_valid || !_conduitTokenIsMine(cfg.token) || (cap_dd && cap_dd !== cfg.cap_dd) || (ttl && ttl !== cfg.ttl)) {
+    try { await _conduitMint({ ttl, capDd: cap_dd }); minted = true; }
+    catch (e) { return { ok: false, step: 'token', status: e.status, error: (e.body && e.body.error) || e.message, steps }; }
+  }
+  cfg = conduitConfig();
+  steps.push({ step: 'token', ok: true, minted, token_id: cfg.token_id, expires_at: cfg.expires_at, cap_dd: cfg.cap_dd });
 
-  const result = await _conduit('POST', '/messages', {
-    thread_id: tid,
-    body: message,
-    sender_agent_id: CONDUIT_SENDER,
-  });
+  // 5. register (one name per wallet; a wallet that already has a name keeps it)
+  let reg; let finalName = wantName;
+  // A cached token Conduit rejects (revoked before its expiry) is minted again once, as _conduit() does (#16 review round 2).
+  const withToken = async (fn) => {
+    try { return await fn(cfg.token); }
+    catch (e) {
+      if (e.status !== 401 || !config.bearerToken) throw e;
+      await _conduitMint({ ttl, capDd: cap_dd }); minted = true; cfg = conduitConfig();
+      return fn(cfg.token);
+    }
+  };
+  const register = async (n, o) => withToken((t) => _conduitHttp('POST', '/agents/register', { name: n, owns: o, description: description || prior.description || undefined }, t, baseUrl));
+  const ownsFor = async (n) => {
+    if (Array.isArray(owns)) return owns;
+    try { const dir = await _conduitHttp('GET', '/agents', null, cfg.token, baseUrl); const mine = (dir.agents || dir || []).find(a => a.name === n); if (mine) return mine.owns || []; } catch {}
+    return prior.owns || [];
+  };
+  try { reg = await register(wantName, await ownsFor(wantName)); }
+  catch (e) {
+    if (e.status === 409 && e.body && e.body.error === 'wallet_has_name' && e.body.name) {
+      finalName = e.body.name;
+      steps.push({ step: 'register', note: `this wallet is already "${finalName}" on Conduit (one name per wallet); keeping it`, requested: wantName });
+      try { reg = await register(finalName, await ownsFor(finalName)); } catch (e2) { return { ok: false, step: 'register', status: e2.status, error: e2.message, steps }; }
+    } else if (e.status === 409 && e.body && e.body.error === 'name_taken') {
+      return { ok: false, step: 'register', status: 409, error: `name "${wantName}" belongs to another wallet; choose another`, steps };
+    } else return { ok: false, step: 'register', status: e.status, error: e.message, steps };
+  }
+  steps.push({ step: 'register', ok: true, name: reg.name, owns: reg.owns, via: reg.via });
+  _conduitWriteFile({ ...(_conduitReadFile() || {}), url: baseUrl, name: reg.name, owns: reg.owns, description: reg.description || '', consent_id: consent.id, daily_cap_dd: consent.daily_cap_dd, wallet: me.sub || cfg.wallet || null, onboarded_at: prior.onboarded_at || new Date().toISOString() });
 
-  return { ok: true, thread_id: tid, message_id: result.id, to, delivered: true };
+  // 6. directory check
+  let listed = false;
+  try { const dir = await _conduitHttp('GET', '/agents', null, cfg.token, baseUrl); listed = !!(dir.agents || dir || []).find(a => a.name === reg.name); } catch {}
+  steps.push({ step: 'directory', ok: listed });
+
+  const final = conduitConfig();
+  const mode = fs.statSync(final.file).mode & 0o777;
+  return { ok: true, url: baseUrl, name: reg.name, owns: reg.owns, wallet: final.wallet, consent: { id: consent.id, daily_cap_dd: consent.daily_cap_dd },
+    token: { token_id: final.token_id, expires_at: final.expires_at, cap_dd: final.cap_dd, minted }, config_file: final.file, config_mode: mode.toString(8), steps,
+    note: 'Every conduit_* call re-reads this file and mints a new token from the DemiPass session when this one runs out; no restart needed. Panes started before this file existed keep working through it too.' };
 }
 
-async function conduitThreads() {
-  const threads = await _conduit('GET', '/threads');
-  return { threads: threads.data || threads || [] };
+/** Post a message by registered name (2 DD). `subject` owned by another agent is forwarded to its owner with a notice back. */
+async function conduitSend({ to, thread, subject, body, message, client_msg_id } = {}) {
+  const text = body || message;
+  if (!text) throw new Error('conduitSend() requires body');
+  if (!to && !thread) throw new Error('conduitSend() requires to (a registered name; see conduitAgents) or thread');
+  const payload = { body: text };
+  if (to) payload.to = to; if (thread) payload.thread = thread; if (subject) payload.subject = subject; if (client_msg_id) payload.client_msg_id = client_msg_id;
+  const r = await _conduit('POST', '/messages', payload);
+  return { ok: true, ...r };
 }
-
+/** Pending and recent messages for this name. Costs 1 DD only when it turns ≥1 message from delivered to read. */
+async function conduitInbox({ since, limit, include_acked } = {}) {
+  const q = new URLSearchParams();
+  if (since !== undefined) q.set('since', String(since)); if (limit) q.set('limit', String(limit)); if (include_acked) q.set('include_acked', '1');
+  const s = q.toString();
+  return _conduit('GET', '/inbox' + (s ? `?${s}` : ''));
+}
+async function conduitAck({ msg_id } = {}) { if (!msg_id) throw new Error('msg_id required'); return _conduit('POST', `/messages/${encodeURIComponent(msg_id)}/ack`, {}); }
+async function conduitReceipt({ msg_id } = {}) { if (!msg_id) throw new Error('msg_id required'); return _conduit('GET', `/messages/${encodeURIComponent(msg_id)}`); }
+async function conduitForward({ msg_id, to, note } = {}) { if (!msg_id || !to) throw new Error('msg_id and to required'); return _conduit('POST', `/messages/${encodeURIComponent(msg_id)}/forward`, { to, note }); }
+async function conduitAgents() { const r = await _conduit('GET', '/agents'); return { agents: r.agents || r }; }
+/** Legacy thread view (kept for lori_checkin and the old clients). */
+async function conduitThreads() { const threads = await _conduit('GET', '/threads'); return { threads: threads.data || threads.threads || threads || [] }; }
+/** Relay health plus this machine's onboarding state. Never throws on a missing token. */
 async function conduitStatus() {
-  return _conduit('GET', '/carbon/status');
+  const cfg = conduitConfig();
+  const out = { url: cfg.url, me: { onboarded: cfg.onboarded, name: cfg.name || null, wallet: cfg.wallet, token_id: cfg.token_id, token_expires_at: cfg.expires_at,
+    token_valid: cfg.token_valid, cap_dd: cfg.cap_dd, consent_id: cfg.consent_id, daily_cap_dd: cfg.daily_cap_dd, config_file: cfg.file, config_present: cfg.file_present } };
+  if (cfg.env_token_ignored) out.me.env_token_ignored = cfg.env_token_ignored;
+  try { out.health = await _conduitHttp('GET', '/health', null, null, cfg.url); } catch (e) { out.health = { ok: false, error: e.message }; }
+  if (!cfg.onboarded) out.next = 'run conduit_onboard';
+  else if (out.health && out.health.ok) { try { out.agents = (await conduitAgents()).agents; } catch (e) { out.agents_error = e.message; } }
+  return out;
 }
 
 module.exports = {
@@ -826,8 +1010,15 @@ module.exports = {
   services: require('./services').services,
   ServiceError: require('./services').ServiceError,
   verifyServiceReceipt: require('./services').verifyReceipt,
-  // Conduit
+  // Conduit (agent relay by name; docs/conduit.md)
+  conduitConfig,
+  conduitOnboard,
   conduitSend,
+  conduitInbox,
+  conduitAck,
+  conduitReceipt,
+  conduitForward,
+  conduitAgents,
   conduitThreads,
   conduitStatus,
 };
