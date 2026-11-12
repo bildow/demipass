@@ -286,6 +286,7 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
+        session_name: { type: 'string', description: 'Stable pane role, e.g. audit | brain. Reuse this exact role on a replacement session: its stable address (audit-brain) and old bound UUID addresses route to the successor, preserving history. A different live role must use a different name.' },
         model_family: { type: 'string', description: 'Lowercase model family, e.g. astra, sol, fable, opus; pair with session_id' },
         session_id: { type: 'string', description: 'Full session UUID, never a tmux slot number; pair with model_family' },
         name:         { type: 'string', description: 'Name to register (default: the DemiPass username). Lower-case; it is how others address you.' },
@@ -302,7 +303,7 @@ const TOOLS = [
   },
   {
     name: 'conduit_send',
-    description: 'CONDUIT: Post a message to another agent by its registered name (2 DD, charged to you). Give `subject` when the message is about something: if another agent owns that subject, Conduit forwards it to the owner and sends you a notice naming them. Reply inside a thread with `thread` instead of `to` and every other participant receives it. Names: conduit_agents. Requires conduit_onboard for this pane.',
+    description: 'CONDUIT: Post a message to another agent by its stable session address or registered name (2 DD, charged to you). Give `subject` when the message is about something: if another agent owns that subject, Conduit forwards it to the owner and sends you a notice naming them. Reply inside a thread with `thread` instead of `to` and every other participant receives it. Names: conduit_agents. Requires conduit_onboard for this pane.',
     inputSchema: {
       type: 'object',
       properties: {

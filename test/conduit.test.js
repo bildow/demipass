@@ -49,7 +49,7 @@ const SESSION = jwt({ sub: 'did:key:zTester', username: 'tester', scope: 'admin'
 const SESSION_B = jwt({ sub: 'did:key:zOther', username: 'other', scope: 'admin', exp: Math.floor(Date.now() / 1000) + 86400 });
 
 // ── fake Conduit ──
-const cd = { agents: new Map(), walletName: null, revoked: new Set(), posts: [], reads: 0 };
+const cd = { agents: new Map(), walletName: null, revoked: new Set(), posts: [], reads: 0, routes: new Map(), old: new Set() };
 const cdSrv = http.createServer(async (req, res) => {
   const b = await body(req);
   if (req.url === '/health') return json(res, 200, { ok: true, service: 'conduit', version: '0.1.0', auth: 'demipass', agents: cd.agents.size, prices_dd: { post: 2, forward: 2, read: 1, ack: 1 } });
@@ -57,11 +57,19 @@ const cdSrv = http.createServer(async (req, res) => {
   if (!dp.issued.has(tok) || cd.revoked.has(tok)) return json(res, 401, { error: 'invalid_token' });
   if (req.method === 'POST' && req.url === '/agents/register') {
     if (!b.session_id && cd.walletName && cd.walletName !== b.name) return json(res, 409, { error: 'wallet_has_name', name: cd.walletName });
+    if (cd.old.has(b.name)) return json(res,410,{error:'session_rotated'});
     const existed = cd.agents.has(b.name); if (!b.session_id) cd.walletName = b.name;
     cd.agents.set(b.name, { name: b.name, owns: (b.owns || []).map((s) => s.toLowerCase()).sort(), description: b.description || '' });
     return json(res, existed ? 200 : 201, { ...cd.agents.get(b.name), via: 'own' });
   }
-  if (req.method === 'GET' && req.url === '/agents') return json(res, 200, { agents: [...cd.agents.values()] });
+  if (req.method === 'GET' && req.url === '/agents') return json(res, 200, { agents: [...cd.agents.values()].filter(a=>!cd.old.has(a.name)).map(a=>({...a,route:[...cd.routes.values()].find(r=>r.current===a.name)})) });
+  if (req.method === 'POST' && req.url === '/addresses/bind') {
+    const alias=b.session_name.toLowerCase().replace(/[^a-z0-9]+/g,'-'), old=cd.routes.get(alias);
+    if (old && old.current===b.address) return json(res,200,{ok:true,route:old,replayed:true});
+    if (b.expected_current !== (old ? old.current : null)) return json(res,409,{error:'handover_conflict'});
+    const route={alias,session_name:b.session_name,current:b.address,previous:old?old.current:null,generation:old?old.generation+1:1};
+    if (old) cd.old.add(old.current);cd.routes.set(alias,route);return json(res,200,{ok:true,route});
+  }
   if (req.method === 'POST' && req.url === '/messages') { cd.posts.push(b); return json(res, 201, { msg_id: `msg_${cd.posts.length}`, thread: 'th_1', to: b.to, state: 'delivered', charge_id: 'sc_1' }); }
   if (req.method === 'GET' && (req.url.startsWith('/history?') || req.url.startsWith('/receipts?'))) return json(res, 200, { address: req.headers['x-conduit-address'], route: req.url });
   if (req.method === 'GET' && req.url.startsWith('/inbox')) { cd.reads++; return json(res, 200, { agent: cd.walletName, messages: [], next_since: 0 }); }
@@ -255,6 +263,26 @@ dpSrv.listen(0, '127.0.0.1', () => cdSrv.listen(0, '127.0.0.1', async () => {
       assert.strictEqual(r.ok, false); assert.strictEqual(r.step, 'register');
       assert.notStrictEqual(demipass.conduitConfig().name, 'aaron');
     } finally { old.close(); }
+  });
+
+  await check('stable role onboarding and successor preserve role config; the stale original cannot reclaim it', async () => {
+    process.env.CONDUIT_SESSION_NAME='audit | brain';
+    // A legacy pane on its first ordinary read gets the stable role before the read, once.
+    await Promise.all([demipass.conduitHistory(),demipass.conduitHistory()]);
+    delete process.env.CONDUIT_SESSION_NAME;
+    const r=await demipass.conduitOnboard({session_name:'audit | brain',url:cdBase});
+    assert.strictEqual(r.ok,true,JSON.stringify(r));assert.strictEqual(r.stable_address,'audit-brain');
+    assert.strictEqual((await demipass.conduitOnboard()).route.generation,1);
+    assert.strictEqual((await demipass.conduitStatus()).me.stable_address,'audit-brain');
+    assert.strictEqual((await demipass.conduitOnboard({session_name:'another role'})).ok,false);
+    delete require.cache[require.resolve('../index.js')];
+    const successor=require('../index.js');successor.configure({baseUrl:dpBase,bearerToken:SESSION});
+    const next=await successor.conduitOnboard({model_family:'sol',session_id:'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',session_name:'audit | brain',url:cdBase});
+    assert.strictEqual(next.ok,true,JSON.stringify(next));assert.strictEqual(next.route.previous,r.name);assert.strictEqual(next.route.generation,2);
+    assert.strictEqual((await successor.conduitOnboard()).route.generation,2);
+    const stale=await demipass.conduitOnboard();assert.strictEqual(stale.ok,false);assert.strictEqual(stale.status,410);
+    assert.strictEqual(cd.routes.get('audit-brain').current,next.name);
+    assert.strictEqual(JSON.parse(fs.readFileSync(next.config_file)).session_name,'audit | brain');
   });
 
   await check('unbound pane refuses legacy routing before any network call', async () => {

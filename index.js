@@ -697,6 +697,13 @@ function conduitPaneAddress({ model_family, session_id } = {}) {
     throw new Error('model_family (lowercase family) and full lowercase UUID session_id required');
   return `${model_family}-${session_id}`;
 }
+// A stable session role is explicit; a shared daemon's cwd or PID is never an identity.
+function conduitSessionAlias(label) {
+  if (typeof label !== 'string' || label.length > 160) throw new Error('session_name must be at most 160 characters');
+  const alias = label.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  if (!/^[a-z][a-z0-9-]{1,79}$/.test(alias) || alias === 'conduit' || /^[a-z][a-z0-9]{0,14}-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(alias)) throw new Error('session_name needs a usable, non-reserved stable name');
+  return alias;
+}
 // The pane identity from the environment. Claude Code exports CLAUDE_CODE_SESSION_ID (not CLAUDE_SESSION_ID). An
 // incomplete or malformed identity is not thrown from every call (conduit_status "never throws"): it is reported as
 // conduitPaneError and leaves explicit conduit_onboard({model_family, session_id}) free to bind (review 2026-11-12).
@@ -767,6 +774,7 @@ function conduitConfig() {
     file_present: require('fs').existsSync(_conduitConfigFile()),
     url: String(f.url || process.env.CONDUIT_URL || CONDUIT_DEFAULT_URL).replace(/\/+$/, ''),
     name: _conduitPane() ? (f.name || '') : (f.name || process.env.CONDUIT_SENDER || ''),
+    session_name: f.session_name || null, stable_address: f.stable_address || null,
     token,
     token_id: f.token_id || (claims && claims.jti) || null,
     expires_at: expiresAt,
@@ -890,10 +898,17 @@ function _conduitHttp(method, path, body, token, baseUrl) {
 }
 
 /** Authenticated Conduit call. A token that has run out is minted again (once) from the DemiPass bearer. */
+let conduitAutoOnboarding = null;
 async function _conduit(method, path, body) {
   // A pane identity that is configured but malformed never falls back to the shared legacy address (Codex #19 P2).
   if (!_conduitPane() && conduitPaneError) throw new Error(conduitPaneError + ' — refusing to message as the shared legacy address; fix the identity or call conduit_onboard with model_family and session_id');
   if (process.env.CONDUIT_REQUIRE_PANE === '1' && !_conduitPane()) throw new Error('Pane identity required: call conduit_onboard with model_family and full session_id before messaging');
+  // Existing clients with a verified launcher identity/name migrate on first use. Never auto-reclaim a rotated role.
+  if (_conduitPane() && process.env.CONDUIT_SESSION_NAME && !conduitConfig().stable_address) {
+    if (!conduitAutoOnboarding) conduitAutoOnboarding = conduitOnboard().finally(() => { conduitAutoOnboarding = null; });
+    const ready = await conduitAutoOnboarding;
+    if (!ready.ok) throw new Error('Conduit session onboarding required: ' + (ready.error || ready.status || ready.step));
+  }
   const { url } = await _conduitResolveUrl();
   let token = await _conduitToken();
   try { return await _conduitHttp(method, path, body, token, url); }
@@ -913,7 +928,7 @@ async function _conduit(method, path, body) {
  * A missing consent returns {status:'approval_pending', approval_id}: approve it in the DemiPass app, then call again
  * with approval_id. Idempotent otherwise: run it any time to confirm or repair the setup.
  */
-async function conduitOnboard({ name, model_family, session_id, owns, description, daily_cap_dd, cap_dd, ttl, approval_id, url, renew } = {}) {
+async function conduitOnboard({ name, model_family, session_id, session_name, owns, description, daily_cap_dd, cap_dd, ttl, approval_id, url, renew } = {}) {
   if (model_family !== undefined || session_id !== undefined) {
     const proposed = { model_family, session_id };
     conduitPaneAddress(proposed);
@@ -927,6 +942,15 @@ async function conduitOnboard({ name, model_family, session_id, owns, descriptio
   const steps = [];
   const fs = require('fs');
   const prior = _conduitReadFile() || {};
+  const stableLabel = session_name !== undefined ? session_name : (prior.session_name || process.env.CONDUIT_SESSION_NAME);
+  let stableAlias = null;
+  if (stableLabel !== undefined && stableLabel !== null) {
+    if (!pane) return { ok:false, step:'stable_address', error:'session_name requires a model_family and session_id' };
+    try { stableAlias = conduitSessionAlias(stableLabel); }
+    catch (e) { return { ok:false, step:'stable_address', error:e.message }; }
+    if (prior.stable_address && prior.stable_address !== stableAlias)
+      return { ok:false, step:'stable_address', error:'this session already has a different stable address; start a separate session for a different role' };
+  }
   const resolved = url ? { url: String(url).replace(/\/+$/, ''), source: 'argument' } : await _conduitResolveUrl();
   const baseUrl = resolved.url;
   // The URL is saved only with a working setup (step 5): a mistyped one never replaces the relay every pane uses (#16 review P2).
@@ -1006,7 +1030,22 @@ async function conduitOnboard({ name, model_family, session_id, owns, descriptio
   }
   if (pane && reg.name !== wantName) return { ok: false, step: 'register', error: 'relay returned a different address', steps };
   steps.push({ step: 'register', ok: true, name: reg.name, owns: reg.owns, via: reg.via });
-  _conduitWriteFile({ ...(_conduitReadFile() || {}), ...(url ? { url: baseUrl } : {}), name: reg.name, owns: reg.owns, description: reg.description || '', consent_id: consent.id, daily_cap_dd: consent.daily_cap_dd, wallet: me.sub || cfg.wallet || null, onboarded_at: prior.onboarded_at || new Date().toISOString() });
+  let route = null;
+  if (stableAlias) {
+    try {
+      const dir = await withToken(t => _conduitHttp('GET', '/agents', null, t, baseUrl));
+      const active = (dir.agents || dir || []).find(a => a.route && a.route.alias === stableAlias);
+      // One optimistic handoff only. A concurrent successor wins or loses explicitly; never retry a stale CAS.
+      const result = await withToken(t => _conduitHttp('POST', '/addresses/bind', {
+        session_name: stableLabel.trim(), address: reg.name, expected_current: active ? active.route.current : null,
+      }, t, baseUrl));
+      if (!result.ok || !result.route || result.route.current !== reg.name || result.route.alias !== stableAlias)
+        throw new Error('relay did not confirm the requested stable address');
+      route = result.route;
+      steps.push({ step:'stable_address', ok:true, route });
+    } catch (e) { return { ok:false, step:'stable_address', status:e.status, error:e.message, name:reg.name, steps }; }
+  }
+  _conduitWriteFile({ ...(_conduitReadFile() || {}), ...(route ? { session_name:route.session_name, stable_address:route.alias } : {}), ...(url ? { url: baseUrl } : {}), name: reg.name, owns: reg.owns, description: reg.description || '', consent_id: consent.id, daily_cap_dd: consent.daily_cap_dd, wallet: me.sub || cfg.wallet || null, onboarded_at: prior.onboarded_at || new Date().toISOString() });
 
   // 6. directory check
   let listed = false;
@@ -1015,7 +1054,7 @@ async function conduitOnboard({ name, model_family, session_id, owns, descriptio
 
   const final = conduitConfig();
   const mode = fs.statSync(final.file).mode & 0o777;
-  return { ok: listed, url: baseUrl, url_source: resolved.source, name: reg.name, owns: reg.owns, wallet: final.wallet, consent: { id: consent.id, daily_cap_dd: consent.daily_cap_dd },
+  return { ok: listed, ...(route ? { stable_address:route.alias, session_name:route.session_name, route } : {}), url: baseUrl, url_source: resolved.source, name: reg.name, owns: reg.owns, wallet: final.wallet, consent: { id: consent.id, daily_cap_dd: consent.daily_cap_dd },
     token: { token_id: final.token_id, expires_at: final.expires_at, cap_dd: final.cap_dd, minted }, config_file: final.file, config_mode: mode.toString(8), steps,
     note: 'Every conduit_* call re-reads this file and mints a new token from the DemiPass session when this one runs out; no restart needed. Panes started before this file existed keep working through it too.' };
 }
@@ -1058,7 +1097,7 @@ async function conduitThreads() { const threads = await _conduit('GET', '/thread
 async function conduitStatus() {
   const cfg = conduitConfig();
   const resolved = await _conduitResolveUrl();
-  const out = { url: resolved.url, url_source: resolved.source, me: { onboarded: cfg.onboarded, name: cfg.name || null, wallet: cfg.wallet, token_id: cfg.token_id, token_expires_at: cfg.expires_at,
+  const out = { url: resolved.url, url_source: resolved.source, me: { onboarded: cfg.onboarded, name: cfg.name || null, session_name:cfg.session_name, stable_address:cfg.stable_address, wallet: cfg.wallet, token_id: cfg.token_id, token_expires_at: cfg.expires_at,
     token_valid: cfg.token_valid, cap_dd: cfg.cap_dd, consent_id: cfg.consent_id, daily_cap_dd: cfg.daily_cap_dd, config_file: cfg.file, config_present: cfg.file_present } };
   if (cfg.env_token_ignored) out.me.env_token_ignored = cfg.env_token_ignored;
   try { out.health = await _conduitHttp('GET', '/health', null, null, resolved.url); } catch (e) { out.health = { ok: false, error: e.message }; }
