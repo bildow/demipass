@@ -257,6 +257,19 @@ dpSrv.listen(0, '127.0.0.1', () => cdSrv.listen(0, '127.0.0.1', async () => {
     } finally { old.close(); }
   });
 
+  await check('unbound pane refuses legacy routing before any network call', async () => {
+    const child = require('child_process').spawnSync(process.execPath, ['-e', `
+      const assert=require('assert');const sdk=require('./index.js');
+      assert.strictEqual(sdk.conduitConfig().onboarded,false);
+      assert.strictEqual(sdk.conduitConfig().name,'');
+      (async()=>{
+        const r=await sdk.conduitOnboard();assert.strictEqual(r.step,'pane_identity');
+        await assert.rejects(sdk.conduitSend({to:'someone',body:'must not send'}),/Pane identity required/);
+      })().catch(()=>{process.exitCode=1});
+    `], { cwd: path.join(__dirname, '..'), env: {...process.env, CONDUIT_REQUIRE_PANE:'1', CONDUIT_MODEL_FAMILY:'', CONDUIT_SESSION_ID:''}, encoding:'utf8', timeout:3000 });
+    assert.strictEqual(child.status,0,child.stderr);
+  });
+
   dpSrv.close(); cdSrv.close(); fs.rmSync(tmp, { recursive: true, force: true });
   console.log(failures ? `\n${failures} failing` : '\nall passing');
   process.exit(failures ? 1 : 0);

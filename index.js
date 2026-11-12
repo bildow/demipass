@@ -776,6 +776,7 @@ function conduitConfig() {
   cfg.token_valid = !!token && (!expiresAt || Date.parse(expiresAt) - Date.now() > CONDUIT_RENEW_BEFORE_MS);
   cfg.onboarded = !!(cfg.name && cfg.token);
   cfg.pane_address = _conduitPane() ? conduitPaneAddress(_conduitPane()) : null;
+  if (process.env.CONDUIT_REQUIRE_PANE === '1' && !cfg.pane_address) { cfg.onboarded = false; cfg.name = ''; cfg.pane_required = true; }
   if (envTok && !envTokOk && !f.token) cfg.env_token_ignored = 'CONDUIT_TOKEN is not a DemiPass service token for conduit (aud svc:conduit); run conduit_onboard';
   return cfg;
 }
@@ -884,6 +885,7 @@ function _conduitHttp(method, path, body, token, baseUrl) {
 
 /** Authenticated Conduit call. A token that has run out is minted again (once) from the DemiPass bearer. */
 async function _conduit(method, path, body) {
+  if (process.env.CONDUIT_REQUIRE_PANE === '1' && !_conduitPane()) throw new Error('Pane identity required: call conduit_onboard with model_family and full session_id before messaging');
   const { url } = await _conduitResolveUrl();
   let token = await _conduitToken();
   try { return await _conduitHttp(method, path, body, token, url); }
@@ -912,6 +914,7 @@ async function conduitOnboard({ name, model_family, session_id, owns, descriptio
     conduitPane = proposed;
   }
   const pane = _conduitPane();
+  if (process.env.CONDUIT_REQUIRE_PANE === '1' && !pane) return { ok: false, step: 'pane_identity', error: 'model_family and full session_id required; shared legacy name is not a pane identity' };
   if (pane && name && name !== conduitPaneAddress(pane)) throw new Error('name must match model-family-session-id');
   const steps = [];
   const fs = require('fs');
