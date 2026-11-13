@@ -533,7 +533,7 @@ dpSrv.listen(0, '127.0.0.1', () => cdSrv.listen(0, '127.0.0.1', async () => {
         roleEnv(true); process.env.CONDUIT_MODEL_FAMILY = 'astra';
         try {
           for (const [sid, why] of [[SID_L, 'owner'], [SID_N, 'expiry']]) {
-            cd.agents.set(`astra-${sid}`, { name: `astra-${sid}`, owns: [], description: '' }); cd.retired.set(`astra-${sid}`, why);
+            cd.agents.set(`astra-${sid}`, { name: `astra-${sid}`, owns: ['lab'], description: '' }); cd.retired.set(`astra-${sid}`, why);
             process.env.CONDUIT_SESSION_ID = sid; const P = instance(); const regs = cd.registers.length, binds = cd.binds;
             if (why === 'owner') {
               await assert.rejects(P.conduitHistory({ since: 0 }), (e) => /retired by its owner/.test(e.message));
@@ -543,6 +543,8 @@ dpSrv.listen(0, '127.0.0.1', () => cdSrv.listen(0, '127.0.0.1', async () => {
               await P.conduitHistory({ since: 0 });
               assert.ok(cd.registers.length > regs, 'an expired pane is revived'); assert.ok(!cd.retired.has(`astra-${sid}`));
               assert.strictEqual(route().current, `astra-${sid}`, 'and takes the (unbound) launcher role');
+              const reg = cd.registers.filter((r) => r.name === `astra-${sid}`).pop(); assert.strictEqual(reg.owns, undefined, 'the revive sends no owns');
+              assert.deepStrictEqual(cd.agents.get(`astra-${sid}`).owns, ['lab'], 'so the relay keeps the subjects it had (Codex #23 P2)');
             }
           }
           // an explicit onboarding still brings the owner-retired pane back
