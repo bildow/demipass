@@ -19,6 +19,8 @@ const tenants = {
     actions: [{ action: 'submit', open: true, price_dd: 696, max_price_dd: 696 }, { action: 'sign-charter', open: false, price_dd: 12 }] },
   conduit: { slug: 'conduit', name: 'Conduit', endpoint: 'http://phasewhip.example.ts.net:8080', mcp_server: 'demipass#demipass-mcp', actions: [{ action: 'post', open: true, price_dd: 3 }] },
   bare: { slug: 'bare', name: 'Bare', endpoint: null, mcp_server: null, actions: [] },
+  fleetengine: { slug: 'fleetengine', name: 'FleetEngine', endpoint: 'https://repo.example/-/fleetengine', mcp_server: 'demipass#fleetengine-mcp',
+    actions: [{ action: 'job', open: true, price_dd: 14, max_price_dd: 14 }, { action: 'follow-up', open: true, price_dd: 2000, max_price_dd: 2000 }] },
 };
 const srv = http.createServer((req, res) => {
   let b = ''; req.on('data', c => { b += c; }); req.on('end', () => {
@@ -165,6 +167,26 @@ test('an explicit higher cap than the existing consent files a replacement for a
   const r = await ob.onboardService({ service: 'fleetgate', capDd: 9000, mcpConfig: cfg, wait: false });
   assert.strictEqual(r.status, 'approval_pending'); assert.match(r.next, /daily_cap_dd 9000/);
   assert.strictEqual(st.posts.at(-1).daily_cap_dd, 9000);
+});
+
+test('fleetengine: its own MCP server is attached, pinned to the onboarding wallet, with no session copy', async () => {
+  assert.ok(ob.resolveMcpServer('demipass#fleetengine-mcp').file.endsWith('fleetengine-mcp.js'));
+  st.polls = 0; st.approveAfter = 1;
+  const r = await ob.onboardService({ service: 'fleetengine', mcpConfig: cfg, waitMs: 30000 });
+  assert.strictEqual(r.ok, true, JSON.stringify(r)); assert.strictEqual(r.mcp.attached, true); assert.strictEqual(r.mcp.entry, 'fleetengine');
+  assert.ok(!r.admission, 'no FLEETGATE lane admission for an engine service');
+  const e = JSON.parse(fs.readFileSync(cfg, 'utf8')).mcpServers.fleetengine;
+  assert.deepStrictEqual(e.args, [path.resolve(__dirname, '..', 'fleetengine-mcp.js')]);
+  assert.strictEqual(e.env.DEMIPASS_TOKEN, undefined); assert.strictEqual(e.env.DEMIPASS_EXPECT_DID, 'did:key:zPaneWallet');
+});
+
+test('fleetengine: the low-consent warning is against the job intake, not the dearest follow-up action', async () => {
+  st.consents.push({ id: 90, service: 'fleetengine', daily_cap_dd: 10, status: 'active' });
+  const keep = st.consents.filter(c => c.service === 'fleetengine' && c.id !== 90);
+  st.consents = st.consents.filter(c => !(c.service === 'fleetengine' && c.id !== 90));
+  const r = await ob.onboardService({ service: 'fleetengine', mcpConfig: cfg, wait: false });
+  assert.strictEqual(r.ok, true, JSON.stringify(r)); assert.match(r.warning, /below one fleetengine call \(14 DD\)/);
+  st.consents = st.consents.filter(c => c.id !== 90).concat(keep);
 });
 
 test('list', async () => {

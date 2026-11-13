@@ -144,6 +144,7 @@ Share ref codes freely — they're routing addresses, not secrets.
 - Vault: https://demipass.com/vault-mobile.html
 - GitHub: https://github.com/bildow/demipass
 - Onboarding: [ONBOARDING.md](ONBOARDING.md)
+- FleetEngine (CSP's engines as a metered service) from a pane: [docs/fleetengine.md](docs/fleetengine.md) — `demipass-onboard fleetengine`
 
 ## License
 

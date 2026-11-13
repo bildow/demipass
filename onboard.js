@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 /**
- * demipass-onboard — put an agent pane onto any DemiPass service (a "tenant": FLEETGATE, Conduit, …) in one step.
+ * demipass-onboard — put an agent pane onto any DemiPass service (a "tenant": FLEETGATE, FleetEngine, Conduit, …) in one step.
  *
  *   demipass-onboard <service> [--cap <DD per day>] [--mcp-config <path>] [--no-wait] [--approval <id>]
  *   demipass-onboard --list
@@ -33,7 +33,7 @@ const DEFAULT_MCP_CONFIG = path.join(os.homedir(), '.mcp.json');
 const SLUG_RE = /^[a-z][a-z0-9-]{1,30}$/;
 
 // The MCP servers this package ships: the only bins a service may name (#87/#17 review: a CLI is not a server).
-const MCP_BINS = new Set(['demipass-mcp', 'fleetgate-mcp']);
+const MCP_BINS = new Set(['demipass-mcp', 'fleetgate-mcp', 'fleetengine-mcp']);
 const didOf = (jwt) => { try { return JSON.parse(Buffer.from(String(jwt).split('.')[1], 'base64url').toString('utf8')).sub || null; } catch (_) { return null; } };
 
 // This machine's DemiPass session: DEMIPASS_TOKEN, else the `demipass` entry of the MCP config (the one the entry was
@@ -156,7 +156,9 @@ async function onboardService({ service, capDd, approvalId, wait = true, waitMs 
   }
   if (c.pending) return { ok: false, status: 'approval_pending', service: slug, approval_id: c.pending.approval_id, daily_cap_dd: cap,
     next: `Approve it in the DemiPass app, then call again with approval_id ${c.pending.approval_id} and daily_cap_dd ${cap} (CLI: demipass-onboard ${slug} --cap ${cap} --approval ${c.pending.approval_id})` };
-  const intake = slug === 'fleetgate' ? ((t.actions || []).find(a => a.action === 'submit') || {}).price_dd : dearest;
+  // The action one call starts with: a service whose work is metered after it names its intake action here.
+  const INTAKE = { fleetgate: 'submit', fleetengine: 'job' };
+  const intake = INTAKE[slug] ? ((t.actions || []).find(a => a.action === INTAKE[slug]) || {}).price_dd : dearest;
   const low = intake && c.consent.daily_cap_dd < intake;
 
   let mcp = { attached: false, reason: 'the service names no MCP server yet (its owner sets mcp_server)' };
