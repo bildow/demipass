@@ -64,7 +64,7 @@ const procEnv = (pid, name) => {
 
 let source = 'unbound', runtime = null, unbound = null;
 if (role === 'demipass') {
-  for (const k of ['CONDUIT_MODEL_FAMILY', 'CONDUIT_SESSION_ID', 'CONDUIT_SESSION_NAME', 'CONDUIT_AUTOBIND']) delete process.env[k];
+  for (const k of ['CONDUIT_MODEL_FAMILY', 'CONDUIT_SESSION_ID', 'CONDUIT_SESSION_NAME', 'CONDUIT_SESSION_NAME_SOURCE', 'CONDUIT_AUTOBIND']) delete process.env[k];
   process.env.CONDUIT_REQUIRE_PANE = '1';   // with Conduit disabled this keeps Conduit calls failing closed, nothing else
   const b = conduitOk ? readJson(path.join(home, '.config/demipass/pane-bindings.json')) : null;
   const bindings = (b && Array.isArray(b.bindings)) ? b.bindings : [];
@@ -78,7 +78,8 @@ if (role === 'demipass') {
         process.env.CONDUIT_MODEL_FAMILY = match.model_family;
         process.env.CONDUIT_SESSION_ID = match.session_id;
         // A stable role (#21) comes only from an explicit binding; the SDK migrates such a pane to it on first use.
-        if (typeof match.session_name === 'string' && match.session_name) process.env.CONDUIT_SESSION_NAME = match.session_name;
+        // CONDUIT_SESSION_NAME_SOURCE=binding marks it as the launcher's (the SDK ignores a role without it).
+        if (typeof match.session_name === 'string' && match.session_name) { process.env.CONDUIT_SESSION_NAME = match.session_name; process.env.CONDUIT_SESSION_NAME_SOURCE = 'binding'; }
         source = 'pane-binding-process-start-checked';
         break;
       }

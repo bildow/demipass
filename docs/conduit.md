@@ -127,7 +127,8 @@ no combined Conduit+Buoy cap is implied. See the relay README for activation and
 Onboard with `model_family`, the full `session_id`, and `session_name: "audit | brain"`.
 The exact address remains `<family>-<uuid>`; the stable address is `audit-brain`.
 `conduit_onboard` reports both, and `conduit_agents` publishes the current binding.
-The label is explicit (or supplied by `CONDUIT_SESSION_NAME`), never inferred from cwd.
+The label is explicit (or supplied by `CONDUIT_SESSION_NAME` together with `CONDUIT_SESSION_NAME_SOURCE=binding`,
+which the pane launcher sets from an explicit binding), never inferred from cwd.
 Keep it on reconnect. A replacement session uses its NEW real UUID and the SAME role name.
 Do not give two independent live roles the same label: that requests a handoff.
 
@@ -143,15 +144,33 @@ credential isolation. No timeout or heartbeat guesses when to hand off: the trig
 successful onboarding of the successor with the same session name. Until then mail stays
 in the durable mailbox. A first binding cannot discover older unrelated UUIDs automatically.
 
-A launcher supplying verified pane identity plus `CONDUIT_SESSION_NAME` also upgrades
-an existing unbound pane on its first Conduit call. Concurrent calls share one onboarding
-attempt. Missing approval or conflicting binding blocks that call; no guessed identity,
-new wallet, automatic spending-cap increase, or silent takeover of a rotated session.
+A launcher supplying verified pane identity plus `CONDUIT_SESSION_NAME` (marked
+`CONDUIT_SESSION_NAME_SOURCE=binding`) also upgrades an existing unbound pane on its first Conduit call. Concurrent
+calls share one onboarding attempt. Missing approval or conflicting binding blocks that call; no guessed identity,
+new wallet, automatic spending-cap increase, or silent takeover of a rotated session. That automatic path binds the
+role only when it is unbound, already this pane's, or held by a retired pane: a role held by a **live** pane is never
+taken automatically (a duplicated `session_name` in pane bindings would otherwise cut the working pane off for good).
+The call fails with an error naming the live holder and the command that hands it over deliberately,
+`conduit_onboard({session_name: "<role>"})`. The same holds for `conduit_onboard()` without a `session_name` argument
+(role from the environment or the pane config).
+
+For setups without the launcher: a bare `CONDUIT_SESSION_NAME` (inherited from a shell or another pane) does nothing;
+set `CONDUIT_SESSION_NAME_SOURCE=binding` only where that pane really owns the role, or pass `session_name` to
+`conduit_onboard`.
+
+**Subjects on handover.** The successor registers with its own subjects only; the bind moves the role's subjects from
+the predecessor to it (relay 25fa1db returns them as `owns`), so two live panes never claim them at once. Against a
+relay before 25fa1db (no `owns` in the bind answer), the SDK re-registers the successor with them right after the bind.
+
+**Releasing a role.** `conduit_unbind({session_name?})` (`DELETE /addresses/:name`) frees a stable name of this wallet
+(it stays reserved to this wallet for 7 days) and dissolves its mailbox chain: each pane keeps the mail addressed to it.
+Without `session_name` it releases this pane's own role; the pane config forgets it and this pane does not re-bind it
+automatically (an explicit `conduit_onboard({session_name})` does). Errors: `unknown_stable_address`, `not_owner`.
 
 ### Stable roles with autobind and retirement
 
-- **Where a role comes from.** `CONDUIT_SESSION_NAME` is set by the pane launcher only from an explicit
-  `pane-bindings.json` entry's `session_name`; an inherited value is discarded. An **autobound** pane
+- **Where a role comes from.** `CONDUIT_SESSION_NAME` (with `CONDUIT_SESSION_NAME_SOURCE=binding`) is set by the pane
+  launcher only from an explicit `pane-bindings.json` entry's `session_name`; inherited values are discarded. An **autobound** pane
   (`CONDUIT_AUTOBIND=claude`) ignores `CONDUIT_SESSION_NAME` even if present (it may come from another pane): it takes a
   role over only through an explicit `conduit_onboard({session_name})`, which registers it under its autobound address
   and hands the role over (the predecessor then gets `session_rotated`). Subjects carry over when that onboarding is
@@ -163,9 +182,10 @@ new wallet, automatic spending-cap increase, or silent takeover of a rotated ses
 - **`410 address_retired` on a role's current pane.** Revived only for `retired_by: "expiry"` (as above); the
   re-register omits `owns` so the relay keeps the subjects on record, and the route keeps pointing at the pane. The
   error carries `stable_address` when the pane holds a role.
-- **`410 recipient_retired` through a role.** Sending to a stable address whose current pane is retired names both
-  ("… current pane of stable address "audit-brain" is gone …"); mail waits until that pane is re-registered or a
-  successor onboards with the same `session_name`.
+- **`410 recipient_retired` through a role.** Sending to a stable address whose current pane is retired names both.
+  The relay refuses the message and stores nothing, so nothing waits: "not delivered — … Send again after a successor
+  binds "audit-brain" or the pane returns". (A send to a retired pane address without a role: "not delivered — … Send
+  again after the pane returns".)
 - **Handing over from a retired pane.** The directory hides retired panes, so a role whose current pane is retired
   looks unbound and the first bind (`expected_current: null`) gets `409 handover_conflict` naming the holder. The SDK
   retries the bind **once** with that holder, and only if it is still absent from the live directory (i.e. retired);

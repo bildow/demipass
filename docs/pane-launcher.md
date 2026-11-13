@@ -34,13 +34,14 @@ bin/install-pane-launcher.sh <release-sha>
 2. **Conduit gate.** Conduit is enabled only if `~/.config/demipass/conduit.json` belongs to the same wallet as that
    credential. A missing, unreadable or other-wallet file disables **Conduit only** (one stderr line naming the file,
    never its content); vault, ssh and `/use` keep working.
-3. **Pane identity** (DemiPass role only). Inherited `CONDUIT_MODEL_FAMILY` / `CONDUIT_SESSION_ID` / `CONDUIT_SESSION_NAME` / `CONDUIT_AUTOBIND`
+3. **Pane identity** (DemiPass role only). Inherited `CONDUIT_MODEL_FAMILY` / `CONDUIT_SESSION_ID` / `CONDUIT_SESSION_NAME` / `CONDUIT_SESSION_NAME_SOURCE` / `CONDUIT_AUTOBIND`
    are discarded: the launcher is the only source. `CONDUIT_REQUIRE_PANE=1` is always set, so with no identity Conduit
    messaging fails closed instead of using the shared legacy name. It then walks up the parent chain (24 hops max) to
    the **nearest** agent runtime (`claude`, Claude Code's `cli.js`, `codex`, `~/.codex/packages/…`):
    - **Explicit binding.** A process on the way whose pid **and** start time (`/proc/<pid>/stat` field 22) match an
      entry in `~/.config/demipass/pane-bindings.json` gives `CONDUIT_MODEL_FAMILY` / `CONDUIT_SESSION_ID`, and its
-     `session_name` (if any) `CONDUIT_SESSION_NAME`, the stable role the SDK migrates the pane to on first use. A reused
+     `session_name` (if any) `CONDUIT_SESSION_NAME` plus `CONDUIT_SESSION_NAME_SOURCE=binding`, the stable role the SDK
+     migrates the pane to on first use (never taken from a live holder automatically; see conduit.md). A reused
      pid never matches a stale entry.
    - **Autobind (Claude Code).** If the nearest agent has no binding and is Claude Code, `CONDUIT_AUTOBIND=claude` is
      set. The launcher does not guess a family; the SDK derives it (below). Refused when the session id is one the

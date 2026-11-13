@@ -815,9 +815,11 @@ function _conduitAutobind() {
   _autobindMiss = { at: Date.now(), error: conduitPaneError };
   return null;
 }
-// CONDUIT_SESSION_NAME (set by the launcher from an explicit pane binding) names this pane's stable role. An autobound
-// pane ignores it: the variable may be inherited from another pane, and a role handover must be deliberate.
+// CONDUIT_SESSION_NAME names this pane's stable role only when the launcher set it from an explicit pane binding, which
+// it marks with CONDUIT_SESSION_NAME_SOURCE=binding (#23 review): a variable merely inherited from a shell or another
+// pane does nothing. An autobound pane ignores it either way; its role handover must be an explicit conduit_onboard.
 function _conduitEnvSessionName() {
+  if (process.env.CONDUIT_SESSION_NAME_SOURCE !== 'binding') return null;
   const pane = _conduitPane();
   return pane && conduitPaneSource !== 'autobind' ? (process.env.CONDUIT_SESSION_NAME || null) : null;
 }
@@ -1003,15 +1005,15 @@ function _conduitHttp(method, path, body, token, baseUrl) {
 
 /** Authenticated Conduit call. A token that has run out is minted again (once) from the DemiPass bearer. */
 let conduitAutoOnboarding = null;
-async function _conduit(method, path, body) {
+async function _conduit(method, path, body, { noAutoOnboard = false } = {}) {
   // A pane identity that is configured but malformed never falls back to the shared legacy address (Codex #19 P2).
   if (!_conduitPane() && conduitPaneError) throw new Error(conduitPaneError + ' — refusing to message as the shared legacy address; fix the identity or call conduit_onboard with model_family and session_id');
   if (process.env.CONDUIT_REQUIRE_PANE === '1' && !_conduitPane()) throw new Error('Pane identity required: call conduit_onboard with model_family and full session_id before messaging (panes with no automatic address, e.g. Codex, always need this)');
   // Existing clients with a verified launcher identity/name migrate on first use. Never auto-reclaim a rotated role.
   // An autobound pane never takes a role from the environment (it may be inherited from another pane): roles for those
   // are taken only by an explicit conduit_onboard({session_name}).
-  if (_conduitPane() && _conduitEnvSessionName() && !conduitConfig().stable_address) {
-    if (!conduitAutoOnboarding) conduitAutoOnboarding = conduitOnboard().finally(() => { conduitAutoOnboarding = null; });
+  if (!noAutoOnboard && _conduitPane() && _conduitEnvSessionName() && !conduitConfig().stable_address && !_conduitRoleReleased(_conduitEnvSessionName())) {
+    if (!conduitAutoOnboarding) conduitAutoOnboarding = conduitOnboard({}, { automatic: true }).finally(() => { conduitAutoOnboarding = null; });
     const ready = await conduitAutoOnboarding;
     if (!ready.ok) throw new Error('Conduit session onboarding required: ' + (ready.error || ready.status || ready.step));
   }
@@ -1056,9 +1058,10 @@ function _conduitRetiredError(e, body) {
   let msg;
   if (code === 'recipient_retired') {
     const to = e.body.to || (body && body.to) || 'the recipient';
+    // The relay refuses the post and stores nothing: nothing waits anywhere (#23 review).
     msg = alias
-      ? `Conduit: "${to}" (current pane of stable address "${alias}") is gone: that pane address was ${how}${when}. Mail to "${alias}" waits until that pane is re-registered or a successor session onboards with the same session_name.`
-      : `Conduit: "${to}" is gone: that pane address was ${how}${when}; only its own pane can bring it back. Find a live address with conduit_agents.`;
+      ? `Conduit: not delivered — "${to}", the current pane of stable address "${alias}", was ${how}${when}; the relay stored nothing. Send again after a successor binds "${alias}" or the pane returns.`
+      : `Conduit: not delivered — "${to}" was ${how}${when}; the relay stored nothing. Send again after the pane returns (only its own pane can bring it back), or find a live address with conduit_agents.`;
   } else {
     const name = e.body.name || (_conduitPane() ? conduitPaneAddress(_conduitPane()) : 'this address');
     msg = by === 'expiry'
@@ -1081,6 +1084,9 @@ function _conduitBindError(e, alias) {
     handover_conflict: `${a} changed hands while onboarding (current: ${b.current === undefined ? 'unknown' : b.current}); not retried: check conduit_agents and onboard again if this pane should take it over`,
     too_many_stable_addresses: `this wallet holds the maximum number of stable addresses${b.max ? ` (${b.max})` : ''}; release one before binding ${a}`,
     session_rotated: 'this session was rotated and cannot take a stable address',
+    stable_address_reserved: `${a} was recently unbound by another wallet and stays reserved to it${b.reserved_until ? ` until ${b.reserved_until}` : ''}`,
+    unknown_stable_address: `${a} is not a stable address`,
+    not_owner: `${a} belongs to another wallet`,
   };
   const message = 'Conduit stable address: ' + (known[code] || `${a} refused (${code || e.status || 'error'})${b.detail ? ': ' + b.detail : ''}; ${e.message}`);
   return { code: code || null, message, current: b.current };
@@ -1117,7 +1123,7 @@ async function _conduitRevive(token, url) {
  * A missing consent returns {status:'approval_pending', approval_id}: approve it in the DemiPass app, then call again
  * with approval_id. Idempotent otherwise: run it any time to confirm or repair the setup.
  */
-async function conduitOnboard({ name, model_family, session_id, session_name, owns, description, daily_cap_dd, cap_dd, ttl, approval_id, url, renew } = {}) {
+async function conduitOnboard({ name, model_family, session_id, session_name, owns, description, daily_cap_dd, cap_dd, ttl, approval_id, url, renew } = {}, { automatic = false } = {}) {
   if (model_family !== undefined || session_id !== undefined) {
     const proposed = { model_family, session_id };
     conduitPaneAddress(proposed);
@@ -1207,9 +1213,12 @@ async function conduitOnboard({ name, model_family, session_id, session_name, ow
     if (Array.isArray(owns)) return owns;
     // Through withToken: a revoked cached token is minted again here too, so the directory answer (not a stale fallback)
     // decides what this name owns (#16 review, after merge). Only a lookup that still fails falls back.
-    try { const dir = await withToken((t) => _conduitHttp('GET', '/agents', null, t, baseUrl)); const agents = dir.agents || dir || []; const mine = agents.find(a => a.name === n); if (mine) return mine.owns || []; const predecessor = stableAlias && agents.find(a => a.route && a.route.alias === stableAlias); if (predecessor) return predecessor.owns || []; } catch {}
+    // A successor registers with its OWN subjects only; the role's subjects move to it with the handover (relay 25fa1db
+    // POST /addresses/bind moves owns), so two live panes never claim them at once (#23 review).
+    try { const dir = await withToken((t) => _conduitHttp('GET', '/agents', null, t, baseUrl)); const mine = (dir.agents || dir || []).find(a => a.name === n); if (mine) return mine.owns || []; } catch {}
     return prior.owns || [];
   };
+  const listing = async () => { const d = await withToken(t => _conduitHttp('GET', '/agents', null, t, baseUrl)); return d.agents || d || []; };
   try { reg = await register(wantName, await ownsFor(wantName)); }
   catch (e) {
     if (pane && _conduitErrCode(e) === 'session_rotated') { const r = _conduitRotatedError(e); return { ok: false, step: 'register', status: 410, code: 'session_rotated', error: r.message, replacement: r.replacement, requested: wantName, steps }; }
@@ -1227,8 +1236,15 @@ async function conduitOnboard({ name, model_family, session_id, session_name, ow
   let route = null;
   if (stableAlias) {
     try {
-      const listing = async () => { const d = await withToken(t => _conduitHttp('GET', '/agents', null, t, baseUrl)); return d.agents || d || []; };
       const active = (await listing()).find(a => a.route && a.route.alias === stableAlias);
+      // A role whose session_name was not passed to THIS call (the automatic first-call onboarding from a launcher
+      // binding, or a conduit_onboard() re-using an env/recorded role) is bound only when it is unbound, already this
+      // pane's, or held by a retired pane. Taking it from a LIVE pane cuts that pane off for good, so it needs an explicit
+      // conduit_onboard({session_name}) (#23 review). Checked after register, so a rotated session still gets its 410.
+      if ((automatic || session_name === undefined) && active && active.route.current !== reg.name) {
+        return { ok:false, step:'stable_address', code:'stable_address_held', holder: active.route.current, name: reg.name, steps,
+          error: `stable address "${stableAlias}" is held by the live pane ${active.route.current}; ${automatic ? 'automatic onboarding' : 'onboarding without an explicit session_name'} never takes a role from a live pane. To hand it over to this pane deliberately (that pane is then cut off), run conduit_onboard({session_name: ${JSON.stringify(String(stableLabel).trim())}})` };
+      }
       const bind = (expected) => withToken(t => _conduitHttp('POST', '/addresses/bind', { session_name: stableLabel.trim(), address: reg.name, expected_current: expected }, t, baseUrl));
       // One optimistic handoff only. A concurrent successor wins or loses explicitly; never retry a stale CAS.
       // Single exception: the directory hides retired panes, so a role whose current pane was retired looks unbound
@@ -1245,10 +1261,16 @@ async function conduitOnboard({ name, model_family, session_id, session_name, ow
       if (!result.ok || !result.route || result.route.current !== reg.name || result.route.alias !== stableAlias)
         throw new Error('relay did not confirm the requested stable address');
       route = result.route;
+      if (Array.isArray(result.owns)) reg = { ...reg, owns: result.owns };   // the relay moved the role's subjects here
+      else if (active && active.name !== reg.name && Array.isArray(active.owns) && active.owns.length && !Array.isArray(owns)) {
+        // An older relay (before 25fa1db) does not move subjects on handover: carry them over after the bind instead.
+        reg = await register(reg.name, [...new Set([...(reg.owns || []), ...active.owns])]);
+        steps.push({ step: 'owns_carried', owns: reg.owns });
+      }
       steps.push({ step:'stable_address', ok:true, route });
     } catch (e) { const b = _conduitBindError(e, stableAlias); return { ok:false, step:'stable_address', status:e.status, code:b.code, error:b.message, ...(b.current !== undefined ? { current:b.current } : {}), name:reg.name, steps }; }
   }
-  _conduitWriteFile({ ...(_conduitReadFile() || {}), ...(route ? { session_name:route.session_name, stable_address:route.alias } : {}), ...(url ? { url: baseUrl } : {}), name: reg.name, owns: reg.owns, description: reg.description || '', consent_id: consent.id, daily_cap_dd: consent.daily_cap_dd, wallet: me.sub || cfg.wallet || null, onboarded_at: prior.onboarded_at || new Date().toISOString() });
+  _conduitWriteFile({ ...(_conduitReadFile() || {}), ...(route ? { session_name:route.session_name, stable_address:route.alias, stable_address_released: undefined } : {}), ...(url ? { url: baseUrl } : {}), name: reg.name, owns: reg.owns, description: reg.description || '', consent_id: consent.id, daily_cap_dd: consent.daily_cap_dd, wallet: me.sub || cfg.wallet || null, onboarded_at: prior.onboarded_at || new Date().toISOString() });
 
   // 6. directory check
   let listed = false;
@@ -1296,6 +1318,35 @@ async function conduitForward({ msg_id, to, note } = {}) { if (!msg_id || !to) t
 async function conduitAgents() { const r = await _conduit('GET', '/agents'); return { agents: r.agents || r }; }
 /** Legacy thread view (kept for lori_checkin and the old clients). */
 async function conduitThreads() { const threads = await _conduit('GET', '/threads'); return { threads: threads.data || threads.threads || threads || [] }; }
+function _conduitRoleReleased(label) {
+  let alias; try { alias = conduitSessionAlias(label); } catch { return false; }
+  return (_conduitReadFile() || {}).stable_address_released === alias;
+}
+/**
+ * Unbind a stable session name of this wallet (DELETE /addresses/:name, relay 25fa1db). The name is freed (reserved to
+ * this wallet for 7 days) and its mailbox chain dissolved: each pane keeps the mail addressed to it. If it was this
+ * pane's role, the pane config forgets it, and a launcher binding's session_name is not re-bound automatically by this
+ * pane again (an explicit conduit_onboard({session_name}) still can).
+ */
+async function conduitUnbind({ session_name } = {}) {
+  const label = session_name !== undefined ? session_name : (_conduitReadFile() || {}).session_name;
+  if (typeof label !== 'string' || !label.trim()) throw new Error('session_name required (none recorded for this pane)');
+  const alias = conduitSessionAlias(label);
+  let r;
+  try { r = await _conduit('DELETE', '/addresses/' + encodeURIComponent(alias), null, { noAutoOnboard: true }); }
+  catch (e) {
+    if (!e.body || typeof e.body.error !== 'string' || e.code) throw e;
+    const b = _conduitBindError(e, alias); const err = new Error(b.message.replace('Conduit stable address:', 'Conduit unbind:'));
+    err.status = e.status; err.code = b.code; err.body = e.body; throw err;
+  }
+  const f = _conduitReadFile() || {};
+  if (_conduitPane() && f.stable_address === alias) {
+    const { session_name: _s, stable_address: _a, ...rest } = f;
+    _conduitWriteFile({ ...rest, stable_address_released: alias });
+  }
+  return { ok: true, unbound: r.unbound || alias, current: r.current || null, addresses: r.addresses || [] };
+}
+
 /** Relay health plus this machine's onboarding state. Never throws on a missing token. */
 async function conduitStatus() {
   const cfg = conduitConfig();
@@ -1365,6 +1416,7 @@ module.exports = {
   conduitConfig,
   _conduitRegistryReset: () => { _registryCache = { at: 0, endpoint: null, base: null }; },
   conduitOnboard,
+  conduitUnbind,
   conduitSend,
   conduitInbox,
   conduitAck,

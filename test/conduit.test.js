@@ -90,8 +90,17 @@ const cdSrv = http.createServer(async (req, res) => {
     if (cd.old.has(b.address)) return json(res,410,{error:'session_rotated'});
     if (b.expected_current !== (old ? old.current : null)) return json(res,409,{error:'handover_conflict',current:old ? old.current : null});
     const route={alias,session_name:b.session_name.trim(),current:b.address,previous:old?old.current:null,generation:old?old.generation+1:1,addresses:[...(old?old.addresses:[]),b.address]};
-    if (old) cd.old.add(old.current);cd.routes.set(alias,route);return json(res,200,{ok:true,route});
+    if (old) cd.old.add(old.current);cd.routes.set(alias,route);
+    if (cd.legacyBind) return json(res,200,{ok:true,route});   // a relay before 25fa1db: owns are not moved
+    // 25fa1db: the handover MOVES the predecessor's subjects to the successor
+    const pred = old && cd.agents.get(old.current), succ = cd.agents.get(b.address);
+    if (pred && pred.owns.length) { succ.owns = [...new Set([...succ.owns, ...pred.owns])]; pred.owns = []; }
+    return json(res,200,{ok:true,route,owns:succ.owns});
   }
+  { const m = req.method === 'DELETE' && /^\/addresses\/([^/]+)$/.exec(req.url);
+    if (m) { const r = cd.routes.get(decodeURIComponent(m[1])); if (!r) return json(res,404,{error:'unknown_stable_address',name:decodeURIComponent(m[1])});
+      cd.routes.delete(r.alias); for (const n of r.addresses) cd.old.delete(n); cd.unbinds = (cd.unbinds || 0) + 1;
+      return json(res,200,{ok:true,unbound:r.alias,current:r.current,addresses:r.addresses}); } }
   if (req.method === 'POST' && req.url === '/messages') { cd.posts.push(b); return json(res, 201, { msg_id: `msg_${cd.posts.length}`, thread: 'th_1', to: b.to, state: 'delivered', charge_id: 'sc_1' }); }
   if (req.method === 'GET' && (req.url.startsWith('/history?') || req.url.startsWith('/receipts?'))) return json(res, 200, { address: req.headers['x-conduit-address'], route: req.url });
   if (req.method === 'GET' && req.url.startsWith('/inbox')) { cd.reads++; return json(res, 200, { agent: cd.walletName, messages: [], next_since: 0 }); }
@@ -313,12 +322,13 @@ dpSrv.listen(0, '127.0.0.1', () => cdSrv.listen(0, '127.0.0.1', async () => {
   });
   await check('sending to a retired pane address is a clear recipient_retired error worded from retired_by, never a revive', async () => {
     const ghost = 'fable-99999999-8888-4777-8666-555555555555';
-    const cases = [['expiry', /that pane address was retired after 7 days idle/], ['owner', /that pane address was retired by its owner/], [undefined, /that pane address was retired \(the relay did not say why\)/]];
+    const cases = [['expiry', /was retired after 7 days idle/], ['owner', /was retired by its owner/], [undefined, /was retired \(the relay did not say why\)/]];
     try {
       for (const [why, re] of cases) {
         cd.retired.set(ghost, why); cd.registers.length = 0;
         await assert.rejects(demipass.conduitSend({ to: ghost, body: 'hello?' }), (e) => {
-          assert.match(e.message, new RegExp(`"${ghost}" is gone`)); assert.match(e.message, re);
+          assert.match(e.message, new RegExp(`^Conduit: not delivered — "${ghost}" was`)); assert.match(e.message, re);
+          assert.match(e.message, /the relay stored nothing\. Send again after the pane returns/); assert.doesNotMatch(e.message, /wait/);
           assert.strictEqual(e.code, 'recipient_retired'); assert.strictEqual(e.status, 410); assert.strictEqual(e.body.to, ghost);
           return true;
         });
@@ -341,10 +351,10 @@ dpSrv.listen(0, '127.0.0.1', () => cdSrv.listen(0, '127.0.0.1', async () => {
   });
 
   await check('stable role onboarding and successor preserve role config; the stale original cannot reclaim it', async () => {
-    process.env.CONDUIT_SESSION_NAME='audit | brain';
+    process.env.CONDUIT_SESSION_NAME='audit | brain'; process.env.CONDUIT_SESSION_NAME_SOURCE='binding';
     // A legacy pane on its first ordinary read gets the stable role before the read, once.
     await Promise.all([demipass.conduitHistory(),demipass.conduitHistory()]);
-    delete process.env.CONDUIT_SESSION_NAME;
+    delete process.env.CONDUIT_SESSION_NAME; delete process.env.CONDUIT_SESSION_NAME_SOURCE;
     const r=await demipass.conduitOnboard({session_name:'audit | brain',url:cdBase});
     assert.strictEqual(r.ok,true,JSON.stringify(r));assert.strictEqual(r.stable_address,'audit-brain');
     assert.strictEqual((await demipass.conduitOnboard()).route.generation,1);
@@ -365,7 +375,7 @@ dpSrv.listen(0, '127.0.0.1', () => cdSrv.listen(0, '127.0.0.1', async () => {
   // ── stable session roles (#21, relay 39ed755/4680adc) × autobind × retirement ──
   {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dp-stable-home-'));
-    const saved = {}; for (const k of ['HOME', 'CONDUIT_AUTOBIND', 'CLAUDE_CODE_SESSION_ID', 'CONDUIT_SESSION_NAME', 'CONDUIT_MODEL_FAMILY', 'CONDUIT_SESSION_ID']) saved[k] = process.env[k];
+    const saved = {}; for (const k of ['HOME', 'CONDUIT_AUTOBIND', 'CLAUDE_CODE_SESSION_ID', 'CONDUIT_SESSION_NAME', 'CONDUIT_SESSION_NAME_SOURCE', 'CONDUIT_MODEL_FAMILY', 'CONDUIT_SESSION_ID']) saved[k] = process.env[k];
     const SID_A = 'a0a0a0a0-1111-4222-8333-444444444444', SID_B = 'b0b0b0b0-1111-4222-8333-444444444444', SID_C = 'c0c0c0c0-1111-4222-8333-444444444444', SID_D = 'd0d0d0d0-1111-4222-8333-444444444444';
     const instance = () => { delete require.cache[require.resolve('../index.js')]; const m = require('../index.js'); m.configure({ baseUrl: dpBase, bearerToken: SESSION }); return m; };
     const route = () => cd.routes.get('review-desk');
@@ -379,7 +389,7 @@ dpSrv.listen(0, '127.0.0.1', () => cdSrv.listen(0, '127.0.0.1', async () => {
         A = instance();
         const a = await A.conduitOnboard({ model_family: 'astra', session_id: SID_A, session_name: 'review | desk', owns: ['desk'], url: cdBase });
         assert.strictEqual(a.ok, true, JSON.stringify(a)); assert.strictEqual(route().current, `astra-${SID_A}`);
-        process.env.CONDUIT_AUTOBIND = 'claude'; process.env.CLAUDE_CODE_SESSION_ID = SID_B; process.env.CONDUIT_SESSION_NAME = 'review | desk';
+        process.env.CONDUIT_AUTOBIND = 'claude'; process.env.CLAUDE_CODE_SESSION_ID = SID_B; process.env.CONDUIT_SESSION_NAME = 'review | desk'; process.env.CONDUIT_SESSION_NAME_SOURCE = 'binding';
         B = instance(); const binds = cd.binds, regs = cd.registers.length;
         // first use with a role in the environment: Codex's migration path (#21) would onboard + hand over here
         await B.conduitHistory({ since: 0 });
@@ -422,7 +432,8 @@ dpSrv.listen(0, '127.0.0.1', () => cdSrv.listen(0, '127.0.0.1', async () => {
         E = instance(); const e0 = await E.conduitOnboard({ model_family: 'haiku', session_id: 'e0e0e0e0-1111-4222-8333-444444444444', url: cdBase }); assert.strictEqual(e0.ok, true, JSON.stringify(e0));
         await assert.rejects(E.conduitSend({ to: 'review-desk', body: 'anyone?' }), (e) => {
           assert.strictEqual(e.code, 'recipient_retired'); assert.strictEqual(e.stable_address, 'review-desk'); assert.strictEqual(e.retired_by, 'owner');
-          assert.match(e.message, new RegExp(`"opus-${SID_B}" \\(current pane of stable address "review-desk"\\) is gone: that pane address was retired by its owner.*successor session onboards with the same session_name`));
+          assert.match(e.message, new RegExp(`^Conduit: not delivered — "opus-${SID_B}", the current pane of stable address "review-desk", was retired by its owner .*the relay stored nothing\\. Send again after a successor binds "review-desk" or the pane returns\\.`));
+          assert.doesNotMatch(e.message, /wait/);
           return true;
         });
       });
@@ -442,6 +453,70 @@ dpSrv.listen(0, '127.0.0.1', () => cdSrv.listen(0, '127.0.0.1', async () => {
           assert.strictEqual(d.ok, false); assert.strictEqual(d.step, 'stable_address'); assert.strictEqual(d.status, 409);
           assert.strictEqual(cd.binds, b2 + 1, 'no retry over a live holder'); assert.strictEqual(route().current, `fable-${SID_C}`);
         } finally { cd.hideRoutes = false; }
+      });
+      const SID_G = '90909090-1111-4222-8333-444444444444', SID_H = '91919191-1111-4222-8333-444444444444', SID_J = '92929292-1111-4222-8333-444444444444', SID_K = '93939393-1111-4222-8333-444444444444';
+      const roleEnv = (on) => { if (on) { process.env.CONDUIT_SESSION_NAME = 'review | desk'; process.env.CONDUIT_SESSION_NAME_SOURCE = 'binding'; } else { delete process.env.CONDUIT_SESSION_NAME; delete process.env.CONDUIT_SESSION_NAME_SOURCE; } };
+      let G, J, K;
+
+      await check('a launcher role held by a LIVE pane is never taken automatically; explicit conduit_onboard({session_name}) hands it over and the bind moves the subjects', async () => {
+        assert.strictEqual(route().current, `fable-${SID_C}`); assert.deepStrictEqual(cd.agents.get(`fable-${SID_C}`).owns, ['desk']);
+        roleEnv(true); G = instance(); const binds = cd.binds;
+        const g0 = await G.conduitOnboard({ model_family: 'sol', session_id: SID_G, url: cdBase });
+        assert.deepStrictEqual([g0.ok, g0.step, g0.code, g0.holder], [false, 'stable_address', 'stable_address_held', `fable-${SID_C}`]);
+        assert.match(g0.error, /held by the live pane fable-c0c0.*never takes a role from a live pane.*conduit_onboard\(\{session_name: "review \| desk"\}\)/);
+        await assert.rejects(G.conduitHistory({ since: 0 }), (e) => {
+          assert.match(e.message, /^Conduit session onboarding required: stable address "review-desk" is held by the live pane fable-c0c0c0c0-1111-4222-8333-444444444444; automatic onboarding never takes a role from a live pane\. To hand it over to this pane deliberately \(that pane is then cut off\), run conduit_onboard\(\{session_name: "review \| desk"\}\)$/);
+          return true;
+        });
+        assert.strictEqual(cd.binds, binds, 'no bind attempted'); assert.strictEqual(route().current, `fable-${SID_C}`, 'the live holder keeps the role');
+        assert.deepStrictEqual(cd.registers.filter((r) => r.name === `sol-${SID_G}`).map((r) => r.owns), [[], []], 'registered with its own (empty) subjects only');
+        const g1 = await G.conduitOnboard({ session_name: 'review | desk' });
+        assert.strictEqual(g1.ok, true, JSON.stringify(g1)); assert.strictEqual(route().current, `sol-${SID_G}`);
+        assert.deepStrictEqual(g1.owns, ['desk'], 'the subjects arrive with the bind'); assert.deepStrictEqual(cd.agents.get(`fable-${SID_C}`).owns, [], 'and leave the predecessor');
+        roleEnv(false);
+      });
+
+      await check('an inherited CONDUIT_SESSION_NAME without CONDUIT_SESSION_NAME_SOURCE=binding does nothing', async () => {
+        process.env.CONDUIT_SESSION_NAME = 'review | desk'; const H = instance(); const binds = cd.binds;
+        try {
+          const h = await H.conduitOnboard({ model_family: 'haiku', session_id: SID_H, url: cdBase });
+          assert.strictEqual(h.ok, true, JSON.stringify(h)); assert.strictEqual(h.stable_address, undefined);
+          await H.conduitHistory({ since: 0 }); assert.strictEqual(cd.binds, binds); assert.strictEqual(route().current, `sol-${SID_G}`);
+        } finally { delete process.env.CONDUIT_SESSION_NAME; }
+      });
+
+      await check('the automatic first-call onboarding does bind a role whose holder is retired', async () => {
+        cd.retired.set(`sol-${SID_G}`, 'owner'); roleEnv(true); process.env.CONDUIT_MODEL_FAMILY = 'astra'; process.env.CONDUIT_SESSION_ID = SID_J;
+        try {
+          J = instance(); const regs = cd.registers.length, binds = cd.binds;
+          // an ordinary first call: the automatic onboarding runs first, takes the role over the retired holder, then the call
+          const h = await J.conduitHistory({ since: 0 }); assert.strictEqual(h.address, `astra-${SID_J}`);
+          assert.strictEqual(route().current, `astra-${SID_J}`); assert.strictEqual(J.conduitConfig().stable_address, 'review-desk');
+          assert.ok(cd.registers.length > regs); assert.strictEqual(cd.binds, binds + 2, 'conflict naming the retired holder, one retry');
+          assert.deepStrictEqual(cd.agents.get(`astra-${SID_J}`).owns, ['desk'], 'the retired holder\'s subjects moved with the bind');
+        } finally { roleEnv(false); delete process.env.CONDUIT_MODEL_FAMILY; delete process.env.CONDUIT_SESSION_ID; }
+      });
+
+      await check('a relay that does not move subjects on handover (before 25fa1db): they are carried over after the bind', async () => {
+        cd.legacyBind = true; K = instance();
+        try {
+          const k = await K.conduitOnboard({ model_family: 'fable', session_id: SID_K, session_name: 'review | desk', url: cdBase });
+          assert.strictEqual(k.ok, true, JSON.stringify(k)); assert.strictEqual(route().current, `fable-${SID_K}`);
+          assert.deepStrictEqual(k.steps.find((x) => x.step === 'owns_carried'), { step: 'owns_carried', owns: ['desk'] }); assert.deepStrictEqual(k.owns, ['desk']);
+        } finally { delete cd.legacyBind; }
+      });
+
+      await check('conduit_unbind releases this pane\'s role: no automatic re-bind afterwards, an explicit onboarding re-binds; unknown names are a clear error', async () => {
+        const u = await K.conduitUnbind();
+        assert.deepStrictEqual([u.ok, u.unbound, u.current], [true, 'review-desk', `fable-${SID_K}`]); assert.ok(!cd.routes.has('review-desk'));
+        const f = JSON.parse(fs.readFileSync(K.conduitConfig().file, 'utf8'));
+        assert.strictEqual(f.stable_address, undefined); assert.strictEqual(f.stable_address_released, 'review-desk'); assert.strictEqual(K.conduitConfig().stable_address, null);
+        roleEnv(true); const binds = cd.binds;
+        try { await K.conduitHistory({ since: 0 }); assert.strictEqual(cd.binds, binds, 'a released role is not re-bound automatically'); }
+        finally { roleEnv(false); }
+        const k2 = await K.conduitOnboard({ session_name: 'review | desk' }); assert.strictEqual(k2.ok, true, JSON.stringify(k2)); assert.strictEqual(route().current, `fable-${SID_K}`);
+        assert.strictEqual(JSON.parse(fs.readFileSync(K.conduitConfig().file, 'utf8')).stable_address_released, undefined);
+        await assert.rejects(K.conduitUnbind({ session_name: 'nope role' }), (e) => e.code === 'unknown_stable_address' && /^Conduit unbind: "nope-role" is not a stable address/.test(e.message));
       });
     } finally {
       for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
