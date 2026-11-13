@@ -14,7 +14,8 @@
 //   Otherwise, if it is Claude Code, CONDUIT_AUTOBIND=claude is set and the SDK derives the family from this session's
 //   transcript at the first Conduit call; the launcher never guesses a family. Any other runtime (Codex: no session id
 //   at MCP spawn) stays unbound. The walk stops at the nearest agent, so a nested agent never takes its parent pane's
-//   address (review 2026-11-12 M5), and inherited CONDUIT_* identity variables are discarded.
+//   address (review 2026-11-12 M5), and inherited CONDUIT_* identity variables are discarded. A stable session role
+//   (CONDUIT_SESSION_NAME) is set only from an explicit binding's session_name, never for an autobound pane.
 // - CONDUIT_REQUIRE_PANE=1 always: with no pane identity, Conduit messaging fails closed (never the shared legacy name).
 const fs = require('fs'), path = require('path'), os = require('os');
 
@@ -63,7 +64,7 @@ const procEnv = (pid, name) => {
 
 let source = 'unbound', runtime = null, unbound = null;
 if (role === 'demipass') {
-  for (const k of ['CONDUIT_MODEL_FAMILY', 'CONDUIT_SESSION_ID', 'CONDUIT_AUTOBIND']) delete process.env[k];
+  for (const k of ['CONDUIT_MODEL_FAMILY', 'CONDUIT_SESSION_ID', 'CONDUIT_SESSION_NAME', 'CONDUIT_AUTOBIND']) delete process.env[k];
   process.env.CONDUIT_REQUIRE_PANE = '1';   // with Conduit disabled this keeps Conduit calls failing closed, nothing else
   const b = conduitOk ? readJson(path.join(home, '.config/demipass/pane-bindings.json')) : null;
   const bindings = (b && Array.isArray(b.bindings)) ? b.bindings : [];
@@ -76,6 +77,8 @@ if (role === 'demipass') {
       if (match) {
         process.env.CONDUIT_MODEL_FAMILY = match.model_family;
         process.env.CONDUIT_SESSION_ID = match.session_id;
+        // A stable role (#21) comes only from an explicit binding; the SDK migrates such a pane to it on first use.
+        if (typeof match.session_name === 'string' && match.session_name) process.env.CONDUIT_SESSION_NAME = match.session_name;
         source = 'pane-binding-process-start-checked';
         break;
       }
@@ -104,6 +107,7 @@ const runtimeDir = path.join(home, '.config/demipass/runtime');
 fs.mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
 fs.writeFileSync(path.join(runtimeDir, `pid-${process.pid}.json`), JSON.stringify({ pid: process.pid, parent: process.ppid, role,
   model_family: process.env.CONDUIT_MODEL_FAMILY || null, session_id: process.env.CONDUIT_SESSION_ID || null,
+  session_name: process.env.CONDUIT_SESSION_NAME || null,
   autobind: process.env.CONDUIT_AUTOBIND || null, runtime, unbound_reason: unbound, source, release: RELEASE,
   at: new Date().toISOString() }) + '\n', { mode: 0o600 });
 require(path.join(home, '.local/share/demipass/releases', RELEASE, role === 'buoy' ? 'buoy-mcp.js' : 'mcp-server.js'));

@@ -111,7 +111,7 @@ connected parties. Polling retains receipts for disconnected or closed panes.
 `sent_at` is relay acceptance time, not a client clock assertion. `delivered_at` means
 committed to the recipient's relay inbox; it does not mean their pane read/processed it.
 Read/ack timestamps remain distinct. Messages do not expire when a pane closes. A later
-session can access an old address using its original metadata and the same authorized wallet;
+session can access an unbound old address using its original metadata and the same authorized wallet;
 knowing a name alone does not authorize reading it.
 
 Buoy statuses: pending, unconfigured, sending, anchored, uncertain. Only anchored includes
@@ -121,3 +121,52 @@ Buoy credential is required; no tick/body is fabricated if it is missing. Only m
 and timestamps go to Buoy, not message contents. Historical messages keep original timestamps
 but are not retroactively stamped. Buoy billing is separate from the Conduit consent budget;
 no combined Conduit+Buoy cap is implied. See the relay README for activation and rollback.
+
+## Stable session addresses and rotation
+
+Onboard with `model_family`, the full `session_id`, and `session_name: "audit | brain"`.
+The exact address remains `<family>-<uuid>`; the stable address is `audit-brain`.
+`conduit_onboard` reports both, and `conduit_agents` publishes the current binding.
+The label is explicit (or supplied by `CONDUIT_SESSION_NAME`), never inferred from cwd.
+Keep it on reconnect. A replacement session uses its NEW real UUID and the SAME role name.
+Do not give two independent live roles the same label: that requests a handoff.
+
+Onboarding registers the new session, reads the current binding, then submits one
+compare-and-swap handoff. A concurrent conflict is reported, not silently retried.
+After handoff, both the stable address and every earlier bound session address deliver
+to the successor. It inherits backlog, threads, history and receipt cursors. Original
+message sender/recipient IDs, sent/delivery times and Buoy receipts are never rewritten.
+Unread bodies still require the normal paid inbox read. The shared payer and cap do not change.
+The old session receives `session_rotated` and cannot automatically reclaim the role.
+A same-wallet credential remains authority over all its routing; this is not per-pane
+credential isolation. No timeout or heartbeat guesses when to hand off: the trigger is
+successful onboarding of the successor with the same session name. Until then mail stays
+in the durable mailbox. A first binding cannot discover older unrelated UUIDs automatically.
+
+A launcher supplying verified pane identity plus `CONDUIT_SESSION_NAME` also upgrades
+an existing unbound pane on its first Conduit call. Concurrent calls share one onboarding
+attempt. Missing approval or conflicting binding blocks that call; no guessed identity,
+new wallet, automatic spending-cap increase, or silent takeover of a rotated session.
+
+### Stable roles with autobind and retirement
+
+- **Where a role comes from.** `CONDUIT_SESSION_NAME` is set by the pane launcher only from an explicit
+  `pane-bindings.json` entry's `session_name`; an inherited value is discarded. An **autobound** pane
+  (`CONDUIT_AUTOBIND=claude`) ignores `CONDUIT_SESSION_NAME` even if present (it may come from another pane): it takes a
+  role over only through an explicit `conduit_onboard({session_name})`, which registers it under its autobound address
+  and hands the role over (the predecessor then gets `session_rotated`). Subjects carry over when that onboarding is
+  the session's first registration.
+- **`410 session_rotated` is final.** A call made as a rotated session throws `code: 'session_rotated'` with
+  `replacement` and `stable_address`: no revive, no re-onboarding, no retry. It wins over retirement (the relay checks
+  rotation first), so a rotated session that is also retired by expiry is never re-registered. `conduit_onboard` on a
+  rotated session returns `{ok:false, code:'session_rotated'}`.
+- **`410 address_retired` on a role's current pane.** Revived only for `retired_by: "expiry"` (as above); the
+  re-register omits `owns` so the relay keeps the subjects on record, and the route keeps pointing at the pane. The
+  error carries `stable_address` when the pane holds a role.
+- **`410 recipient_retired` through a role.** Sending to a stable address whose current pane is retired names both
+  ("… current pane of stable address "audit-brain" is gone …"); mail waits until that pane is re-registered or a
+  successor onboards with the same `session_name`.
+- **Handing over from a retired pane.** The directory hides retired panes, so a role whose current pane is retired
+  looks unbound and the first bind (`expected_current: null`) gets `409 handover_conflict` naming the holder. The SDK
+  retries the bind **once** with that holder, and only if it is still absent from the live directory (i.e. retired);
+  a live holder is never overridden, and any other conflict is reported, not retried.

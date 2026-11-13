@@ -49,27 +49,46 @@ const SESSION = jwt({ sub: 'did:key:zTester', username: 'tester', scope: 'admin'
 const SESSION_B = jwt({ sub: 'did:key:zOther', username: 'other', scope: 'admin', exp: Math.floor(Date.now() / 1000) + 86400 });
 
 // ── fake Conduit ──
-const cd = { agents: new Map(), walletName: null, revoked: new Set(), posts: [], reads: 0, retired: new Map(), registers: [], stickyRetire: false };
+const cd = { agents: new Map(), walletName: null, revoked: new Set(), posts: [], reads: 0, retired: new Map(), registers: [], stickyRetire: false, routes: new Map(), old: new Set() };
 const cdSrv = http.createServer(async (req, res) => {
   const b = await body(req);
   if (req.url === '/health') return json(res, 200, { ok: true, service: 'conduit', version: '0.1.0', auth: 'demipass', agents: cd.agents.size, prices_dd: { post: 2, forward: 2, read: 1, ack: 1 } });
   const tok = (req.headers.authorization || '').replace(/^Bearer /, '');
   if (!dp.issued.has(tok) || cd.revoked.has(tok)) return json(res, 401, { error: 'invalid_token' });
-  // Retirement (relay review): calls AS a retired address get 410 address_retired; sends TO one 410 recipient_retired; the
-  // body carries retired_by ('expiry' | 'owner'; absent = an older relay). Re-registering from the owning wallet
-  // reactivates it (stickyRetire: a relay that keeps it retired).
+  // Shaped on relay 4680adc. Routes (stable session names): alias → {alias, session_name, current, previous, generation,
+  // addresses}; earlier members (cd.old) are rotated: acting as one is 410 session_rotated (checked before retirement).
+  // Retirement: calls AS a retired address get 410 address_retired; sends TO one 410 recipient_retired; both carry
+  // retired_by ('expiry' | 'owner'; absent = an older relay) and stable_address when routed. Re-registering from the
+  // owning wallet reactivates it (stickyRetire: a relay that keeps it retired); omitted owns keep the ones on record.
+  const routeOf = (n) => cd.routes.get(n) || [...cd.routes.values()].find((r) => r.addresses.includes(n)) || null;
+  const resolve = (n) => { const r = routeOf(n); return r ? r.current : n; };
+  const routed = (n) => (routeOf(n) ? { stable_address: routeOf(n).alias } : {});
   const as = req.headers['x-conduit-address'];
   const by = (n) => (cd.retired.get(n) ? { retired_by: cd.retired.get(n) } : {});
-  if (as && cd.retired.has(as) && req.url !== '/agents/register') return json(res, 410, { error: 'address_retired', name: as, retired_at: '2026-11-05T00:00:00.000Z', ...by(as), detail: 're-register it' });
-  if (req.method === 'POST' && req.url === '/messages' && cd.retired.has(b.to)) return json(res, 410, { error: 'recipient_retired', to: b.to, retired_at: '2026-11-04T00:00:00.000Z', ...by(b.to) });
+  if (as && cd.old.has(as) && req.url !== '/agents/register' && req.url !== '/addresses/bind') return json(res, 410, { error: 'session_rotated', replacement: resolve(as), ...routed(as) });
+  if (as && cd.retired.has(as) && req.url !== '/agents/register') return json(res, 410, { error: 'address_retired', name: as, retired_at: '2026-11-05T00:00:00.000Z', ...by(as), ...routed(as), detail: 're-register it' });
+  if (req.method === 'POST' && req.url === '/messages' && b.to && cd.retired.has(resolve(b.to))) return json(res, 410, { error: 'recipient_retired', to: resolve(b.to), retired_at: '2026-11-04T00:00:00.000Z', ...by(resolve(b.to)), ...routed(b.to) });
   if (req.method === 'POST' && req.url === '/agents/register') {
-    cd.registers.push(b); if (!cd.stickyRetire && cd.retired.delete(b.name)) b.reactivated = true;
+    cd.registers.push(b);
+    if (cd.old.has(b.name)) return json(res, 410, { error: 'session_rotated', replacement: resolve(b.name) });
+    if (!cd.stickyRetire && cd.retired.delete(b.name)) b.reactivated = true;
     if (!b.session_id && cd.walletName && cd.walletName !== b.name) return json(res, 409, { error: 'wallet_has_name', name: cd.walletName });
-    const existed = cd.agents.has(b.name); if (!b.session_id) cd.walletName = b.name;
-    cd.agents.set(b.name, { name: b.name, owns: (b.owns || []).map((s) => s.toLowerCase()).sort(), description: b.description || '' });
-    return json(res, existed ? 200 : 201, { ...cd.agents.get(b.name), via: 'own' });
+    const existed = cd.agents.get(b.name); if (!b.session_id) cd.walletName = b.name;
+    const owns = b.owns === undefined && existed ? existed.owns : (b.owns || []).map((x) => x.toLowerCase()).sort();
+    cd.agents.set(b.name, { name: b.name, owns, description: b.description || '' });
+    return json(res, existed ? 200 : 201, { ...cd.agents.get(b.name), reactivated: !!b.reactivated, via: 'own' });
   }
-  if (req.method === 'GET' && req.url === '/agents') return json(res, 200, { agents: [...cd.agents.values()] });
+  if (req.method === 'GET' && req.url === '/agents') return json(res, 200, { agents: [...cd.agents.values()].filter(a=>!cd.old.has(a.name)&&!cd.retired.has(a.name)).map(a=>({...a,route:cd.hideRoutes?undefined:[...cd.routes.values()].find(r=>r.current===a.name)})) });
+  if (req.method === 'POST' && req.url === '/addresses/bind') {
+    cd.binds = (cd.binds || 0) + 1;
+    const alias=b.session_name.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,''), old=cd.routes.get(alias);
+    if (!cd.agents.has(b.address) || cd.retired.has(b.address)) return json(res,403,{error:'invalid_handover_target'});
+    if (old && old.current===b.address) return json(res,200,{ok:true,route:old,replayed:true});
+    if (cd.old.has(b.address)) return json(res,410,{error:'session_rotated'});
+    if (b.expected_current !== (old ? old.current : null)) return json(res,409,{error:'handover_conflict',current:old ? old.current : null});
+    const route={alias,session_name:b.session_name.trim(),current:b.address,previous:old?old.current:null,generation:old?old.generation+1:1,addresses:[...(old?old.addresses:[]),b.address]};
+    if (old) cd.old.add(old.current);cd.routes.set(alias,route);return json(res,200,{ok:true,route});
+  }
   if (req.method === 'POST' && req.url === '/messages') { cd.posts.push(b); return json(res, 201, { msg_id: `msg_${cd.posts.length}`, thread: 'th_1', to: b.to, state: 'delivered', charge_id: 'sc_1' }); }
   if (req.method === 'GET' && (req.url.startsWith('/history?') || req.url.startsWith('/receipts?'))) return json(res, 200, { address: req.headers['x-conduit-address'], route: req.url });
   if (req.method === 'GET' && req.url.startsWith('/inbox')) { cd.reads++; return json(res, 200, { agent: cd.walletName, messages: [], next_since: 0 }); }
@@ -252,13 +271,14 @@ dpSrv.listen(0, '127.0.0.1', () => cdSrv.listen(0, '127.0.0.1', async () => {
     assert.throws(() => demipass.conduitPaneAddress({ model_family: family, session_id: 'short-prefix' }));
   });
   const PANE = 'astra-11111111-2222-3333-4444-555555555555';
-  await check('a pane address retired by idle expiry is re-registered once (same identity, previous owns) and the call retried', async () => {
+  await check('a pane address retired by idle expiry is re-registered once (same identity, owns kept) and the call retried', async () => {
     const o = await demipass.conduitOnboard({ owns: ['pane-subject'] }); assert.strictEqual(o.ok, true, JSON.stringify(o));
     cd.retired.set(PANE, 'expiry'); cd.registers.length = 0; const posts = cd.posts.length;
     const r = await demipass.conduitSend({ to: 'brain', body: 'back after a week', client_msg_id: 'c-retired' });
     assert.strictEqual(r.ok, true, JSON.stringify(r));
     assert.strictEqual(cd.registers.length, 1);
-    assert.deepStrictEqual(cd.registers[0], { name: PANE, model_family: 'astra', session_id: '11111111-2222-3333-4444-555555555555', owns: ['pane-subject'], reactivated: true });
+    assert.deepStrictEqual(cd.registers[0], { name: PANE, model_family: 'astra', session_id: '11111111-2222-3333-4444-555555555555', reactivated: true }, 'owns omitted: the relay keeps them');
+    assert.deepStrictEqual(cd.agents.get(PANE).owns, ['pane-subject'], 'subjects survive the revive');
     assert.ok(!cd.retired.has(PANE)); assert.strictEqual(cd.posts.length, posts + 1, 'the original call retried exactly once');
     assert.strictEqual(cd.posts[cd.posts.length - 1].client_msg_id, 'c-retired', 'the retry keeps the idempotency key');
     assert.ok(JSON.parse(fs.readFileSync(demipass.conduitConfig().file, 'utf8')).revived_at);
@@ -316,6 +336,115 @@ dpSrv.listen(0, '127.0.0.1', () => cdSrv.listen(0, '127.0.0.1', async () => {
       assert.notStrictEqual(demipass.conduitConfig().name, 'aaron');
     } finally { old.close(); }
   });
+
+  await check('stable role onboarding and successor preserve role config; the stale original cannot reclaim it', async () => {
+    process.env.CONDUIT_SESSION_NAME='audit | brain';
+    // A legacy pane on its first ordinary read gets the stable role before the read, once.
+    await Promise.all([demipass.conduitHistory(),demipass.conduitHistory()]);
+    delete process.env.CONDUIT_SESSION_NAME;
+    const r=await demipass.conduitOnboard({session_name:'audit | brain',url:cdBase});
+    assert.strictEqual(r.ok,true,JSON.stringify(r));assert.strictEqual(r.stable_address,'audit-brain');
+    assert.strictEqual((await demipass.conduitOnboard()).route.generation,1);
+    assert.strictEqual((await demipass.conduitStatus()).me.stable_address,'audit-brain');
+    assert.strictEqual((await demipass.conduitOnboard({session_name:'another role'})).ok,false);
+    await demipass.conduitOnboard({owns:['review']});
+    delete require.cache[require.resolve('../index.js')];
+    const successor=require('../index.js');successor.configure({baseUrl:dpBase,bearerToken:SESSION});
+    const next=await successor.conduitOnboard({model_family:'sol',session_id:'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',session_name:'audit | brain',url:cdBase});
+    assert.strictEqual(next.ok,true,JSON.stringify(next));assert.strictEqual(next.route.previous,r.name);assert.strictEqual(next.route.generation,2);assert.deepStrictEqual(next.owns,['review']);
+    assert.strictEqual((await successor.conduitOnboard()).route.generation,2);
+    assert.deepStrictEqual((await successor.conduitOnboard({owns:[]})).owns,[]);
+    const stale=await demipass.conduitOnboard();assert.strictEqual(stale.ok,false);assert.strictEqual(stale.status,410);
+    assert.strictEqual(cd.routes.get('audit-brain').current,next.name);
+    assert.strictEqual(JSON.parse(fs.readFileSync(next.config_file)).session_name,'audit | brain');
+  });
+
+  // ── stable session roles (#21, relay 39ed755/4680adc) × autobind × retirement ──
+  {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dp-stable-home-'));
+    const saved = {}; for (const k of ['HOME', 'CONDUIT_AUTOBIND', 'CLAUDE_CODE_SESSION_ID', 'CONDUIT_SESSION_NAME', 'CONDUIT_MODEL_FAMILY', 'CONDUIT_SESSION_ID']) saved[k] = process.env[k];
+    const SID_A = 'a0a0a0a0-1111-4222-8333-444444444444', SID_B = 'b0b0b0b0-1111-4222-8333-444444444444', SID_C = 'c0c0c0c0-1111-4222-8333-444444444444', SID_D = 'd0d0d0d0-1111-4222-8333-444444444444';
+    const instance = () => { delete require.cache[require.resolve('../index.js')]; const m = require('../index.js'); m.configure({ baseUrl: dpBase, bearerToken: SESSION }); return m; };
+    const route = () => cd.routes.get('review-desk');
+    let A, B, E;
+    try {
+      process.env.HOME = home; delete process.env.CONDUIT_MODEL_FAMILY; delete process.env.CONDUIT_SESSION_ID;
+      fs.mkdirSync(path.join(home, '.claude/projects/-w'), { recursive: true });
+      fs.writeFileSync(path.join(home, '.claude/projects/-w', SID_B + '.jsonl'), JSON.stringify({ type: 'assistant', message: { model: 'claude-opus-5-5' } }) + '\n');
+
+      await check('an autobound pane ignores an inherited CONDUIT_SESSION_NAME; it takes a role over only by explicit conduit_onboard({session_name})', async () => {
+        A = instance();
+        const a = await A.conduitOnboard({ model_family: 'astra', session_id: SID_A, session_name: 'review | desk', owns: ['desk'], url: cdBase });
+        assert.strictEqual(a.ok, true, JSON.stringify(a)); assert.strictEqual(route().current, `astra-${SID_A}`);
+        process.env.CONDUIT_AUTOBIND = 'claude'; process.env.CLAUDE_CODE_SESSION_ID = SID_B; process.env.CONDUIT_SESSION_NAME = 'review | desk';
+        B = instance(); const binds = cd.binds, regs = cd.registers.length;
+        // first use with a role in the environment: Codex's migration path (#21) would onboard + hand over here
+        await B.conduitHistory({ since: 0 });
+        assert.strictEqual(B.conduitConfig().pane_address, `opus-${SID_B}`); assert.strictEqual(B.conduitConfig().pane_source, 'autobind');
+        assert.strictEqual(cd.binds, binds, 'no handover from the environment'); assert.strictEqual(cd.registers.length, regs, 'no onboarding either');
+        assert.strictEqual(B.conduitConfig().stable_address, null); assert.strictEqual(route().current, `astra-${SID_A}`);
+        const b1 = await B.conduitOnboard({ session_name: 'review | desk', url: cdBase });
+        assert.strictEqual(b1.ok, true, JSON.stringify(b1)); assert.strictEqual(b1.stable_address, 'review-desk');
+        assert.deepStrictEqual([b1.route.current, b1.route.previous, b1.route.generation], [`opus-${SID_B}`, `astra-${SID_A}`, 2]);
+        assert.strictEqual(b1.name, `opus-${SID_B}`); assert.deepStrictEqual(b1.owns, ['desk'], 'the successor inherits the role\'s subjects');
+        delete process.env.CONDUIT_SESSION_NAME;
+      });
+
+      await check('the rotated predecessor gets a final session_rotated: no revive, no re-onboarding, no retry, even when also retired by expiry', async () => {
+        const regs = cd.registers.length, posts = cd.posts.length, binds = cd.binds;
+        for (const expired of [false, true]) {
+          if (expired) cd.retired.set(`astra-${SID_A}`, 'expiry');
+          await assert.rejects(A.conduitSend({ to: 'brain', body: 'am I still here?' }), (e) => {
+            assert.strictEqual(e.status, 410); assert.strictEqual(e.code, 'session_rotated');
+            assert.strictEqual(e.replacement, `opus-${SID_B}`); assert.strictEqual(e.stable_address, 'review-desk');
+            assert.match(e.message, /this session was rotated.*handed over \(stable address "review-desk"\) to opus-.*not revived/); return true;
+          });
+        }
+        assert.strictEqual(cd.registers.length, regs, 'never re-registered'); assert.strictEqual(cd.posts.length, posts); assert.strictEqual(cd.binds, binds);
+        const again = await A.conduitOnboard();
+        assert.strictEqual(again.ok, false); assert.strictEqual(again.code, 'session_rotated'); assert.match(again.error, /cannot send, re-register or reclaim/);
+        assert.strictEqual(route().current, `opus-${SID_B}`, 'the role stays with the successor');
+        cd.retired.delete(`astra-${SID_A}`);
+      });
+
+      await check('an expired current pane of a role is revived by its own pane and keeps the role', async () => {
+        cd.retired.set(`opus-${SID_B}`, 'expiry'); const regs = cd.registers.length;
+        const r = await B.conduitSend({ to: 'brain', body: 'back' }); assert.strictEqual(r.ok, true, JSON.stringify(r));
+        assert.strictEqual(cd.registers.length, regs + 1); assert.strictEqual(route().current, `opus-${SID_B}`);
+        cd.retired.set(`opus-${SID_B}`, 'owner');
+        await assert.rejects(B.conduitSend({ to: 'brain', body: 'x' }), (e) => e.code === 'address_retired' && e.stable_address === 'review-desk' && /retired by its owner/.test(e.message));
+      });
+
+      await check('sending to a role whose current pane is retired: recipient_retired names the stable address', async () => {
+        E = instance(); const e0 = await E.conduitOnboard({ model_family: 'haiku', session_id: 'e0e0e0e0-1111-4222-8333-444444444444', url: cdBase }); assert.strictEqual(e0.ok, true, JSON.stringify(e0));
+        await assert.rejects(E.conduitSend({ to: 'review-desk', body: 'anyone?' }), (e) => {
+          assert.strictEqual(e.code, 'recipient_retired'); assert.strictEqual(e.stable_address, 'review-desk'); assert.strictEqual(e.retired_by, 'owner');
+          assert.match(e.message, new RegExp(`"opus-${SID_B}" \\(current pane of stable address "review-desk"\\) is gone: that pane address was retired by its owner.*successor session onboards with the same session_name`));
+          return true;
+        });
+      });
+
+      await check('a successor takes over a role whose current pane is retired (relay-named holder, one retry); a live holder is never overridden', async () => {
+        delete process.env.CONDUIT_AUTOBIND; delete process.env.CLAUDE_CODE_SESSION_ID;
+        const C = instance(); const binds = cd.binds;
+        const c = await C.conduitOnboard({ model_family: 'fable', session_id: SID_C, session_name: 'review | desk', url: cdBase });
+        assert.strictEqual(c.ok, true, JSON.stringify(c)); assert.strictEqual(cd.binds, binds + 2, 'one conflict, one retry');
+        assert.deepStrictEqual(c.steps.find((x) => x.step === 'stable_address_takeover'), { step: 'stable_address_takeover', from_retired: `opus-${SID_B}` });
+        assert.deepStrictEqual([route().current, route().previous], [`fable-${SID_C}`, `opus-${SID_B}`]);
+        assert.strictEqual((await E.conduitSend({ to: 'review-desk', body: 'delivered again' })).ok, true);
+        // a stale directory read (no route shown) while the holder is live: the conflict is refused, never retried
+        cd.hideRoutes = true; const D = instance(); const b2 = cd.binds;
+        try {
+          const d = await D.conduitOnboard({ model_family: 'sol', session_id: SID_D, session_name: 'review | desk', url: cdBase });
+          assert.strictEqual(d.ok, false); assert.strictEqual(d.step, 'stable_address'); assert.strictEqual(d.status, 409);
+          assert.strictEqual(cd.binds, b2 + 1, 'no retry over a live holder'); assert.strictEqual(route().current, `fable-${SID_C}`);
+        } finally { cd.hideRoutes = false; }
+      });
+    } finally {
+      for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  }
 
   await check('unbound pane refuses legacy routing before any network call', async () => {
     const child = require('child_process').spawnSync(process.execPath, ['-e', `
