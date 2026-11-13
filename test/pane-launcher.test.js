@@ -30,7 +30,7 @@ test.before(() => {
   fs.writeFileSync(path.join(home, '.config/demipass/conduit.json'), JSON.stringify({ wallet: 'did:key:zPaneWallet', name: 'legacy' }), { mode: 0o600 });
   const rel = path.join(home, '.local/share/demipass/releases', SHA); fs.mkdirSync(rel, { recursive: true });
   const stub = `const e=process.env;process.stdout.write(JSON.stringify({role:ROLE,family:e.CONDUIT_MODEL_FAMILY||null,session:e.CONDUIT_SESSION_ID||null,
-    autobind:e.CONDUIT_AUTOBIND||null,require_pane:e.CONDUIT_REQUIRE_PANE||null,has_token:!!(e.DEMIPASS_TOKEN||e.BUOY_TOKEN),pid:process.pid})+'\\n');`;
+    autobind:e.CONDUIT_AUTOBIND||null,sname:e.CONDUIT_SESSION_NAME||null,ssrc:e.CONDUIT_SESSION_NAME_SOURCE||null,require_pane:e.CONDUIT_REQUIRE_PANE||null,has_token:!!(e.DEMIPASS_TOKEN||e.BUOY_TOKEN),pid:process.pid})+'\\n');`;
   fs.writeFileSync(path.join(rel, 'mcp-server.js'), stub.replace('ROLE', '"demipass"'));
   fs.writeFileSync(path.join(rel, 'buoy-mcp.js'), stub.replace('ROLE', '"buoy"'));
   // chain.js: one hop of a process chain. argv = the remaining hops; CHAIN_BIND=1 records this process in pane-bindings.
@@ -38,7 +38,7 @@ test.before(() => {
     const fs=require('fs'),path=require('path'),{spawnSync}=require('child_process');
     const [,, next, ...rest]=process.argv; const env={...process.env};
     if (env.CHAIN_BIND==='1') { const s=fs.readFileSync('/proc/self/stat','utf8'); const f=s.slice(s.lastIndexOf(') ')+2).trim().split(/\\s+/);
-      fs.writeFileSync(path.join(env.HOME,'.config/demipass/pane-bindings.json'),JSON.stringify({bindings:[{pane:'%1',pid:process.pid,start_ticks:Number(f[19]),model_family:'opus',session_id:${JSON.stringify(OUTER)}}]})); }
+      fs.writeFileSync(path.join(env.HOME,'.config/demipass/pane-bindings.json'),JSON.stringify({bindings:[{pane:'%1',pid:process.pid,start_ticks:Number(f[19]),model_family:'opus',session_id:${JSON.stringify(OUTER)},session_name:'audit | brain'}]})); }
     delete env.CHAIN_BIND;
     let cmd, args;
     if (next.startsWith('launcher')) { cmd=${JSON.stringify(process.execPath)}; args=[env.LAUNCHER, ...(next==='launcher-buoy'?['--buoy']:[])];
@@ -106,6 +106,7 @@ test('a malformed ~/.mcp.json is reported without quoting any of it', () => {
 test('an explicit binding wins over autobind (pid + start time of the nearest agent)', () => {
   const { out, receipt } = chain(['claude+bind', 'launcher'], { CHAIN_MCP_SID: INNER });
   assert.deepStrictEqual([out.family, out.session, out.autobind, out.require_pane, out.has_token], ['opus', OUTER, null, '1', true]);
+  assert.strictEqual(out.sname, 'audit | brain', 'the binding\'s stable role is passed on'); assert.strictEqual(out.ssrc, 'binding'); assert.strictEqual(receipt.session_name, 'audit | brain');
   assert.strictEqual(receipt.source, 'pane-binding-process-start-checked'); assert.strictEqual(receipt.release, SHA);
   assert.ok(!JSON.stringify(receipt).includes(TOKEN), 'credential in the receipt');
   const st = fs.statSync(path.join(home, '.config/demipass/runtime', `pid-${out.pid}.json`)); assert.strictEqual(st.mode & 0o777, 0o600);
@@ -127,7 +128,7 @@ test('a nested agent gets nothing from its parent pane: Codex inside a bound pan
 
 test('a nested Claude inside a bound pane autobinds to its own session only, never the parent\'s binding', () => {
   const { out } = chain(['claude+bind', 'claude', 'launcher'], { CHAIN_MCP_SID: INNER });
-  assert.deepStrictEqual([out.family, out.session, out.autobind], [null, null, 'claude']);
+  assert.deepStrictEqual([out.family, out.session, out.autobind, out.sname], [null, null, 'claude', null], 'nor its stable role');
 });
 
 test('a session id the Claude process itself inherited is not autobound', () => {
@@ -136,8 +137,9 @@ test('a session id the Claude process itself inherited is not autobound', () => 
 });
 
 test('inherited CONDUIT_* identity variables are discarded', () => {
-  const { out } = chain(['codex', 'launcher'], { CONDUIT_MODEL_FAMILY: 'opus', CONDUIT_SESSION_ID: OUTER, CONDUIT_AUTOBIND: 'claude' });
-  assert.deepStrictEqual([out.family, out.session, out.autobind], [null, null, null]);
+  const { out } = chain(['codex', 'launcher'], { CONDUIT_MODEL_FAMILY: 'opus', CONDUIT_SESSION_ID: OUTER, CONDUIT_AUTOBIND: 'claude', CONDUIT_SESSION_NAME: 'audit | brain', CONDUIT_SESSION_NAME_SOURCE: 'binding' });
+  assert.deepStrictEqual([out.family, out.session, out.autobind, out.sname, out.ssrc], [null, null, null, null, null]);
+  assert.strictEqual(chain(['claude', 'launcher'], { CHAIN_MCP_SID: INNER, CONDUIT_SESSION_NAME: 'audit | brain' }).out.sname, null, 'an autobound pane gets no inherited role');
 });
 
 test('a missing conduit.json disables Conduit only: the MCP still starts, fail-closed, no binding or autobind', () => {
