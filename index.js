@@ -1069,6 +1069,22 @@ function _conduitRetiredError(e, body) {
   err.status = 410; err.code = code; err.retired_by = by || null; err.stable_address = alias; err.body = e.body; err.cause = e;
   return err;
 }
+// POST /addresses/bind refusals, said plainly. Unknown codes (a newer relay) keep the relay's code and detail.
+function _conduitBindError(e, alias) {
+  const b = (e && e.body) || {}; const code = typeof b.error === 'string' ? b.error : null;
+  const a = `"${alias}"`;
+  const known = {
+    bad_session_name: `session_name is not usable as a stable address${b.detail ? ': ' + b.detail : ''}`,
+    invalid_handover_target: `this pane's address cannot hold ${a} (not registered to this wallet as a pane, or retired)`,
+    stable_address_conflicts_with_agent: `${a} is (or normalizes to) a registered agent name; choose another session_name`,
+    stable_address_taken: `${a} belongs to another wallet, or this pane already holds a different stable address`,
+    handover_conflict: `${a} changed hands while onboarding (current: ${b.current === undefined ? 'unknown' : b.current}); not retried: check conduit_agents and onboard again if this pane should take it over`,
+    too_many_stable_addresses: `this wallet holds the maximum number of stable addresses${b.max ? ` (${b.max})` : ''}; release one before binding ${a}`,
+    session_rotated: 'this session was rotated and cannot take a stable address',
+  };
+  const message = 'Conduit stable address: ' + (known[code] || `${a} refused (${code || e.status || 'error'})${b.detail ? ': ' + b.detail : ''}; ${e.message}`);
+  return { code: code || null, message, current: b.current };
+}
 function _conduitRotatedError(e) {
   const b = (e && e.body) || {};
   const me = _conduitPane() ? conduitPaneAddress(_conduitPane()) : 'this address';
@@ -1230,7 +1246,7 @@ async function conduitOnboard({ name, model_family, session_id, session_name, ow
         throw new Error('relay did not confirm the requested stable address');
       route = result.route;
       steps.push({ step:'stable_address', ok:true, route });
-    } catch (e) { return { ok:false, step:'stable_address', status:e.status, error:e.message, name:reg.name, steps }; }
+    } catch (e) { const b = _conduitBindError(e, stableAlias); return { ok:false, step:'stable_address', status:e.status, code:b.code, error:b.message, ...(b.current !== undefined ? { current:b.current } : {}), name:reg.name, steps }; }
   }
   _conduitWriteFile({ ...(_conduitReadFile() || {}), ...(route ? { session_name:route.session_name, stable_address:route.alias } : {}), ...(url ? { url: baseUrl } : {}), name: reg.name, owns: reg.owns, description: reg.description || '', consent_id: consent.id, daily_cap_dd: consent.daily_cap_dd, wallet: me.sub || cfg.wallet || null, onboarded_at: prior.onboarded_at || new Date().toISOString() });
 

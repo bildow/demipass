@@ -83,6 +83,9 @@ const cdSrv = http.createServer(async (req, res) => {
     cd.binds = (cd.binds || 0) + 1;
     const alias=b.session_name.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,''), old=cd.routes.get(alias);
     if (!cd.agents.has(b.address) || cd.retired.has(b.address)) return json(res,403,{error:'invalid_handover_target'});
+    if (cd.bindError) return json(res, cd.bindError.status, cd.bindError.body);
+    if ([...cd.agents.keys()].some((n) => n.toLowerCase() === alias)) return json(res,409,{error:'stable_address_conflicts_with_agent'});
+    if (!old && cd.maxRoutes !== undefined && cd.routes.size >= cd.maxRoutes) return json(res,409,{error:'too_many_stable_addresses',max:cd.maxRoutes});
     if (old && old.current===b.address) return json(res,200,{ok:true,route:old,replayed:true});
     if (cd.old.has(b.address)) return json(res,410,{error:'session_rotated'});
     if (b.expected_current !== (old ? old.current : null)) return json(res,409,{error:'handover_conflict',current:old ? old.current : null});
@@ -445,6 +448,25 @@ dpSrv.listen(0, '127.0.0.1', () => cdSrv.listen(0, '127.0.0.1', async () => {
       fs.rmSync(home, { recursive: true, force: true });
     }
   }
+
+  await check('stable-address bind refusals come back as clear errors (name of an agent, wallet cap, an unknown newer refusal)', async () => {
+    delete require.cache[require.resolve('../index.js')]; const F = require('../index.js'); F.configure({ baseUrl: dpBase, bearerToken: SESSION });
+    const sid = 'f0f0f0f0-1111-4222-8333-444444444444';
+    let r = await F.conduitOnboard({ model_family: 'sol', session_id: sid, session_name: 'Tester', url: cdBase });
+    assert.deepStrictEqual([r.ok, r.step, r.status, r.code], [false, 'stable_address', 409, 'stable_address_conflicts_with_agent']);
+    assert.match(r.error, /"tester" is \(or normalizes to\) a registered agent name; choose another session_name/);
+    cd.maxRoutes = cd.routes.size;
+    try {
+      r = await F.conduitOnboard({ session_name: 'new role' });
+      assert.strictEqual(r.code, 'too_many_stable_addresses'); assert.match(r.error, new RegExp(`maximum number of stable addresses \\(${cd.maxRoutes}\\); release one before binding "new-role"`));
+    } finally { delete cd.maxRoutes; }
+    cd.bindError = { status: 409, body: { error: 'stable_name_shadows_agent', detail: 'normalizes to a registered name' } };
+    try {
+      r = await F.conduitOnboard({ session_name: 'new role' });
+      assert.strictEqual(r.code, 'stable_name_shadows_agent'); assert.match(r.error, /"new-role" refused \(stable_name_shadows_agent\): normalizes to a registered name/);
+    } finally { delete cd.bindError; }
+    assert.strictEqual(F.conduitConfig().stable_address, null, 'nothing recorded on a refusal');
+  });
 
   await check('unbound pane refuses legacy routing before any network call', async () => {
     const child = require('child_process').spawnSync(process.execPath, ['-e', `
