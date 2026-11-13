@@ -1219,6 +1219,20 @@ async function conduitOnboard({ name, model_family, session_id, session_name, ow
     return prior.owns || [];
   };
   const listing = async () => { const d = await withToken(t => _conduitHttp('GET', '/agents', null, t, baseUrl)); return d.agents || d || []; };
+  // The automatic first-call onboarding must not undo a deliberate retirement: registering a retired name revives it.
+  // GET /history (unchargeable) as this pane says which: 410 address_retired with retired_by. Only an idle-expiry
+  // retirement may be revived here; one by the owner needs an explicit conduit_onboard (Codex #23 P2).
+  if (automatic && pane) {
+    try { await withToken(t => _conduitHttp('GET', '/history?limit=1', null, t, baseUrl)); }
+    catch (e) {
+      if (_conduitErrCode(e) === 'address_retired' && e.body.retired_by !== 'expiry') {
+        const r = _conduitRetiredError(e, null);
+        return { ok: false, step: 'register', status: 410, code: 'address_retired', retired_by: e.body.retired_by || null, error: r.message, steps };
+      }
+      if (pane && _conduitErrCode(e) === 'session_rotated') { const r = _conduitRotatedError(e); return { ok: false, step: 'register', status: 410, code: 'session_rotated', error: r.message, replacement: r.replacement, requested: wantName, steps }; }
+      // 409 register_first (a new pane) and anything else: go on to register, which reports real failures itself.
+    }
+  }
   try { reg = await register(wantName, await ownsFor(wantName)); }
   catch (e) {
     if (pane && _conduitErrCode(e) === 'session_rotated') { const r = _conduitRotatedError(e); return { ok: false, step: 'register', status: 410, code: 'session_rotated', error: r.message, replacement: r.replacement, requested: wantName, steps }; }
@@ -1340,7 +1354,10 @@ async function conduitUnbind({ session_name } = {}) {
     err.status = e.status; err.code = b.code; err.body = e.body; throw err;
   }
   const f = _conduitReadFile() || {};
-  if (_conduitPane() && f.stable_address === alias) {
+  // Also when this pane has not saved its role yet but the launcher's binding names it: otherwise the next ordinary call
+  // would onboard automatically and bind the role just released (Codex #23 P2).
+  let envAlias = null; try { envAlias = _conduitEnvSessionName() ? conduitSessionAlias(_conduitEnvSessionName()) : null; } catch {}
+  if (_conduitPane() && (f.stable_address === alias || envAlias === alias)) {
     const { session_name: _s, stable_address: _a, ...rest } = f;
     _conduitWriteFile({ ...rest, stable_address_released: alias });
   }

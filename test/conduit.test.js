@@ -518,6 +518,42 @@ dpSrv.listen(0, '127.0.0.1', () => cdSrv.listen(0, '127.0.0.1', async () => {
         assert.strictEqual(JSON.parse(fs.readFileSync(K.conduitConfig().file, 'utf8')).stable_address_released, undefined);
         await assert.rejects(K.conduitUnbind({ session_name: 'nope role' }), (e) => e.code === 'unknown_stable_address' && /^Conduit unbind: "nope-role" is not a stable address/.test(e.message));
       });
+
+      await check('unbinding the launcher\'s role before this pane saved it is remembered: no automatic re-bind (Codex #23 P2)', async () => {
+        const SID_M = 'c3c3c3c3-1111-4222-8333-444444444444';
+        roleEnv(true); process.env.CONDUIT_MODEL_FAMILY = 'astra'; process.env.CONDUIT_SESSION_ID = SID_M;
+        try {
+          const M = instance(); assert.strictEqual(M.conduitConfig().stable_address || null, null);
+          const u = await M.conduitUnbind({ session_name: 'review | desk' }); assert.strictEqual(u.ok, true);
+          assert.strictEqual(JSON.parse(fs.readFileSync(M.conduitConfig().file, 'utf8')).stable_address_released, 'review-desk');
+          const binds = cd.binds; await M.conduitHistory({ since: 0 });
+          assert.strictEqual(cd.binds, binds, 'the released role is not bound again automatically'); assert.ok(!cd.routes.has('review-desk'));
+          await check('the automatic first-call onboarding never revives a pane its owner retired; an idle-expiry retirement it may (Codex #23 P2)', async () => {
+        const SID_L = 'c1c1c1c1-1111-4222-8333-444444444444', SID_N = 'c2c2c2c2-1111-4222-8333-444444444444';
+        roleEnv(true); process.env.CONDUIT_MODEL_FAMILY = 'astra';
+        try {
+          for (const [sid, why] of [[SID_L, 'owner'], [SID_N, 'expiry']]) {
+            cd.agents.set(`astra-${sid}`, { name: `astra-${sid}`, owns: [], description: '' }); cd.retired.set(`astra-${sid}`, why);
+            process.env.CONDUIT_SESSION_ID = sid; const P = instance(); const regs = cd.registers.length, binds = cd.binds;
+            if (why === 'owner') {
+              await assert.rejects(P.conduitHistory({ since: 0 }), (e) => /retired by its owner/.test(e.message));
+              assert.strictEqual(cd.registers.length, regs, 'no register: the owner retirement stands'); assert.strictEqual(cd.binds, binds);
+              assert.ok(cd.retired.has(`astra-${sid}`));
+            } else {
+              await P.conduitHistory({ since: 0 });
+              assert.ok(cd.registers.length > regs, 'an expired pane is revived'); assert.ok(!cd.retired.has(`astra-${sid}`));
+              assert.strictEqual(route().current, `astra-${sid}`, 'and takes the (unbound) launcher role');
+            }
+          }
+          // an explicit onboarding still brings the owner-retired pane back
+          roleEnv(false); process.env.CONDUIT_SESSION_ID = SID_L; const Q = instance();
+          const q = await Q.conduitOnboard({ model_family: 'astra', session_id: SID_L, url: cdBase }); assert.strictEqual(q.ok, true, JSON.stringify(q));
+          assert.ok(!cd.retired.has(`astra-${SID_L}`));
+        } finally { roleEnv(false); delete process.env.CONDUIT_MODEL_FAMILY; delete process.env.CONDUIT_SESSION_ID; }
+      });
+
+    } finally { roleEnv(false); delete process.env.CONDUIT_MODEL_FAMILY; delete process.env.CONDUIT_SESSION_ID; }
+      });
     } finally {
       for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
       fs.rmSync(home, { recursive: true, force: true });
