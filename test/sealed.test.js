@@ -254,6 +254,84 @@ test("guardian enrollment rejects shared domains/keys, unknown assurance, and al
     /disabled/,
   );
 });
+async function dishonestShare(f, index, { brokenBox = false } = {}) {
+  const id = "guardian-" + index, original = f.calls[id];
+  f.calls[id] = async (request) => {
+    const response = structuredClone(await original(request));
+    const context = {
+      context: f.packet.capsule.context,
+      guardian: id,
+      grant: response.body.grant_hash,
+      role: "released-share",
+    };
+    const fragment = await p.unwrap(f.recipient, response.body.share, context);
+    try {
+      fragment[1] ^= 1;
+      response.body.share = await p.wrap(f.recipient.publicKey, fragment, context);
+      if (brokenBox) {
+        const ct = p.bytes(response.body.share.ct);
+        ct[0] ^= 1;
+        response.body.share.ct = p.b64(ct);
+      }
+      response.signature = p.sign(response.body, f.gids[index].signPrivate);
+      return response;
+    } finally {
+      fragment.fill(0);
+    }
+  };
+}
+test("two honest guardians recover despite a signed incorrect share in any position", async (t) => {
+  for (const bad of [0, 1, 2]) {
+    const f = await fixture(t);
+    await dishonestShare(f, bad);
+    const release = await f.coordinator.release(f.req, "payer-token");
+    assert.equal(release.responses.length, 3, "retain every authenticated response");
+    const args = { ...f.packet, sender: f.sender.publicKey,
+      recipient: f.recipient, policy: f.policy, release };
+    assert.equal(await p.open(args), "HIGHLY PRIVATE fixture 42");
+    assert.equal(await p.open({ ...args, release: { ...release,
+      responses: [...release.responses].reverse() } }), "HIGHLY PRIVATE fixture 42");
+    f.coordinator.journal.close();
+    f.coordinator.journal = f.journal("coordinator");
+    const replay = await f.coordinator.release(f.req, "payer-token");
+    assert.deepEqual(replay.responses, release.responses);
+    assert.equal(f.charges(), 1);
+  }
+});
+test("signed undecryptable share can be bypassed, but not a missing honest quorum", async (t) => {
+  const f = await fixture(t);
+  await dishonestShare(f, 0, { brokenBox: true });
+  const release = await f.coordinator.release(f.req, "payer-token");
+  const args = { ...f.packet, sender: f.sender.publicKey,
+    recipient: f.recipient, policy: f.policy, release };
+  assert.equal(await p.open(args), "HIGHLY PRIVATE fixture 42");
+  await assert.rejects(p.open({ ...args, release: { ...release,
+    responses: release.responses.slice(0, 2) } }), /quorum/);
+  const tampered = structuredClone(release);
+  tampered.responses[0].signature = p.b64(Buffer.alloc(64));
+  await assert.rejects(p.open({ ...args, release: tampered }), /guardian/);
+  const rebound = structuredClone(release);
+  rebound.responses[0].body.grant_hash = "0".repeat(64);
+  rebound.responses[0].signature = p.sign(rebound.responses[0].body, f.gids[0].signPrivate);
+  await assert.rejects(p.open({ ...args, release: rebound }), /binding/);
+  await assert.rejects(p.open({ ...args, release: { ...release,
+    responses: [...release.responses, release.responses[0]] } }), /response|guardian/);
+});
+test("fewer than two correct shares never release plaintext or pretend the fee was refunded", async (t) => {
+  for (const unavailable of [false, true]) {
+    const f = await fixture(t);
+    await dishonestShare(f, 0);
+    if (unavailable) delete f.calls["guardian-2"];
+    else await dishonestShare(f, 1);
+    const release = await f.coordinator.release(f.req, "payer-token");
+    await assert.rejects(p.open({ ...f.packet, sender: f.sender.publicKey,
+      recipient: f.recipient, policy: f.policy, release }), /quorum/);
+    assert.equal(f.charges(), 1, "coordinator cannot verify encrypted share correctness");
+    const replay = await f.coordinator.release(f.req, "payer-token");
+    assert.deepEqual(replay.responses, release.responses);
+    assert.equal(f.charges(), 1);
+  }
+});
 test("one generic approval, wrong nonce, expired approval, and missing quorum never charge", async (t) => {
   const f = await fixture(t),
     bad = structuredClone(f.req);

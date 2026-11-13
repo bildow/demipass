@@ -311,7 +311,9 @@ class Coordinator {
         package: {
           envelope_hash: p.hash(envelope),
           grant_hash: gh,
-          responses: responses.slice(0, this.policy.threshold),
+          // Keep all three when available. A signature authenticates the
+          // guardian, not its hidden share; only the recipient can try pairs.
+          responses,
         },
       };
       this.journal.set(key, record); // fsync encrypted fulfillment BEFORE payment

@@ -130,11 +130,22 @@ Production remains held for:
   by this adapter. No real charge was made to validate that race.
 - A separate independent review and actual cross-host positive/refusal/recovery proof.
 
-The current threshold tolerates one **unavailable** guardian. A malicious guardian can
-return a signed but incorrect share: signature validation alone cannot prove correct
-decryption. Byzantine-share recovery and a refund/dispute policy are unresolved live
-gates. Billing buys a delivered authenticated release package, not a guarantee that
-the endpoint retains its private key or successfully processes plaintext.
+The threshold tolerates one **unavailable** guardian. When all three respond, the
+coordinator retains all authenticated responses; the recipient can recover from one
+signed but incorrect or undecryptable share if the other two are correct. It first
+checks every signature and message/recipient/policy/grant binding, then tries at most
+three pairs against the sender-authenticated gate ciphertext. Unknown guardians,
+duplicates, changed bindings and invalid signatures still reject the whole package.
+This is bounded recipient-side recovery, not a proof that every guardian is honest.
+
+One incorrect share plus one unavailable guardian cannot be recovered. The coordinator
+cannot inspect the encrypted shares for correctness, so an authenticated package can
+still incur the fixture 2-DD charge yet fail recipient decryption. A refund/dispute
+policy remains a live release gate. No refund or successful decryption is inferred
+from delivery. Existing paid packages with only two responses stay immutable: this
+change does not silently fetch new shares, charge again or repair historical packages.
+Billing buys a delivered authenticated release package, not a guarantee that the
+endpoint retains its private key or successfully processes plaintext.
 
 Transport delivery, capsule publication, prepared quorum, paid package, client
 decryption and application consumption are distinct events. The current journal has
@@ -148,7 +159,8 @@ There is no padding, traffic-analysis resistance, forward secrecy or ratchet in 
 An authorized recipient can retain plaintext; revocation cannot recall it. Existing
 plaintext messages and backups remain plaintext. Do not advertise hidden target value.
 
-Wire size is measured in the build receipt. Besides base64 (~4/3), signed keys,
+Wire size is measured in the build receipt. The November 12 measurement predates
+retaining a third response and is not an updated size claim. Besides base64 (~4/3), signed keys,
 capsules and independent RPCs add overhead. This fixture sends the bounded envelope
 to each guardian to verify its signature, so **total release traffic** is substantially
 larger than the single relay envelope. It is not a blanket “less than 5x” promise.

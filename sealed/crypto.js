@@ -383,7 +383,6 @@ async function open({
   const h = validateEnvelope(envelope, sender, recipient.publicKey),
     context = validateCapsule(envelope, capsule);
   let box = capsule.box,
-    gate,
     dek;
   const shares = [];
   try {
@@ -393,7 +392,8 @@ async function open({
       if (
         !release ||
         release.envelope_hash !== hash(envelope) ||
-        !Array.isArray(release.responses)
+        !Array.isArray(release.responses) ||
+        release.responses.length > policy.guardians.length
       )
         throw Error("guardian release required");
       const seen = new Set();
@@ -425,27 +425,56 @@ async function open({
         )
           throw Error("release binding mismatch");
         seen.add(g.id);
-        shares.push(
-          new Uint8Array(
-            await unwrap(recipient, body.share, {
-              context,
-              guardian: g.id,
-              grant: body.grant_hash,
-              role: "released-share",
-            }),
-          ),
-        );
+        fields(body.share, ["enc", "ct"]);
+        bytes(body.share.enc, 32);
+        bytes(body.share.ct, 49);
       }
       if (seen.size < policy.threshold) throw Error("guardian quorum missing");
-      gate = Buffer.from(await combine(shares));
-      box = JSON.parse(
-        decrypt(gate, box, { context, role: "gate" }).toString("utf8"),
-      );
+      // Authenticate the entire package before treating any signed response as
+      // unavailable. Unknown/duplicate guardians, tampering and binding changes
+      // remain hard failures even when two other responses would decrypt.
+      for (const { body } of release.responses) {
+        try {
+          const fragment = await unwrap(recipient, body.share, {
+              context,
+              guardian: body.guardian,
+              grant: body.grant_hash,
+              role: "released-share",
+          });
+          try {
+            if (fragment.length === 33) shares.push(new Uint8Array(fragment));
+          } finally {
+            fragment.fill(0);
+          }
+        } catch {
+          // An authenticated guardian may still supply an invalid HPKE box.
+          // Keep the remaining independent responses; never return plaintext here.
+        }
+      }
+      let recovered = false;
+      // Fixed 2-of-3 policy: at most three pairs, not an unbounded subset search.
+      // The sender-signed capsule's AEAD tag authenticates a reconstructed key.
+      for (let i = 0; i < shares.length && !recovered; i++) {
+        for (let j = i + 1; j < shares.length && !recovered; j++) {
+          let gate;
+          try {
+            gate = Buffer.from(await combine([shares[i], shares[j]]));
+            box = JSON.parse(
+              decrypt(gate, capsule.box, { context, role: "gate" }).toString("utf8"),
+            );
+            recovered = true;
+          } catch {
+            // A signed but incorrect share must not suppress the honest pair.
+          } finally {
+            if (gate) gate.fill(0);
+          }
+        }
+      }
+      if (!recovered) throw Error("no authentic guardian quorum");
     }
     dek = await unwrap(recipient, box, { context, role: "recipient-key" });
     return decrypt(dek, envelope.payload, h).toString("utf8");
   } finally {
-    if (gate) gate.fill(0);
     if (dek) dek.fill(0);
     for (const s of shares) s.fill(0);
   }
