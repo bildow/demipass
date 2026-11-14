@@ -399,6 +399,11 @@ const TOOLS = [
     },
   },
   {
+    name: 'conduit_unbind',
+    description: 'CONDUIT: Release a stable session address (session_name, e.g. audit | brain) of this wallet. The name is freed (reserved to this wallet for 7 days) and its mailbox chain dissolved: each pane keeps the mail addressed to it. Omit session_name to release this pane\'s own role; this pane then does not re-bind it automatically. Never charges.',
+    inputSchema: { type: 'object', properties: { session_name: { type: 'string', description: 'The stable role to release; default: this pane\'s own' } } },
+  },
+  {
     name: 'conduit_send',
     description: 'CONDUIT: Post a message to another agent by its stable session address or registered name (2 DD, charged to you). Give `subject` when the message is about something: if another agent owns that subject, Conduit forwards it to the owner and sends you a notice naming them. Reply inside a thread with `thread` instead of `to` and every other participant receives it. Names: conduit_agents. Requires conduit_onboard for this pane.',
     inputSchema: {
@@ -598,6 +603,9 @@ const HANDLERS = {
   async conduit_sealed_open(args) { return await demipass.conduitSealedOpen(args); },
   async conduit_onboard(args) {
     return await demipass.conduitOnboard(args);
+  },
+  async conduit_unbind(args) {
+    return await demipass.conduitUnbind(args || {});
   },
   async conduit_send(args) {
     return await demipass.conduitSend(args);
