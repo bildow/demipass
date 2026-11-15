@@ -275,7 +275,11 @@ function packetFromGit(g) {
   // At the top level, with diff.relative off and fixed a/ b/ prefixes: a user's git config must not narrow, re-root or
   // re-shape the packet (as for submissions, #28 independent review).
   if (gitTooOld()) return { error: gitTooOld() };
-  const at = (cwd) => (...args) => execFileSync('git', [...GIT_FIXED, '-C', cwd, '-c', 'diff.relative=false', '-c', 'diff.noprefix=false', '-c', 'diff.mnemonicPrefix=false', '-c', 'diff.ignoreSubmodules=none', ...args],
+  // diff.submodule=short: a submodule's own diff would run its own textconv and external drivers, which the parent's
+  // --no-textconv doesn't reach (#29 r1, 1). core.bigFileThreshold high and --text below: the checkout's config or
+  // attributes can't turn a change into "Binary files differ" and hide it (#29 r1, 2).
+  const at = (cwd) => (...args) => execFileSync('git', [...GIT_FIXED, '-C', cwd, '-c', 'diff.relative=false', '-c', 'diff.noprefix=false', '-c', 'diff.mnemonicPrefix=false', '-c', 'diff.ignoreSubmodules=none',
+    '-c', 'diff.submodule=short', '-c', 'core.bigFileThreshold=2047m', ...args],
     { stdio: ['ignore', 'pipe', 'pipe'], env: gitEnv(), maxBuffer: 32 << 20, timeout: 60000 });
   let run, head, mb, raw, diffBuf;
   try {
@@ -288,7 +292,7 @@ function packetFromGit(g) {
     const b = run('rev-parse', '--verify', '--end-of-options', `${base}^{commit}`).toString().trim();
     mb = run('merge-base', b, head).toString().trim();
     raw = run('diff', '--raw', '-z', '--no-renames', '--no-relative', '--ignore-submodules=none', '--no-abbrev', mb, head);
-    diffBuf = run('diff', '--no-color', '--no-ext-diff', '--no-textconv', '--no-renames', '--no-relative', '--ignore-submodules=none', '--full-index', '--src-prefix=a/', '--dst-prefix=b/', mb, head);
+    diffBuf = run('diff', '--no-color', '--no-ext-diff', '--no-textconv', '--text', '--submodule=short', '--no-renames', '--no-relative', '--ignore-submodules=none', '--full-index', '--src-prefix=a/', '--dst-prefix=b/', mb, head);
   } catch (e) {
     return { error: `git: ${(String(e.stderr || e.message).trim().split('\n').pop() || 'failed').slice(0, 300)}` };
   }
@@ -298,19 +302,22 @@ function packetFromGit(g) {
   for (let i = 0; i + 1 < parts.length; i += 2) {
     const pb = parts[i + 1], p = pb.toString('utf8');
     if (!Buffer.from(p, 'utf8').equals(pb)) return { error: `git: a changed path is not UTF-8 (${pb.toString('latin1').replace(/[^\x20-\x7e]/g, '?')})` };
+    // The door's review rule for a path: 1-300 characters, no NUL or newline (#29 r1, 4).
+    if (p.length > 300 || /[\0\n]/.test(p)) return { error: `git: the door takes changed paths of up to 300 characters without newlines (${p.slice(0, 80).replace(/\n/g, '\\n')}…)` };
     files.push({ status: parts[i].toString('latin1').split(' ')[4], path: p });
   }
   if (!files.length) return { error: `git: no changes between the merge base ${mb.slice(0, 12)} and ${ref}` };
   if (files.length > 300) return { error: `git: ${files.length} changed files, over 300 for one review` };
   const diff = diffBuf.toString('utf8');
-  if (!Buffer.from(diff, 'utf8').equals(diffBuf)) return { error: 'git: the diff is not UTF-8 text' };
+  if (!Buffer.from(diff, 'utf8').equals(diffBuf)) return { error: 'git: the diff is not UTF-8 text (a binary file in the change?); reviews take text changes' };
   if (diff.length > MAX_REVIEW_DIFF) return { error: `git: the diff is ${diff.length} characters, over ${MAX_REVIEW_DIFF} for one review` };
+  // The origin remote only if it is an https URL: credentials, query and fragment dropped, and only the door's plain
+  // form kept. An ssh or other remote is left out, never rewritten into an https location it may not have (#29 r1, 3).
   let remote;
   try {
-    const u = run('remote', 'get-url', 'origin').toString().trim();
-    const scp = /^[A-Za-z0-9._-]+@([A-Za-z0-9.-]+):([A-Za-z0-9._/-]+?)(\.git)?$/.exec(u);
-    const url = scp ? new URL(`https://${scp[1]}/${scp[2]}`) : new URL(u);
-    if (url.protocol === 'https:' || scp) remote = `https://${url.host}${url.pathname.replace(/\.git$/, '')}`;
+    const url = new URL(run('remote', 'get-url', 'origin').toString().trim());
+    const plain = `https://${url.host}${url.pathname.replace(/\.git$/, '')}`;
+    if (url.protocol === 'https:' && /^https:\/\/[A-Za-z0-9.-]{1,100}(:[0-9]{1,5})?\/[A-Za-z0-9._\/-]{1,200}$/.test(plain)) remote = plain;
   } catch (_) { remote = undefined; }
   return { packet: { source: { ...(remote ? { remote } : {}), head, base: mb }, files, diff,
     subject: run('log', '-1', '--no-show-signature', '--format=%s', head).toString().trim() } };

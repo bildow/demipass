@@ -517,11 +517,11 @@ test('the encoded request is measured before sending; supersedes takes the door\
 });
 
 // ── item 3: review-only requests ──
-test('review: the packet from a checkout (deletes included, ssh origin as https without credentials); follow by review_id', async () => {
+test('review: the packet from a checkout (deletes included, https origin without credentials); follow by review_id', async () => {
   mcp._reset(); state.doorRejectFirst = false;
   const { d, g } = repo();
   fsx.unlinkSync(pathx.join(d, 'README.md')); fsx.writeFileSync(pathx.join(d, 'docs/a.md'), 'reviewed\n');
-  g('add', '-A'); g('commit', '-q', '-m', 'sealed: wave 2'); g('remote', 'add', 'origin', 'git@github.com:bildow/demipass.git');
+  g('add', '-A'); g('commit', '-q', '-m', 'sealed: wave 2'); g('remote', 'add', 'origin', 'https://user:secret-tok@github.com/bildow/demipass.git?x=1#frag');
   const r = await call('fleetgate_review', { git: { dir: d, ref: 'work', base: 'main' }, note: 'exact revision', review_id: 'review-test-001' });
   assert.strictEqual(r.ok, true, JSON.stringify(r)); assert.match(r.next, /fleetgate_follow \{review_id: "review-test-001"\}/);
   const b = state.reviewPosts[state.reviewPosts.length - 1];
@@ -545,7 +545,43 @@ test('review: bad git input and no changes are refused with nothing sent', async
 test('review: the encoded request is measured before sending (as submit, #28 r6)', async () => {
   const { d, g } = repo();
   fsx.writeFileSync(pathx.join(d, 'docs/big.md'), '\\'.repeat(395000) + '\n'); g('add', '-A'); g('commit', '-q', '-m', 'big');
-  const n = state.doorCalls.length;
+  const n = (state.reviewPosts || []).length;
   const r = await call('fleetgate_review', { git: { dir: d, ref: 'work', base: 'main' } });
-  assert.strictEqual(r.ok, false); assert.match(r.error, /once encoded, over the door's 524288/); assert.strictEqual(state.doorCalls.length, n);
+  assert.strictEqual(r.ok, false); assert.match(r.error, /once encoded, over the door's 524288/); assert.strictEqual((state.reviewPosts || []).length, n, 'no review was posted (#29 r1, 5)');
+});
+
+test('review: ssh remotes left out; binary-marking config can\'t hide a change; a submodule\'s drivers never run; door path rules local (#29 independent review r1)', async () => {
+  state.doorRejectFirst = false;
+  // ssh remote: left out, not rewritten
+  let { d, g } = repo(); fsx.writeFileSync(pathx.join(d, 'docs/a.md'), 'x\n'); g('add', '-A'); g('commit', '-q', '-m', 'x');
+  g('remote', 'add', 'origin', 'git@private.example:org/repo.git');
+  let r = await call('fleetgate_review', { git: { dir: d, ref: 'work', base: 'main' }, review_id: 'review-ssh-0001' });
+  assert.strictEqual(r.ok, true, JSON.stringify(r)); assert.ok(!('remote' in state.reviewPosts.at(-1).source));
+  // * -diff and core.bigFileThreshold=1: the hunk is still in the packet
+  ({ d, g } = repo()); fsx.writeFileSync(pathx.join(d, 'docs/a.md'), 'the hidden change\n'); fsx.writeFileSync(pathx.join(d, '.gitattributes'), '* -diff\n');
+  g('add', '-A'); g('commit', '-q', '-m', 'hide'); g('config', 'core.bigFileThreshold', '1');
+  r = await call('fleetgate_review', { git: { dir: d, ref: 'work', base: 'main' }, review_id: 'review-bin-00001' });
+  assert.strictEqual(r.ok, true, JSON.stringify(r));
+  assert.match(state.reviewPosts.at(-1).diff, /\+the hidden change/); assert.ok(!/Binary files/.test(state.reviewPosts.at(-1).diff));
+  // a populated submodule with diff.submodule=diff and a textconv driver: the driver never runs
+  const sub = repo(); fsx.writeFileSync(pathx.join(sub.d, 'docs/s.txt'), 'one\n'); sub.g('add', '-A'); sub.g('commit', '-q', '-m', 's1');
+  ({ d, g } = repo());
+  g('-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', '-b', 'work', sub.d, 'vendored'); g('commit', '-q', '-m', 'add sub');
+  g('checkout', '-q', '-b', 'base2'); g('checkout', '-q', 'work');
+  fsx.writeFileSync(pathx.join(sub.d, 'docs/s.txt'), 'two\n'); sub.g('commit', '-q', '-am', 's2');
+  execFileSync('git', ['-C', pathx.join(d, 'vendored'), 'pull', '-q', 'origin', 'work'], { stdio: 'pipe' });
+  g('add', 'vendored'); g('commit', '-q', '-m', 'bump sub');
+  const marker = pathx.join(d, '..', `tc-${pathx.basename(d)}`), prog = pathx.join(d, '..', `tc-${pathx.basename(d)}.sh`);
+  fsx.writeFileSync(prog, `#!/bin/sh\ntouch '${marker}'\ncat "$1"\n`, { mode: 0o755 });
+  fsx.mkdirSync(pathx.join(d, '.git', 'modules', 'vendored', 'info'), { recursive: true });
+  fsx.writeFileSync(pathx.join(d, '.git', 'modules', 'vendored', 'info', 'attributes'), '*.txt diff=evil\n');
+  execFileSync('git', ['-C', pathx.join(d, 'vendored'), 'config', 'diff.evil.textconv', prog]);
+  g('config', 'diff.submodule', 'diff');
+  r = await call('fleetgate_review', { git: { dir: d, ref: 'work', base: 'base2' }, review_id: 'review-sub-00001' });
+  assert.strictEqual(r.ok, true, JSON.stringify(r)); assert.strictEqual(fsx.existsSync(marker), false, 'the submodule\'s textconv never ran');
+  // door path rules: a newline in a path is refused locally
+  ({ d, g } = repo()); fsx.writeFileSync(pathx.join(d, 'docs', 'line\nbreak.txt'), 'x\n'); g('add', '-A'); g('commit', '-q', '-m', 'nl');
+  const n = state.reviewPosts.length;
+  r = await call('fleetgate_review', { git: { dir: d, ref: 'work', base: 'main' } });
+  assert.strictEqual(r.ok, false); assert.match(r.error, /without newlines/); assert.strictEqual(state.reviewPosts.length, n);
 });
