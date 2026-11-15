@@ -426,3 +426,20 @@ test('git: diff.ignoreSubmodules=all cannot hide a submodule change; a top level
   r = await call('fleetgate_submit', { repo: 'boltcluster', git: { dir: b, ref: 'work', base: 'main' }, submission_id: 'ws-path-0001' });
   assert.strictEqual(r.ok, true, JSON.stringify(r)); assert.strictEqual(lastDoorBody().files[0].content, 'from proj-space\n');
 });
+
+test('git: replace objects are ignored; paths the door would refuse (non-ASCII, over 200, dot-files) are refused locally (#28 independent review r3)', async () => {
+  state.doorRejectFirst = false;
+  let { d, g } = repo();
+  fsx.writeFileSync(pathx.join(d, 'docs/a.md'), 'committed\n'); g('add', '-A'); g('commit', '-q', '-m', 'real');
+  const real = g('rev-parse', 'HEAD:docs/a.md').toString().trim();
+  const fake = execFileSync('git', ['-C', d, 'hash-object', '-w', '--stdin'], { input: 'substituted\n' }).toString().trim();
+  g('replace', real, fake);
+  let r = await call('fleetgate_submit', { repo: 'boltcluster', git: { dir: d, ref: 'HEAD', base: 'main' }, submission_id: 'replace-0001' });
+  assert.strictEqual(r.ok, true, JSON.stringify(r)); assert.strictEqual(lastDoorBody().files[0].content, 'committed\n');
+  for (const name of ['docs/caf\u00e9.md', 'docs/' + 'x'.repeat(200) + '.md', 'docs/.hidden.md']) {
+    ({ d, g } = repo()); fsx.writeFileSync(pathx.join(d, name), 'x\n'); g('add', '-A'); g('commit', '-q', '-m', 'p');
+    const n = state.doorCalls.length;
+    r = await call('fleetgate_submit', { repo: 'boltcluster', git: { dir: d, ref: 'HEAD', base: 'main' } });
+    assert.strictEqual(r.ok, false, name); assert.match(r.error, /ASCII letters/, name); assert.strictEqual(state.doorCalls.length, n, name);
+  }
+});

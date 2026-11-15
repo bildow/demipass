@@ -158,6 +158,18 @@ const GIT_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
 // The checkout's top level exactly as git prints it: only git's terminating newline is removed (a trim could turn
 // "/work/project " into another checkout, "/work/project"), and a root that isn't valid UTF-8 is refused
 // (#28 independent review round 2, 2).
+// Every git call reads the objects as committed: replace refs and grafts off (#28 independent review round 3, 1), and no
+// GIT_* variable from this process's environment (GIT_DIR, GIT_OBJECT_DIRECTORY, GIT_REPLACE_REF_BASE…) redirects it.
+const GIT_FIXED = ['--no-replace-objects'];
+function gitEnv() {
+  const env = {};
+  for (const [k, v] of Object.entries(process.env)) if (!k.startsWith('GIT_')) env[k] = v;
+  return { ...env, GIT_NO_REPLACE_OBJECTS: '1', GIT_TERMINAL_PROMPT: '0' };
+}
+// The door's own path rule (fleet/door/door.js PATH_RE): ASCII letters, digits, . _ - /; at most 200 characters; no
+// leading slash, dot segment or empty segment. Refused here, before anything is sent (#28 independent review round 3, 2).
+const DOOR_PATH_RE = /^(?!\/)(?!.*(^|\/)\.)(?!.*\/\/)[A-Za-z0-9._\-/]{1,200}$/;
+
 function topLevel(run) {
   const b = run('rev-parse', '--show-toplevel');
   const raw = b.subarray(0, b.length && b[b.length - 1] === 0x0a ? b.length - 1 : b.length);
@@ -175,7 +187,7 @@ function filesFromGit(g) {
     if (typeof v !== 'string' || !GIT_REF_RE.test(v) || v.includes('..') || v.endsWith('.lock')) return { error: `git.${k}: a branch, tag or commit name` };
   // Run at the repository's top level with diff.relative off: a user's git config must not narrow or re-root the change
   // (#28 independent review, 1).
-  const at = (cwd) => (...args) => execFileSync('git', ['-C', cwd, '-c', 'diff.relative=false', '-c', 'diff.ignoreSubmodules=none', ...args], { stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 16 << 20, timeout: 30000 });
+  const at = (cwd) => (...args) => execFileSync('git', [...GIT_FIXED, '-C', cwd, '-c', 'diff.relative=false', '-c', 'diff.ignoreSubmodules=none', ...args], { stdio: ['ignore', 'pipe', 'pipe'], env: gitEnv(), maxBuffer: 16 << 20, timeout: 30000 });
   let run, head, mb, listing;
   try {
     const top = topLevel(at(dir));
@@ -199,6 +211,7 @@ function filesFromGit(g) {
     if (!Buffer.from(p, 'utf8').equals(pb)) { refused.push(`${pb.toString('latin1').replace(/[^\x20-\x7e]/g, '?')}: the path is not UTF-8`); continue; }
     const [oldMode, newMode, , newSha, status] = meta;
     if (status === 'D') { refused.push(`${p}: deleted (the door can't delete or rename files)`); continue; }
+    if (!DOOR_PATH_RE.test(p)) { refused.push(`${p.slice(0, 220)}: the door takes paths of ASCII letters, digits, . _ - and /, up to 200 characters, with no dot-file or dot-directory`); continue; }
     if (!['A', 'M'].includes(status)) { refused.push(`${p}: ${status === 'T' ? 'its type changed' : status} (the door writes regular files only)`); continue; }
     // The door writes plain 100644 files: an executable, a symlink, a submodule or any mode change can't be reproduced
     // (#28 independent review, 2).
