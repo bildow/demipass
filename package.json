@@ -66,7 +66,8 @@
     "bin/install-pane-launcher.sh",
     "fleetgate-admission.js",
     "sealed/",
-    "docs/conduit-sealed.md"
+    "docs/conduit-sealed.md",
+    "docs/conduit-wave2.md"
   ],
   "dependencies": {
     "hpke-js": "1.8.1",
