@@ -44,6 +44,15 @@ const doorSrv = http.createServer(async (req, res) => {
     return json(res,200,{ok:true,wallet:state.wrongWallet ? 'did:key:zWrong' : wallets.get(req.headers.authorization),admission,
       ...(state.spend ? { spend: state.spend } : {})});
   }
+  if (req.url === '/door/v1/reviews' && req.method === 'POST') {
+    state.reviewPosts = (state.reviewPosts || []).concat([b]);
+    return json(res, 202, { ok: true, review_id: b.review_id, state: 'queued', next: { who: 'worker', what: 'Queued' } });
+  }
+  if (req.url.startsWith('/door/v1/reviews/')) {
+    const id = req.url.slice('/door/v1/reviews/'.length);
+    return id === 'review-known-01' ? json(res, 200, { ok: true, review_id: id, state: 'done', verdict: 'approved by all three seats', seats: [1, 2, 3], receipt_sha256: 'c'.repeat(64) })
+      : json(res, 404, { ok: false, code: 'no_review', error: 'No review from this wallet.' });
+  }
   if (req.url === '/door/v1/check' || req.url.startsWith('/door/v1/pulls/')) {
     state.freeCalls = (state.freeCalls || []).concat([{ url: req.url, method: req.method, auth: req.headers.authorization, body: b }]);
     if (state.oldDoor) return json(res, 404, { error: 'not found', route: req.url.slice(5) });
@@ -87,9 +96,9 @@ test.before(async () => {
 });
 test.after(() => { dpSrv.close(); doorSrv.close(); });
 
-test('tools/list names the six tools', async () => {
+test('tools/list names the seven tools', async () => {
   const r = await mcp.handleMessage({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
-  assert.deepStrictEqual(r.result.tools.map(t => t.name).sort(), ['fleetgate_check', 'fleetgate_follow', 'fleetgate_onboard', 'fleetgate_prices', 'fleetgate_status', 'fleetgate_submit']);
+  assert.deepStrictEqual(r.result.tools.map(t => t.name).sort(), ['fleetgate_check', 'fleetgate_follow', 'fleetgate_onboard', 'fleetgate_prices', 'fleetgate_review', 'fleetgate_status', 'fleetgate_submit']);
 });
 
 test('submit before onboarding: refused, nothing sent to the door, and no consent filed on the phone', async () => {
@@ -505,4 +514,38 @@ test('the encoded request is measured before sending; supersedes takes the door\
   assert.strictEqual(r.ok, false, JSON.stringify(r).slice(0, 300)); assert.match(r.error, /once encoded, over the door's 524288/); assert.strictEqual(state.doorCalls.length, n);
   r = await call('fleetgate_submit', { repo: 'boltcluster', files: [{ path: 'docs/a.md', content: 'x\n' }], title: 't', submission_id: 'newer-000001', supersedes: 'abc123' });
   assert.strictEqual(r.ok, true, JSON.stringify(r)); assert.strictEqual(lastDoorBody().supersedes, 'abc123');
+});
+
+// ── item 3: review-only requests ──
+test('review: the packet from a checkout (deletes included, ssh origin as https without credentials); follow by review_id', async () => {
+  mcp._reset(); state.doorRejectFirst = false;
+  const { d, g } = repo();
+  fsx.unlinkSync(pathx.join(d, 'README.md')); fsx.writeFileSync(pathx.join(d, 'docs/a.md'), 'reviewed\n');
+  g('add', '-A'); g('commit', '-q', '-m', 'sealed: wave 2'); g('remote', 'add', 'origin', 'git@github.com:bildow/demipass.git');
+  const r = await call('fleetgate_review', { git: { dir: d, ref: 'work', base: 'main' }, note: 'exact revision', review_id: 'review-test-001' });
+  assert.strictEqual(r.ok, true, JSON.stringify(r)); assert.match(r.next, /fleetgate_follow \{review_id: "review-test-001"\}/);
+  const b = state.reviewPosts[state.reviewPosts.length - 1];
+  assert.strictEqual(b.title, 'sealed: wave 2'); assert.strictEqual(b.source.remote, 'https://github.com/bildow/demipass');
+  assert.match(b.source.head, /^[0-9a-f]{40}$/); assert.match(b.source.base, /^[0-9a-f]{40}$/);
+  assert.deepStrictEqual(b.files.sort((x, y) => (x.path < y.path ? -1 : 1)), [{ status: 'D', path: 'README.md' }, { status: 'M', path: 'docs/a.md' }]);
+  assert.match(b.diff, /^diff --git a\/README.md b\/README.md/m); assert.strictEqual(b.note, 'exact revision');
+  let f = await call('fleetgate_follow', { review_id: 'review-known-01' });
+  assert.strictEqual(f.state, 'done'); assert.strictEqual(f.seats.length, 3);
+  f = await call('fleetgate_follow', { review_id: 'someone-elses-1' }); assert.strictEqual(f.ok, false); assert.match(f.hint, /own reviews/);
+});
+
+test('review: bad git input and no changes are refused with nothing sent', async () => {
+  const { d } = repo(); const n = (state.reviewPosts || []).length;
+  for (const git of [{ dir: 'rel' }, { dir: d, ref: '--all' }, { dir: d, ref: 'main', base: 'main' }]) {
+    const r = await call('fleetgate_review', { git }); assert.strictEqual(r.ok, false, JSON.stringify(git)); assert.match(r.note || '', /Nothing was sent/);
+  }
+  assert.strictEqual((state.reviewPosts || []).length, n);
+});
+
+test('review: the encoded request is measured before sending (as submit, #28 r6)', async () => {
+  const { d, g } = repo();
+  fsx.writeFileSync(pathx.join(d, 'docs/big.md'), '\\'.repeat(395000) + '\n'); g('add', '-A'); g('commit', '-q', '-m', 'big');
+  const n = state.doorCalls.length;
+  const r = await call('fleetgate_review', { git: { dir: d, ref: 'work', base: 'main' } });
+  assert.strictEqual(r.ok, false); assert.match(r.error, /once encoded, over the door's 524288/); assert.strictEqual(state.doorCalls.length, n);
 });

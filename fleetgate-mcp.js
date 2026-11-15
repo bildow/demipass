@@ -16,8 +16,11 @@
  *                                                       from the pane's own checkout; supersedes closes its own earlier submission
  *   fleetgate_status()                                  onboarded? token expiry, consent, door health, lanes, spend
  *   fleetgate_check({repo, paths})                      free: would these paths be admitted, in which lane, or why not
- *   fleetgate_follow({repo, submission_id})             free: this wallet's submission as the release controller sees it
- *                                                       now (every check, each reviewer seat) and the one next step
+ *   fleetgate_follow({repo, submission_id} | {review_id})   free: this wallet's submission as the release controller sees
+ *                                                       it now (every check, each reviewer seat) and the one next step; or
+ *                                                       a review-only request's state and, once done, every seat's verdict
+ *   fleetgate_review({git, title?, note?, review_id?})  the three seats review a change from your checkout that does not
+ *                                                       merge here (any repository); intake charged once, rounds metered
  *
  * The gate decides: a submitted PR is evaluated by the release controller under the signed charter like any other.
  * Nothing here merges, approves, reviews or touches a charter.
@@ -258,6 +261,78 @@ function filesFromGit(g) {
   return { files, head, merge_base: mb, subject: run('log', '-1', '--no-show-signature', '--format=%s', head).toString().trim() };
 }
 
+// A review-only packet from the pane's own checkout: head, the merge base with `base`, every changed path (deletes and
+// renames too: a review reads them), the unified diff, and the origin remote as a plain https URL (credentials and
+// non-https remotes left out). → { packet } | { error }
+const MAX_REVIEW_DIFF = 400000;
+function packetFromGit(g) {
+  if (!g || typeof g !== 'object' || Array.isArray(g)) return { error: 'git: {dir, ref?, base?}' };
+  const { dir, ref = 'HEAD', base = 'origin/main' } = g;
+  for (const k of Object.keys(g)) if (!['dir', 'ref', 'base'].includes(k)) return { error: `git: unknown field ${k}` };
+  if (typeof dir !== 'string' || !path.isAbsolute(dir)) return { error: 'git.dir: the absolute path of your checkout' };
+  for (const [k, v] of [['ref', ref], ['base', base]])
+    if (typeof v !== 'string' || !GIT_REF_RE.test(v) || v.includes('..') || v.endsWith('.lock')) return { error: `git.${k}: a branch, tag or commit name` };
+  // At the top level, with diff.relative off and fixed a/ b/ prefixes: a user's git config must not narrow, re-root or
+  // re-shape the packet (as for submissions, #28 independent review).
+  if (gitTooOld()) return { error: gitTooOld() };
+  const at = (cwd) => (...args) => execFileSync('git', [...GIT_FIXED, '-C', cwd, '-c', 'diff.relative=false', '-c', 'diff.noprefix=false', '-c', 'diff.mnemonicPrefix=false', '-c', 'diff.ignoreSubmodules=none', ...args],
+    { stdio: ['ignore', 'pipe', 'pipe'], env: gitEnv(), maxBuffer: 32 << 20, timeout: 60000 });
+  let run, head, mb, raw, diffBuf;
+  try {
+    const top = topLevel(at(dir));
+    if (top.error) return top;
+    run = at(top.dir);
+    if (run('rev-parse', '--is-shallow-repository').toString().trim() !== 'false')
+      return { error: 'git: this checkout is shallow, so its merge base can\'t be trusted; fetch the full history first (git fetch --unshallow)' };
+    head = run('rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`).toString().trim();
+    const b = run('rev-parse', '--verify', '--end-of-options', `${base}^{commit}`).toString().trim();
+    mb = run('merge-base', b, head).toString().trim();
+    raw = run('diff', '--raw', '-z', '--no-renames', '--no-relative', '--ignore-submodules=none', '--no-abbrev', mb, head);
+    diffBuf = run('diff', '--no-color', '--no-ext-diff', '--no-textconv', '--no-renames', '--no-relative', '--ignore-submodules=none', '--full-index', '--src-prefix=a/', '--dst-prefix=b/', mb, head);
+  } catch (e) {
+    return { error: `git: ${(String(e.stderr || e.message).trim().split('\n').pop() || 'failed').slice(0, 300)}` };
+  }
+  const parts = [];
+  for (let i0 = 0; i0 < raw.length;) { const z = raw.indexOf(0, i0); if (z < 0) break; if (z > i0) parts.push(raw.subarray(i0, z)); i0 = z + 1; }
+  const files = [];
+  for (let i = 0; i + 1 < parts.length; i += 2) {
+    const pb = parts[i + 1], p = pb.toString('utf8');
+    if (!Buffer.from(p, 'utf8').equals(pb)) return { error: `git: a changed path is not UTF-8 (${pb.toString('latin1').replace(/[^\x20-\x7e]/g, '?')})` };
+    files.push({ status: parts[i].toString('latin1').split(' ')[4], path: p });
+  }
+  if (!files.length) return { error: `git: no changes between the merge base ${mb.slice(0, 12)} and ${ref}` };
+  if (files.length > 300) return { error: `git: ${files.length} changed files, over 300 for one review` };
+  const diff = diffBuf.toString('utf8');
+  if (!Buffer.from(diff, 'utf8').equals(diffBuf)) return { error: 'git: the diff is not UTF-8 text' };
+  if (diff.length > MAX_REVIEW_DIFF) return { error: `git: the diff is ${diff.length} characters, over ${MAX_REVIEW_DIFF} for one review` };
+  let remote;
+  try {
+    const u = run('remote', 'get-url', 'origin').toString().trim();
+    const scp = /^[A-Za-z0-9._-]+@([A-Za-z0-9.-]+):([A-Za-z0-9._/-]+?)(\.git)?$/.exec(u);
+    const url = scp ? new URL(`https://${scp[1]}/${scp[2]}`) : new URL(u);
+    if (url.protocol === 'https:' || scp) remote = `https://${url.host}${url.pathname.replace(/\.git$/, '')}`;
+  } catch (_) { remote = undefined; }
+  return { packet: { source: { ...(remote ? { remote } : {}), head, base: mb }, files, diff,
+    subject: run('log', '-1', '--no-show-signature', '--format=%s', head).toString().trim() } };
+}
+
+async function review({ git, title, note, review_id }) {
+  const p = packetFromGit(git);
+  if (p.error) return { ok: false, error: p.error, note: 'Nothing was sent or charged.' };
+  const id = review_id || `review-${crypto.randomBytes(8).toString('hex')}`;
+  if (!SUBMISSION_RE.test(id)) return { ok: false, error: 'review_id: 8-64 letters, digits, _ or -, starting with a letter or digit' };
+  if (note !== undefined && (typeof note !== 'string' || note.length > 4000)) return { ok: false, error: 'note: up to 4000 characters' };
+  const t = typeof title === 'string' && title.trim() ? title.trim().slice(0, 200) : p.packet.subject.slice(0, 200) || 'review';
+  const reqBody = { review_id: id, title: t, ...(note ? { note } : {}), source: p.packet.source, files: p.packet.files, diff: p.packet.diff };
+  const wire = Buffer.byteLength(JSON.stringify(reqBody), 'utf8');
+  if (wire > MAX_REQUEST) return { ok: false, review_id: id, error: `the review request would be ${wire} bytes once encoded, over the door's ${MAX_REQUEST}; review a smaller change`, note: 'Nothing was sent or charged.' };
+  const { r, refused } = await doorCall('POST', '/v1/reviews', reqBody);
+  if (refused) return { ...refused, review_id: id, next: `If the door may have charged, retry with review_id "${id}": the same diff replays and is never charged twice.` };
+  if (OLD_DOOR(r)) return { ok: false, review_id: id, error: 'this door predates review-only requests (fleetgate-door/4)' };
+  if (r.status === 202) return { ...r.data, review_id: id, files: p.packet.files.length, next: `fleetgate_follow {review_id: "${id}"} shows its state and, once done, every seat's verdict (free).` };
+  return { ok: false, http_status: r.status, review_id: id, ...(r.data || {}) };
+}
+
 async function submit({ repo, title, body, files, git, submission_id, supersedes }) {
   if (typeof repo !== 'string' || !/^[A-Za-z0-9._-]{1,100}$/.test(repo)) return { ok: false, error: 'repo: the name of a repo under atlas/ (e.g. boltcluster)' };
   if (files !== undefined && git !== undefined) return { ok: false, error: 'files or git, not both' };
@@ -371,7 +446,15 @@ async function check({ repo, paths }) {
   return { ok: false, http_status: r.status, ...(r.data || {}) };
 }
 
-async function follow({ repo, submission_id }) {
+async function follow({ repo, submission_id, review_id }) {
+  if (review_id !== undefined) {
+    if (typeof review_id !== 'string' || !FOLLOW_ID_RE.test(review_id)) return { ok: false, error: 'review_id: the one fleetgate_review returned' };
+    const { r, refused } = await doorCall('GET', `/v1/reviews/${encodeURIComponent(review_id)}`);
+    if (refused) return refused;
+    if (OLD_DOOR(r)) return { ok: false, error: 'this door predates review-only requests (fleetgate-door/4)' };
+    if (r.status === 200) return r.data;
+    return { ok: false, http_status: r.status, ...(r.data || {}), ...(r.status === 404 ? { hint: 'Only this wallet\'s own reviews are visible.' } : {}) };
+  }
   if (typeof repo !== 'string' || !/^[A-Za-z0-9._-]{1,100}$/.test(repo)) return { ok: false, error: 'repo: the repo under atlas/ you submitted to (e.g. boltcluster)' };
   if (typeof submission_id !== 'string' || !FOLLOW_ID_RE.test(submission_id)) return { ok: false, error: 'submission_id: the one fleetgate_submit returned' };
   const { r, refused } = await doorCall('GET', `/v1/pulls/${encodeURIComponent(repo)}/${encodeURIComponent(submission_id)}`);
@@ -407,9 +490,18 @@ const TOOLS = [
       paths: { type: 'array', items: { type: 'string' }, description: 'The repository paths you would submit (1-20)' } } } },
   { name: 'fleetgate_follow',
     description: 'FLEETGATE: free: where your submission stands. The release controller\'s own rules evaluated now on the PR\'s exact head: every check, the verdict, CI, each reviewer seat (on the head or not; findings when changes were requested), and next {who, what}: ci, you, operator, closer, release-controller or nobody. Only this wallet\'s own submissions are visible. A submission is never amended: a fix is a new submission_id.',
-    inputSchema: { type: 'object', required: ['repo', 'submission_id'], properties: {
+    inputSchema: { type: 'object', properties: {
       repo: { type: 'string', description: 'The repo under atlas/ you submitted to' },
-      submission_id: { type: 'string', description: 'The submission_id fleetgate_submit returned' } } } },
+      submission_id: { type: 'string', description: 'The submission_id fleetgate_submit returned' },
+      review_id: { type: 'string', description: 'Instead: the review_id fleetgate_review returned' } } } },
+  { name: 'fleetgate_review',
+    description: 'FLEETGATE: the three reviewer seats (three model vendors) review a change from your own git checkout that does not merge here: another repository (GitHub, private or public) or work not ready to submit. The diff between the merge base of base and ref (at most 400,000 characters) is sent; nothing merges and nothing is posted to any repository. Intake charged once; each model call billed as it runs (see fleetgate_prices). Follow it with fleetgate_follow {review_id}; the result carries every seat\'s verdict and findings and a receipt digest over the exact head, base and diff.',
+    inputSchema: { type: 'object', required: ['git'], properties: {
+      git: { type: 'object', description: '{dir: absolute path of your checkout, ref: the commit to review (default HEAD), base: what it is based on (default origin/main)}',
+        properties: { dir: { type: 'string' }, ref: { type: 'string' }, base: { type: 'string' } } },
+      title: { type: 'string', description: 'Default: the commit subject' },
+      note: { type: 'string', description: 'What the reviewers should know (up to 4000 characters); data to them, not instructions' },
+      review_id: { type: 'string', description: 'Idempotency key (8-64 of A-Z a-z 0-9 _ -); omitted → a fresh one, returned. A retry with the same id and diff is never charged twice.' } } } },
 ];
 const HANDLERS = {
   fleetgate_onboard: onboard,
@@ -418,6 +510,7 @@ const HANDLERS = {
   fleetgate_status: status,
   fleetgate_check: check,
   fleetgate_follow: follow,
+  fleetgate_review: review,
 };
 
 // Errors never carry the token: a ServiceError's body is DemiPass's answer, and our own errors name no secret.
