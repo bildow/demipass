@@ -58,7 +58,6 @@ function dp(token = sessionToken()) { return services({ token, baseUrl: DEMIPASS
 let held = null;   // { token, token_id, expires_at, cap_dd }
 let consentSeen = null;
 let admissionSeen = null;
-let spendSeen = null;
 const pendingCaps = new Map();   // approval_id → the daily cap asked for: redeeming must repeat it (#17 review L4)
 // Token check before holding it: what the door accepts, so a malformed mint can never end up in a header error (L1).
 const TOKEN_RE = /^[A-Za-z0-9_.-]{20,4096}$/;
@@ -100,12 +99,11 @@ async function onboard({ daily_cap_dd, approval_id } = {}, { fileConsent = true 
   const ready = await fleetgateAdmission({ endpoint: await door(), token: r.token.token, wallet });
   if (!ready.ok) { held = null; admissionSeen = null; return { ...ready, consent: { id: r.consent.id, daily_cap_dd: r.consent.daily_cap_dd } }; }
   admissionSeen = ready.admission;
-  spendSeen = ready.spend || null;
   held = { token: r.token.token, token_id: r.token.token_id, expires_at: r.token.expires_at, cap_dd: r.token.cap_dd, wallet };
   consentSeen = r.consent || consentSeen;
   const price = await submitPrice();
   const low = price && r.consent && r.consent.daily_cap_dd < price;
-  return { ok: true, service: SERVICE, admission: admissionSeen, consent: r.consent ? { id: r.consent.id, daily_cap_dd: r.consent.daily_cap_dd, existing: Boolean(r.existing) } : null,
+  return { ok: true, service: SERVICE, admission: admissionSeen, ...(ready.spend ? { spend: ready.spend } : {}), consent: r.consent ? { id: r.consent.id, daily_cap_dd: r.consent.daily_cap_dd, existing: Boolean(r.existing) } : null,
            token_id: held.token_id, expires_at: held.expires_at, cap_dd: held.cap_dd,
            ...(low ? { warning: `your daily consent (${r.consent.daily_cap_dd} DD) is below one submission (${price} DD): every submit would be refused. Call fleetgate_onboard with a higher daily_cap_dd to replace it (one approval).` } : {}) };
 }
@@ -170,13 +168,14 @@ async function status() {
     ready = held && held.wallet !== sessionSub() ? { ok:false, status:'wallet_changed', error:'The held token belongs to another wallet; onboard explicitly' } : live() ? await fleetgateAdmission({ endpoint: await door(), token: held.token, wallet: held.wallet }) : await onboard({}, { fileConsent: false });
   } catch (e) { ready = errBody(e); }
   admissionSeen = ready.ok ? ready.admission : null;
-  if (ready.ok) spendSeen = ready.spend || spendSeen;
   return { ok: health.status === 200 && health.data && health.data.ok === true && Boolean(ready.ok), door: await door(),
     door_health: health.status === 200 ? health.data : { http_status: health.status, ...(health.data || {}) },
     onboarded: Boolean(live() && ready.ok), admission: admissionSeen, ...(ready.ok ? {} : { readiness: ready }),
     token_id: live() ? held.token_id : null, expires_at: live() ? held.expires_at : null,
     consent: consentSeen ? { id: consentSeen.id, daily_cap_dd: consentSeen.daily_cap_dd } : null,
-    ...(spendSeen ? { spend: spendSeen } : {}),
+    // Spend only as this very call's admission check verified it for the held wallet: never a cached figure, which
+    // could belong to another wallet after a switch or outlive a failed check (Codex connector P2 on #27).
+    ...(ready.ok && ready.spend ? { spend: ready.spend } : {}),
     ...(admissionSeen ? { next: 'Before building, fleetgate_check {repo, paths} says whether the paths would be admitted (free).' } : {}) };
 }
 
@@ -279,7 +278,7 @@ async function handleMessage(msg) {
   return { jsonrpc: '2.0', id, error: { code: -32601, message: `Method not found: ${method}` } };
 }
 
-module.exports = { handleMessage, _reset: () => { held = null; consentSeen = null; spendSeen = null; doorCached = null; pendingCaps.clear(); } };
+module.exports = { handleMessage, _reset: () => { held = null; consentSeen = null; doorCached = null; pendingCaps.clear(); } };
 
 if (require.main === module) {
   // Messages are answered in order through one queue; stdin closing waits for the queue (a call in flight is answered).

@@ -236,6 +236,12 @@ test('status shows the token\'s spend when the door reports it, and only well-fo
   assert.deepStrictEqual(r.spend, { token_cap_dd: 800, token_spent_dd: 12, follow_up_dd: 3000 }); assert.match(r.next, /fleetgate_check/);
   mcp._reset(); state.spend = { token_cap_dd: 'lots', token_spent_dd: 1, follow_up_dd: 1 };
   r = await call('fleetgate_status'); assert.strictEqual(r.spend, undefined);
+  // never a cached figure: a failed admission check or another wallet shows no spend (Codex connector P2 on #27)
+  state.spend = { token_cap_dd: 800, token_spent_dd: 12, follow_up_dd: 3000 };
+  r = await call('fleetgate_status'); assert.ok(r.spend);
+  state.admissionRefused = true; r = await call('fleetgate_status'); assert.strictEqual(r.spend, undefined); state.admissionRefused = false;
+  process.env.DEMIPASS_TOKEN = SESSION_B; r = await call('fleetgate_status'); assert.strictEqual(r.spend, undefined, JSON.stringify(r));
+  process.env.DEMIPASS_TOKEN = SESSION_A; mcp._reset();
   state.spend = null;
 });
 
