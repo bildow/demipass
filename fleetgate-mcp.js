@@ -181,14 +181,15 @@ const DOOR_PATH_RE = /^(?!\/)(?!.*(^|\/)\.)(?!.*\/\/)[A-Za-z0-9._\-/]{1,200}$/;
 // "unknown option", so the version is checked once and named (round 7, non-blocking).
 let gitVersionError;
 function gitTooOld() {
-  if (gitVersionError === undefined) {
-    try {
-      const m = /git version (\d+)\.(\d+)/.exec(execFileSync('git', ['--version'], { env: gitEnv(), timeout: 10000 }).toString());
-      gitVersionError = !m ? 'git: could not read git\'s version' : (+m[1] > 2 || (+m[1] === 2 && +m[2] >= 45)) ? null
-        : `git: version ${m[1]}.${m[2]} is too old; reading a checkout safely needs git 2.45 or newer (--no-lazy-fetch). Upgrade git, or send files instead.`;
-    } catch (_) { gitVersionError = 'git: not found on this machine; send files instead'; }
-  }
-  return gitVersionError;
+  if (gitVersionError === null) return null;   // only a passing check is kept: an upgrade takes effect without a restart
+  let err;
+  try {
+    const m = /git version (\d+)\.(\d+)/.exec(execFileSync('git', ['--version'], { env: gitEnv(), timeout: 10000 }).toString());
+    err = !m ? 'git: could not read git\'s version' : (+m[1] > 2 || (+m[1] === 2 && +m[2] >= 45)) ? null
+      : `git: version ${m[1]}.${m[2]} is too old; reading a checkout safely needs git 2.45 or newer (--no-lazy-fetch). Upgrade git, or send files instead.`;
+  } catch (_) { err = 'git: not found on this machine; send files instead'; }
+  if (err === null) gitVersionError = null;
+  return err;
 }
 
 function topLevel(run) {
