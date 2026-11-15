@@ -161,8 +161,12 @@ const GIT_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
 // Every git call reads the objects as committed and never touches the network: replace refs off (#28 independent review
 // round 3, 1), the legacy grafts file pointed at /dev/null and lazy fetching off for partial clones (round 4), and no
 // GIT_* variable from this process's environment (GIT_DIR, GIT_OBJECT_DIRECTORY, GIT_REPLACE_REF_BASE…) redirects it.
-// An object a partial clone doesn't have is then a local error, refused like any other.
-const GIT_FIXED = ['--no-replace-objects', '--no-lazy-fetch'];
+// An object a partial clone doesn't have is then a local error, refused like any other. No program named by the
+// checkout's own config runs: signature verification (log.showSignature → gpg.program, round 5), fsmonitor hooks,
+// textconv and external diff drivers are all off. A shallow checkout is refused: its synthetic boundaries move the
+// merge base (round 5).
+const GIT_FIXED = ['--no-replace-objects', '--no-lazy-fetch', '-c', 'log.showSignature=false', '-c', 'core.fsmonitor=false',
+  '-c', 'diff.external=', '-c', 'core.hooksPath=/dev/null'];
 function gitEnv() {
   const env = {};
   for (const [k, v] of Object.entries(process.env)) if (!k.startsWith('GIT_')) env[k] = v;
@@ -195,6 +199,8 @@ function filesFromGit(g) {
     const top = topLevel(at(dir));
     if (top.error) return top;
     run = at(top.dir);
+    if (run('rev-parse', '--is-shallow-repository').toString().trim() !== 'false')
+      return { error: 'git: this checkout is shallow, so its merge base can\'t be trusted; fetch the full history first (git fetch --unshallow)' };
     head = run('rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`).toString().trim();
     const b = run('rev-parse', '--verify', '--end-of-options', `${base}^{commit}`).toString().trim();
     mb = run('merge-base', b, head).toString().trim();
@@ -232,7 +238,7 @@ function filesFromGit(g) {
   if (files.length > MAX_FILES) return { error: `git: ${files.length} changed files, over ${MAX_FILES}` };
   const total = files.reduce((n, f) => n + Buffer.byteLength(f.content, 'utf8'), 0);
   if (total > MAX_TOTAL) return { error: `git: ${total} bytes in all, over ${MAX_TOTAL}` };
-  return { files, head, merge_base: mb, subject: run('log', '-1', '--format=%s', head).toString().trim() };
+  return { files, head, merge_base: mb, subject: run('log', '-1', '--no-show-signature', '--format=%s', head).toString().trim() };
 }
 
 async function submit({ repo, title, body, files, git, submission_id, supersedes }) {

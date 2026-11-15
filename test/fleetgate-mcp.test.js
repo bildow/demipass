@@ -455,11 +455,42 @@ test('git: a grafts file cannot move the merge base; a blob missing from a parti
   fsx.writeFileSync(pathx.join(d, '.git/info/grafts'), `${F} ${root}\n`);
   let r = await call('fleetgate_submit', { repo: 'boltcluster', git: { dir: d, ref: 'f', base: 'main' }, submission_id: 'grafts-00001' });
   assert.strictEqual(r.ok, true, JSON.stringify(r)); assert.deepStrictEqual(lastDoorBody().files.map(f => f.path), ['docs/f.md']);
-  // a blob the object store lacks: delete its loose object, as a partial clone would lack it
-  ({ d, g } = repo()); fsx.writeFileSync(pathx.join(d, 'docs/a.md'), 'not here\n'); g('add', '-A'); g('commit', '-q', '-m', 'missing');
-  const blob = g('rev-parse', 'HEAD:docs/a.md').toString().trim();
-  fsx.rmSync(pathx.join(d, '.git/objects', blob.slice(0, 2), blob.slice(2)));
+  // a real partial clone (blob:none from a reachable source): the work branch's blob is fetchable, so a lazy fetch would
+  // succeed; it must be refused instead, and the clone must still lack the blob afterwards
+  const src = repo(); fsx.writeFileSync(pathx.join(src.d, 'docs/a.md'), 'only upstream\n'); src.g('add', '-A'); src.g('commit', '-q', '-m', 'upstream change');
+  src.g('config', 'uploadpack.allowFilter', 'true'); src.g('config', 'uploadpack.allowAnySHA1InWant', 'true');
+  const pc = fsx.mkdtempSync(pathx.join(os.tmpdir(), 'fg-partial-'));
+  execFileSync('git', ['clone', '-q', '--no-checkout', '--filter=blob:none', '--branch', 'main', `file://${src.d}`, pc], { stdio: 'pipe' });
+  execFileSync('git', ['-C', pc, 'fetch', '-q', '--filter=blob:none', 'origin', 'work:work'], { stdio: 'pipe' });
+  const blob = execFileSync('git', ['-C', pc, 'rev-parse', 'work:docs/a.md']).toString().trim();
+  const has = () => { try { execFileSync('git', ['-C', pc, '--no-lazy-fetch', 'cat-file', '-e', blob], { stdio: 'pipe', env: { ...process.env, GIT_NO_LAZY_FETCH: '1' } }); return true; } catch (_) { return false; } };
+  assert.strictEqual(has(), false, 'the fixture lacks the blob');
   const n = state.doorCalls.length;
-  r = await call('fleetgate_submit', { repo: 'boltcluster', git: { dir: d, ref: 'HEAD', base: 'main' } });
-  assert.strictEqual(r.ok, false); assert.match(r.error, /isn't in this checkout/); assert.strictEqual(state.doorCalls.length, n);
+  r = await call('fleetgate_submit', { repo: 'boltcluster', git: { dir: pc, ref: 'work', base: 'main' } });
+  assert.strictEqual(r.ok, false, JSON.stringify(r)); assert.match(r.error, /isn't in this checkout/); assert.strictEqual(state.doorCalls.length, n);
+  assert.strictEqual(has(), false, 'nothing was fetched');
+});
+
+test('git: a shallow checkout is refused; no program from the checkout\'s config runs (gpg.program via log.showSignature, fsmonitor) (#28 independent review r5)', async () => {
+  state.doorRejectFirst = false;
+  const src = repo(); fsx.writeFileSync(pathx.join(src.d, 'docs/a.md'), 'x\n'); src.g('add', '-A'); src.g('commit', '-q', '-m', 'c');
+  const sh = fsx.mkdtempSync(pathx.join(os.tmpdir(), 'fg-shallow-'));
+  execFileSync('git', ['clone', '-q', '--depth', '1', '--no-single-branch', `file://${src.d}`, sh], { stdio: 'pipe' });
+  const n = state.doorCalls.length;
+  let r = await call('fleetgate_submit', { repo: 'boltcluster', git: { dir: sh, ref: 'origin/work', base: 'origin/main' } });
+  assert.strictEqual(r.ok, false); assert.match(r.error, /shallow/); assert.strictEqual(state.doorCalls.length, n);
+  // a checkout whose config names programs: none of them may run
+  const { d, g } = repo(); fsx.writeFileSync(pathx.join(d, 'docs/a.md'), 'y\n'); g('add', '-A'); g('commit', '-q', '-m', 'p');
+  const marker = pathx.join(d, '..', `ran-${pathx.basename(d)}`);
+  const prog = pathx.join(d, '..', `prog-${pathx.basename(d)}.sh`);
+  fsx.writeFileSync(prog, `#!/bin/sh\ntouch '${marker}'\nexit 1\n`, { mode: 0o755 });
+  g('config', 'log.showSignature', 'true'); g('config', 'gpg.program', prog); g('config', 'core.fsmonitor', prog);
+  // a signature-looking header makes git consult gpg.program when it is allowed to verify
+  const tree = g('rev-parse', 'HEAD^{tree}').toString().trim(), parent = g('rev-parse', 'HEAD^').toString().trim();
+  const raw = `tree ${tree}\nparent ${parent}\nauthor t <t@t> 1700000000 +0000\ncommitter t <t@t> 1700000000 +0000\ngpgsig -----BEGIN PGP SIGNATURE-----\n \n -----END PGP SIGNATURE-----\n\nsigned\n`;
+  const signed = execFileSync('git', ['-C', d, 'hash-object', '-t', 'commit', '-w', '--stdin'], { input: raw }).toString().trim();
+  g('update-ref', 'refs/heads/work', signed);
+  r = await call('fleetgate_submit', { repo: 'boltcluster', git: { dir: d, ref: 'work', base: 'main' }, submission_id: 'noprog-00001' });
+  assert.strictEqual(r.ok, true, JSON.stringify(r));
+  assert.strictEqual(fsx.existsSync(marker), false, 'no configured program ran');
 });
