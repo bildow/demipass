@@ -47,6 +47,7 @@ const doorSrv = http.createServer(async (req, res) => {
   if (req.url === '/door/v1/check' || req.url.startsWith('/door/v1/pulls/')) {
     state.freeCalls = (state.freeCalls || []).concat([{ url: req.url, method: req.method, auth: req.headers.authorization, body: b }]);
     if (state.oldDoor) return json(res, 404, { error: 'not found', route: req.url.slice(5) });
+    if (state.rawEcho) { res.writeHead(502, { 'content-type': 'text/plain' }); return res.end('x'.repeat(470) + ' upstream said: Authorization: ' + req.headers.authorization + ' end'); }
     if (state.switchDuringFree) { state.switchDuringFree = false; process.env.DEMIPASS_TOKEN = SESSION_B; }
     if (state.freeRejectFirst) { state.freeRejectFirst = false; return json(res, 401, { error: 'token expired' }); }
     if (req.url === '/door/v1/check') return json(res, 200, b.paths.includes('charters/x.json')
@@ -312,4 +313,14 @@ test('explicit onboarding with a switch during admission shows no spend (#27 ind
   const r = await call('fleetgate_onboard');
   assert.strictEqual(r.spend, undefined, JSON.stringify(r));
   process.env.DEMIPASS_TOKEN = SESSION_A; state.spend = null; mcp._reset();
+});
+
+test('a non-JSON error echoing the bearer across the 500-character cut leaks no fragment of it (#27 independent review r3)', async () => {
+  mcp._reset(); process.env.DEMIPASS_TOKEN = SESSION_A; await call('fleetgate_status');
+  state.rawEcho = true;
+  for (const [name, args] of [['fleetgate_follow', { repo: 'boltcluster', submission_id: 'sub-follow-001' }], ['fleetgate_check', { repo: 'boltcluster', paths: ['docs/a.md'] }]]) {
+    const r = await call(name, args);            // call() asserts no svc-token-SECRET anywhere in the answer
+    assert.strictEqual(r.ok, false); assert.ok(!/aaaaaaaaaaaa-[0-9]/.test(JSON.stringify(r)), JSON.stringify(r).slice(-200));
+  }
+  state.rawEcho = false; mcp._reset();
 });

@@ -134,7 +134,11 @@ async function http(method, url, { auth, body } = {}) {
   if (body !== undefined) headers['content-type'] = 'application/json';
   if (auth) headers.authorization = 'Bearer ' + auth;
   const r = await require('./http-json').requestJson(method, url, { headers, body, timeoutMs: 180000 });
-  return { status: r.status, data: r.data !== null ? r.data : { raw: r.text.slice(0, 500) } };
+  // The bearer this request carried is redacted from the answer BEFORE a raw (non-JSON) body is cut to 500 characters:
+  // cutting first could leave a token prefix that the later scrub no longer recognises (#27 independent review r3).
+  const data = redact(r.data !== null ? r.data : { raw: r.text }, auth);
+  if (data && typeof data.raw === 'string') data.raw = data.raw.slice(0, 500);
+  return { status: r.status, data };
 }
 
 const SUBMISSION_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{7,63}$/;   // the door's own pattern
