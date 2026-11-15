@@ -494,3 +494,15 @@ test('git: a shallow checkout is refused; no program from the checkout\'s config
   assert.strictEqual(r.ok, true, JSON.stringify(r));
   assert.strictEqual(fsx.existsSync(marker), false, 'no configured program ran');
 });
+
+test('the encoded request is measured before sending; supersedes takes the door\'s 6-character ids (#28 independent review r6)', async () => {
+  state.doorRejectFirst = false;
+  const { d, g } = repo();
+  for (const n of ['a', 'b', 'c']) fsx.writeFileSync(pathx.join(d, `docs/${n}.md`), '\\'.repeat(128 * 1024 - 8) + '\n');
+  g('add', '-A'); g('commit', '-q', '-m', 'backslashes');
+  const n = state.doorCalls.length;
+  let r = await call('fleetgate_submit', { repo: 'boltcluster', git: { dir: d, ref: 'work', base: 'main' } });
+  assert.strictEqual(r.ok, false, JSON.stringify(r).slice(0, 300)); assert.match(r.error, /once encoded, over the door's 524288/); assert.strictEqual(state.doorCalls.length, n);
+  r = await call('fleetgate_submit', { repo: 'boltcluster', files: [{ path: 'docs/a.md', content: 'x\n' }], title: 't', submission_id: 'newer-000001', supersedes: 'abc123' });
+  assert.strictEqual(r.ok, true, JSON.stringify(r)); assert.strictEqual(lastDoorBody().supersedes, 'abc123');
+});

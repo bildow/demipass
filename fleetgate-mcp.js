@@ -145,7 +145,8 @@ async function http(method, url, { auth, body } = {}) {
   return { status: r.status, data };
 }
 
-const SUBMISSION_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{7,63}$/;   // the door's own pattern
+const SUBMISSION_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{7,63}$/;   // ids this MCP makes or takes for a new submission (the door accepts 6+)
+const MAX_REQUEST = 512 * 1024;                               // the door's MAX_BODY and its proxy's client_max_body_size
 // The door's own limits (fleet/door/door.js): checked here too, so a git source too large is refused before a charge.
 const MAX_FILES = 20, MAX_FILE = 128 * 1024, MAX_TOTAL = 384 * 1024;
 // A ref is a branch, tag or commit: never an option (no leading '-'), no range or reflog syntax.
@@ -254,11 +255,16 @@ async function submit({ repo, title, body, files, git, submission_id, supersedes
   }
   if (!title) return { ok: false, error: 'title required' };
   if (!Array.isArray(files) || !files.length) return { ok: false, error: 'files: [{path, content}] (the whole new content of each file), or git: {dir, ref, base}' };
-  if (supersedes !== undefined && (typeof supersedes !== 'string' || !SUBMISSION_RE.test(supersedes))) return { ok: false, error: 'supersedes: the submission_id of your own earlier submission to this repo' };
+  // An earlier submission may have been made directly at the door, whose ids start at 6 characters (round 6, 2).
+  if (supersedes !== undefined && (typeof supersedes !== 'string' || !FOLLOW_ID_RE.test(supersedes))) return { ok: false, error: 'supersedes: the submission_id of your own earlier submission to this repo' };
   const sid = submission_id || crypto.randomBytes(12).toString('hex');
   if (!SUBMISSION_RE.test(sid)) return { ok: false, error: 'submission_id: 8-64 letters, digits, _ or -, starting with a letter or digit' };
   if (supersedes !== undefined && supersedes === sid) return { ok: false, error: 'supersedes: an earlier submission, not this one' };
   const payload = { submission_id: sid, repo, title, ...(body ? { body } : {}), files, ...(supersedes !== undefined ? { supersedes } : {}) };
+  // The door (and its proxy) refuse a request body over 512 KiB; JSON escaping can grow content well past its own size
+  // (a backslash doubles), so the serialized request is measured here, before anything is sent (round 6, 1).
+  const wire = Buffer.byteLength(JSON.stringify(payload), 'utf8');
+  if (wire > MAX_REQUEST) return { ok: false, error: `the request would be ${wire} bytes once encoded, over the door's ${MAX_REQUEST}; submit fewer or smaller files`, note: 'Nothing was sent or charged.' };
   const url = (await door()) + '/v1/pulls';
   // Minting is DemiPass's answer, not the door's: its refusal (an expired session, no consent) comes back as it is, with
   // the submission id, and says the door was not contacted (#17 review round 5).
