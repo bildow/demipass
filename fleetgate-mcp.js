@@ -177,6 +177,20 @@ function gitEnv() {
 // leading slash, dot segment or empty segment. Refused here, before anything is sent (#28 independent review round 3, 2).
 const DOOR_PATH_RE = /^(?!\/)(?!.*(^|\/)\.)(?!.*\/\/)[A-Za-z0-9._\-/]{1,200}$/;
 
+// --no-lazy-fetch (and GIT_NO_LAZY_FETCH) need git 2.45; an older git would fail every call with an unhelpful
+// "unknown option", so the version is checked once and named (round 7, non-blocking).
+let gitVersionError;
+function gitTooOld() {
+  if (gitVersionError === undefined) {
+    try {
+      const m = /git version (\d+)\.(\d+)/.exec(execFileSync('git', ['--version'], { env: gitEnv(), timeout: 10000 }).toString());
+      gitVersionError = !m ? 'git: could not read git\'s version' : (+m[1] > 2 || (+m[1] === 2 && +m[2] >= 45)) ? null
+        : `git: version ${m[1]}.${m[2]} is too old; reading a checkout safely needs git 2.45 or newer (--no-lazy-fetch). Upgrade git, or send files instead.`;
+    } catch (_) { gitVersionError = 'git: not found on this machine; send files instead'; }
+  }
+  return gitVersionError;
+}
+
 function topLevel(run) {
   const b = run('rev-parse', '--show-toplevel');
   const raw = b.subarray(0, b.length && b[b.length - 1] === 0x0a ? b.length - 1 : b.length);
@@ -192,6 +206,7 @@ function filesFromGit(g) {
   if (typeof dir !== 'string' || !path.isAbsolute(dir)) return { error: 'git.dir: the absolute path of your checkout' };
   for (const [k, v] of [['ref', ref], ['base', base]])
     if (typeof v !== 'string' || !GIT_REF_RE.test(v) || v.includes('..') || v.endsWith('.lock')) return { error: `git.${k}: a branch, tag or commit name` };
+  if (gitTooOld()) return { error: gitTooOld() };
   // Run at the repository's top level with diff.relative off: a user's git config must not narrow or re-root the change
   // (#28 independent review, 1).
   const at = (cwd) => (...args) => execFileSync('git', [...GIT_FIXED, '-C', cwd, '-c', 'diff.relative=false', '-c', 'diff.ignoreSubmodules=none', ...args], { stdio: ['ignore', 'pipe', 'pipe'], env: gitEnv(), maxBuffer: 16 << 20, timeout: 30000 });
