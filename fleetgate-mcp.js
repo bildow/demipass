@@ -111,7 +111,8 @@ async function onboard({ daily_cap_dd, approval_id } = {}, { fileConsent = true 
   consentSeen = r.consent || consentSeen;
   const price = await submitPrice();
   const low = price && r.consent && r.consent.daily_cap_dd < price;
-  return { ok: true, service: SERVICE, admission: admissionSeen, ...(ready.spend ? { spend: ready.spend } : {}), consent: r.consent ? { id: r.consent.id, daily_cap_dd: r.consent.daily_cap_dd, existing: Boolean(r.existing) } : null,
+  // Spend only if the session still belongs to the wallet this onboarding started with (#27 independent review r2, 2).
+  return { ok: true, service: SERVICE, admission: admissionSeen, ...(ready.spend && sessionSub() === wallet ? { spend: ready.spend } : {}), consent: r.consent ? { id: r.consent.id, daily_cap_dd: r.consent.daily_cap_dd, existing: Boolean(r.existing) } : null,
            token_id: held.token_id, expires_at: held.expires_at, cap_dd: held.cap_dd,
            ...(low ? { warning: `your daily consent (${r.consent.daily_cap_dd} DD) is below one submission (${price} DD): every submit would be refused. Call fleetgate_onboard with a higher daily_cap_dd to replace it (one approval).` } : {}) };
 }
@@ -188,8 +189,14 @@ async function status() {
     ...(admissionSeen ? { next: 'Before building, fleetgate_check {repo, paths} says whether the paths would be admitted (free).' } : {}) };
 }
 
-// One authenticated call to a free door route, re-minting once on 401 (as submit does). Never charges.
+// One authenticated call to a free door route, re-minting once on 401 (as submit does). Never charges. The call is bound
+// to the wallet the machine's session names when it starts: if the session switches wallets before the request is
+// sent, before the retry, or before the answer is shown, nothing from the door is returned (#27 independent review r2, 1).
+const SWITCHED = { refused: { ok: false, status: 'wallet_changed', error: 'the DemiPass session on this machine switched wallets during this call; nothing from it is shown. Call again.' } };
 async function doorCall(method, route, body) {
+  const me = sessionSub();
+  if (!me) return { refused: { ok: false, error: 'no DemiPass session on this machine: sign in first (demipass_login, or set DEMIPASS_TOKEN)' } };
+  const mine = () => held && held.wallet === me && sessionSub() === me;
   let auth;
   try { auth = await token(); } catch (e) {
     const b = errBody(e);
@@ -197,14 +204,17 @@ async function doorCall(method, route, body) {
     if (b.status === 'admission_required' && b.http_status === 404) return { refused: { ok: false, error: 'this door predates admission, follow and path checks (fleetgate-door/3)' } };
     return { refused: b };
   }
+  if (!mine()) return SWITCHED;
   const url = (await door()) + route;
   try {
     let r = await http(method, url, { auth, body });
     if (r.status === 401) {
       held = null;
       try { auth = await token(); } catch (e) { return { refused: errBody(e) }; }
+      if (!mine()) return SWITCHED;
       r = await http(method, url, { auth, body });
     }
+    if (sessionSub() !== me) return SWITCHED;
     return { r };
   } catch (e) {
     return { refused: { ok: false, error: e.name === 'TimeoutError' ? 'the door timed out' : 'the door could not be reached' } };
