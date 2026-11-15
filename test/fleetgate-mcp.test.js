@@ -324,3 +324,65 @@ test('a non-JSON error echoing the bearer across the 500-character cut leaks no 
   }
   state.rawEcho = false; mcp._reset();
 });
+
+// ── item 4: submit from a git checkout ──
+const { execFileSync } = require('child_process');
+const os = require('os'), fsx = require('fs'), pathx = require('path');
+function repo() {
+  const d = fsx.mkdtempSync(pathx.join(os.tmpdir(), 'fg-git-'));
+  const g = (...a) => execFileSync('git', ['-C', d, '-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { stdio: 'pipe' });
+  g('init', '-q', '-b', 'main');
+  fsx.mkdirSync(pathx.join(d, 'docs')); fsx.writeFileSync(pathx.join(d, 'docs/a.md'), 'old\n'); fsx.writeFileSync(pathx.join(d, 'README.md'), 'r\n');
+  g('add', '-A'); g('commit', '-q', '-m', 'base');
+  g('checkout', '-q', '-b', 'work');
+  return { d, g };
+}
+const lastDoorBody = () => state.doorCalls[state.doorCalls.length - 1].body;
+
+test('git: the changed files at ref, title from the commit subject, provenance in the body; nothing else read', async () => {
+  state.doorRejectFirst = false;
+  const { d, g } = repo();
+  fsx.writeFileSync(pathx.join(d, 'docs/a.md'), 'new ü\n'); fsx.writeFileSync(pathx.join(d, 'docs/b.md'), 'added\n');
+  g('add', '-A'); g('commit', '-q', '-m', 'docs: update a, add b');
+  const r = await call('fleetgate_submit', { repo: 'boltcluster', git: { dir: d, ref: 'work', base: 'main' }, submission_id: 'from-git-0001' });
+  assert.strictEqual(r.ok, true, JSON.stringify(r));
+  const b = lastDoorBody();
+  assert.strictEqual(b.title, 'docs: update a, add b');
+  assert.deepStrictEqual(b.files.sort((x, y) => x.path.localeCompare(y.path)), [{ path: 'docs/a.md', content: 'new ü\n' }, { path: 'docs/b.md', content: 'added\n' }]);
+  assert.match(b.body, /From git: `[0-9a-f]{12}` over merge base `[0-9a-f]{12}` \(2 files\)/);
+  assert.deepStrictEqual(r.from_git.files.sort(), ['docs/a.md', 'docs/b.md']);
+});
+
+test('git: deletes, renames, symlinks and binaries are refused by name before anything is sent', async () => {
+  for (const [name, mutate] of [
+    ['delete', (d) => fsx.unlinkSync(pathx.join(d, 'README.md'))],
+    ['rename', (d) => fsx.renameSync(pathx.join(d, 'docs/a.md'), pathx.join(d, 'docs/c.md'))],
+    ['symlink', (d) => fsx.symlinkSync('README.md', pathx.join(d, 'docs/link.md'))],
+    ['binary', (d) => fsx.writeFileSync(pathx.join(d, 'docs/x.md'), Buffer.from([0x89, 0x50, 0x00, 0xff]))],
+  ]) {
+    const { d, g } = repo(); mutate(d); g('add', '-A'); g('commit', '-q', '-m', name);
+    const n = state.doorCalls.length;
+    const r = await call('fleetgate_submit', { repo: 'boltcluster', git: { dir: d, ref: 'HEAD', base: 'main' } });
+    assert.strictEqual(r.ok, false, name); assert.match(r.error, /can't be submitted/, name); assert.match(r.note, /Nothing was sent/);
+    assert.strictEqual(state.doorCalls.length, n, `${name}: nothing sent`);
+  }
+});
+
+test('git: bad dir, option-like or range refs, no changes, and files with git are refused', async () => {
+  const { d } = repo(); const n = state.doorCalls.length;
+  for (const git of [{ dir: 'relative/path' }, { dir: d, ref: '-x' }, { dir: d, ref: 'a..b' }, { dir: d, base: '--all' }, { dir: d, extra: 1 }, { dir: d, ref: 'main', base: 'main' }]) {
+    const r = await call('fleetgate_submit', { repo: 'boltcluster', title: 't', git });
+    assert.strictEqual(r.ok, false, JSON.stringify(git));
+  }
+  const r = await call('fleetgate_submit', { repo: 'boltcluster', title: 't', files: [{ path: 'a', content: 'b' }], git: { dir: d } });
+  assert.match(r.error, /not both/);
+  assert.strictEqual(state.doorCalls.length, n);
+});
+
+test('supersedes is passed to the door, and must name another submission', async () => {
+  state.doorRejectFirst = false;
+  let r = await call('fleetgate_submit', { repo: 'boltcluster', title: 't', files: [{ path: 'docs/a.md', content: 'x' }], submission_id: 'second-sub-0002', supersedes: 'first-sub-00001' });
+  assert.strictEqual(r.ok, true); assert.strictEqual(lastDoorBody().supersedes, 'first-sub-00001');
+  r = await call('fleetgate_submit', { repo: 'boltcluster', title: 't', files: [{ path: 'docs/a.md', content: 'x' }], submission_id: 'second-sub-0002', supersedes: 'second-sub-0002' });
+  assert.strictEqual(r.ok, false); assert.match(r.error, /earlier submission/);
+});
