@@ -76,13 +76,19 @@ async function onboard({ daily_cap_dd, approval_id } = {}, { fileConsent = true 
   const api = dp(session), wallet = subOf(session);
   if (!session) return { ok: false, error: process.env.DEMIPASS_EXPECT_DID ? `no DemiPass session for ${process.env.DEMIPASS_EXPECT_DID} (the wallet this server was onboarded as) on this machine` : 'no DemiPass session on this machine: sign in first (demipass_login, or set DEMIPASS_TOKEN)' };
   if (approval_id && !daily_cap_dd && pendingCaps.has(Number(approval_id))) daily_cap_dd = pendingCaps.get(Number(approval_id));
+  let c;
   if (!fileConsent) {
-    // Submitting never files a consent (#17 review L3): after a person said no, a submit must not ask their phone again.
+    // Submitting (and the free tools) never file a consent (#17 review L3): after a person said no, a submit must not ask
+    // their phone again. The active consent found here is used as it is; consentAtLeast is never called on this path,
+    // since it reads again and could file one if the consent were revoked in between (#27 independent review, 2).
     const all = await api.consents();
-    if (!(all.mine || []).some(c => c.service === SERVICE && c.status === 'active')) return { ok: false, status: 'not_onboarded', error: 'not onboarded: run fleetgate_onboard and approve it in the DemiPass app' };
+    const mine = (all.mine || []).find(x => x.service === SERVICE && x.status === 'active');
+    if (!mine) return { ok: false, status: 'not_onboarded', error: 'not onboarded: run fleetgate_onboard and approve it in the DemiPass app' };
+    c = { consent: mine, existing: true };
+  } else {
+    // services().onboard's two steps; the token carries a follow-up budget so the submission's review rounds can bill.
+    c = await consentAtLeast(api, { service: SERVICE, cap: daily_cap_dd || DEFAULT_CAP, explicit: Boolean(daily_cap_dd), approvalId: approval_id });
   }
-  // services().onboard's two steps; the token carries a follow-up budget so the submission's review rounds can bill.
-  const c = await consentAtLeast(api, { service: SERVICE, cap: daily_cap_dd || DEFAULT_CAP, explicit: Boolean(daily_cap_dd), approvalId: approval_id });
   let r = c;
   if (!c.pending) {
     // Ordinary charges (the door's intake) stay under the server's default cap; the review rounds a submission starts
@@ -97,7 +103,9 @@ async function onboard({ daily_cap_dd, approval_id } = {}, { fileConsent = true 
   }
   if (!TOKEN_RE.test(String(r.token.token || ''))) return { ok: false, error: 'DemiPass returned a malformed service token; not held' };
   const ready = await fleetgateAdmission({ endpoint: await door(), token: r.token.token, wallet });
-  if (!ready.ok) { held = null; admissionSeen = null; return { ...ready, consent: { id: r.consent.id, daily_cap_dd: r.consent.daily_cap_dd } }; }
+  // A refused admission drops the token just minted; anything the door said is scrubbed of it first, since scrub() at the
+  // end only knows a held token (#27 independent review, 1).
+  if (!ready.ok) { held = null; admissionSeen = null; return redact({ ...ready, consent: { id: r.consent.id, daily_cap_dd: r.consent.daily_cap_dd } }, r.token.token); }
   admissionSeen = ready.admission;
   held = { token: r.token.token, token_id: r.token.token_id, expires_at: r.token.expires_at, cap_dd: r.token.cap_dd, wallet };
   consentSeen = r.consent || consentSeen;
@@ -130,7 +138,7 @@ async function http(method, url, { auth, body } = {}) {
 
 const SUBMISSION_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{7,63}$/;   // the door's own pattern
 async function submit({ repo, title, body, files, submission_id }) {
-  if (!repo || !/^[A-Za-z0-9._-]{1,100}$/.test(repo)) return { ok: false, error: 'repo: the name of a repo under atlas/ (e.g. boltcluster)' };
+  if (typeof repo !== 'string' || !/^[A-Za-z0-9._-]{1,100}$/.test(repo)) return { ok: false, error: 'repo: the name of a repo under atlas/ (e.g. boltcluster)' };
   if (!title) return { ok: false, error: 'title required' };
   if (!Array.isArray(files) || !files.length) return { ok: false, error: 'files: [{path, content}] (the whole new content of each file)' };
   const sid = submission_id || crypto.randomBytes(12).toString('hex');
@@ -173,16 +181,22 @@ async function status() {
     onboarded: Boolean(live() && ready.ok), admission: admissionSeen, ...(ready.ok ? {} : { readiness: ready }),
     token_id: live() ? held.token_id : null, expires_at: live() ? held.expires_at : null,
     consent: consentSeen ? { id: consentSeen.id, daily_cap_dd: consentSeen.daily_cap_dd } : null,
-    // Spend only as this very call's admission check verified it for the held wallet: never a cached figure, which
-    // could belong to another wallet after a switch or outlive a failed check (Codex connector P2 on #27).
-    ...(ready.ok && ready.spend ? { spend: ready.spend } : {}),
+    // Spend only as this very call's admission check verified it, and only if the held token still belongs to the
+    // session's wallet once that check returns: never a cached figure (Codex connector P2 on #27), never across a switch
+    // made while the check was in flight (#27 independent review, 3).
+    ...(ready.ok && ready.spend && live() ? { spend: ready.spend } : {}),
     ...(admissionSeen ? { next: 'Before building, fleetgate_check {repo, paths} says whether the paths would be admitted (free).' } : {}) };
 }
 
 // One authenticated call to a free door route, re-minting once on 401 (as submit does). Never charges.
 async function doorCall(method, route, body) {
   let auth;
-  try { auth = await token(); } catch (e) { return { refused: errBody(e) }; }
+  try { auth = await token(); } catch (e) {
+    const b = errBody(e);
+    // A door without /v1/onboard (older than fleetgate-door/2) refuses admission with a 404 (#27 independent review, 5).
+    if (b.status === 'admission_required' && b.http_status === 404) return { refused: { ok: false, error: 'this door predates admission, follow and path checks (fleetgate-door/3)' } };
+    return { refused: b };
+  }
   const url = (await door()) + route;
   try {
     let r = await http(method, url, { auth, body });
@@ -201,7 +215,7 @@ const OLD_DOOR = (r) => r.status === 404 && r.data && r.data.route && !r.data.co
 const FOLLOW_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{5,63}$/;   // the door's own submission pattern
 
 async function check({ repo, paths }) {
-  if (!repo || !/^[A-Za-z0-9._-]{1,100}$/.test(repo)) return { ok: false, error: 'repo: the name of a repo under atlas/ (e.g. boltcluster)' };
+  if (typeof repo !== 'string' || !/^[A-Za-z0-9._-]{1,100}$/.test(repo)) return { ok: false, error: 'repo: the name of a repo under atlas/ (e.g. boltcluster)' };
   if (!Array.isArray(paths) || !paths.length || paths.length > 20 || !paths.every(x => typeof x === 'string' && x.length && x.length <= 200))
     return { ok: false, error: 'paths: 1-20 repository paths, e.g. ["docs/notes.md", "tests/new.test.js"]' };
   const { r, refused } = await doorCall('POST', '/v1/check', { repo, paths });
@@ -212,7 +226,7 @@ async function check({ repo, paths }) {
 }
 
 async function follow({ repo, submission_id }) {
-  if (!repo || !/^[A-Za-z0-9._-]{1,100}$/.test(repo)) return { ok: false, error: 'repo: the repo under atlas/ you submitted to (e.g. boltcluster)' };
+  if (typeof repo !== 'string' || !/^[A-Za-z0-9._-]{1,100}$/.test(repo)) return { ok: false, error: 'repo: the repo under atlas/ you submitted to (e.g. boltcluster)' };
   if (typeof submission_id !== 'string' || !FOLLOW_ID_RE.test(submission_id)) return { ok: false, error: 'submission_id: the one fleetgate_submit returned' };
   const { r, refused } = await doorCall('GET', `/v1/pulls/${encodeURIComponent(repo)}/${encodeURIComponent(submission_id)}`);
   if (refused) return refused;
@@ -258,7 +272,8 @@ const HANDLERS = {
 };
 
 // Errors never carry the token: a ServiceError's body is DemiPass's answer, and our own errors name no secret.
-function scrub(x) { const t = held && held.token; return t ? JSON.parse(JSON.stringify(x).split(t).join('[token]')) : x; }
+function redact(x, t) { return t ? JSON.parse(JSON.stringify(x).split(t).join('[token]')) : x; }
+function scrub(x) { return redact(x, held && held.token); }
 function errBody(e) { return { ok: false, error: e.message, ...(e.result || {}), ...(e.body && typeof e.body === 'object' ? { demipass: e.body } : {}), ...(e.status ? { http_status: e.status } : {}) }; }
 
 async function handleMessage(msg) {
