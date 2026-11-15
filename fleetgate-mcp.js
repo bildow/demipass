@@ -12,7 +12,10 @@
  *   fleetgate_onboard({daily_cap_dd?, approval_id?})   consent (one app approval, once per wallet) + token
  *   fleetgate_prices()                                  the door's public price list
  *   fleetgate_submit({repo, title, files, body?, submission_id?})   one PR into atlas/<repo>; intake charged once; review calls metered separately
- *   fleetgate_status()                                  onboarded? token expiry, consent, door health
+ *   fleetgate_status()                                  onboarded? token expiry, consent, door health, lanes, spend
+ *   fleetgate_check({repo, paths})                      free: would these paths be admitted, in which lane, or why not
+ *   fleetgate_follow({repo, submission_id})             free: this wallet's submission as the release controller sees it
+ *                                                       now (every check, each reviewer seat) and the one next step
  *
  * The gate decides: a submitted PR is evaluated by the release controller under the signed charter like any other.
  * Nothing here merges, approves, reviews or touches a charter.
@@ -73,13 +76,19 @@ async function onboard({ daily_cap_dd, approval_id } = {}, { fileConsent = true 
   const api = dp(session), wallet = subOf(session);
   if (!session) return { ok: false, error: process.env.DEMIPASS_EXPECT_DID ? `no DemiPass session for ${process.env.DEMIPASS_EXPECT_DID} (the wallet this server was onboarded as) on this machine` : 'no DemiPass session on this machine: sign in first (demipass_login, or set DEMIPASS_TOKEN)' };
   if (approval_id && !daily_cap_dd && pendingCaps.has(Number(approval_id))) daily_cap_dd = pendingCaps.get(Number(approval_id));
+  let c;
   if (!fileConsent) {
-    // Submitting never files a consent (#17 review L3): after a person said no, a submit must not ask their phone again.
+    // Submitting (and the free tools) never file a consent (#17 review L3): after a person said no, a submit must not ask
+    // their phone again. The active consent found here is used as it is; consentAtLeast is never called on this path,
+    // since it reads again and could file one if the consent were revoked in between (#27 independent review, 2).
     const all = await api.consents();
-    if (!(all.mine || []).some(c => c.service === SERVICE && c.status === 'active')) return { ok: false, status: 'not_onboarded', error: 'not onboarded: run fleetgate_onboard and approve it in the DemiPass app' };
+    const mine = (all.mine || []).find(x => x.service === SERVICE && x.status === 'active');
+    if (!mine) return { ok: false, status: 'not_onboarded', error: 'not onboarded: run fleetgate_onboard and approve it in the DemiPass app' };
+    c = { consent: mine, existing: true };
+  } else {
+    // services().onboard's two steps; the token carries a follow-up budget so the submission's review rounds can bill.
+    c = await consentAtLeast(api, { service: SERVICE, cap: daily_cap_dd || DEFAULT_CAP, explicit: Boolean(daily_cap_dd), approvalId: approval_id });
   }
-  // services().onboard's two steps; the token carries a follow-up budget so the submission's review rounds can bill.
-  const c = await consentAtLeast(api, { service: SERVICE, cap: daily_cap_dd || DEFAULT_CAP, explicit: Boolean(daily_cap_dd), approvalId: approval_id });
   let r = c;
   if (!c.pending) {
     // Ordinary charges (the door's intake) stay under the server's default cap; the review rounds a submission starts
@@ -94,13 +103,16 @@ async function onboard({ daily_cap_dd, approval_id } = {}, { fileConsent = true 
   }
   if (!TOKEN_RE.test(String(r.token.token || ''))) return { ok: false, error: 'DemiPass returned a malformed service token; not held' };
   const ready = await fleetgateAdmission({ endpoint: await door(), token: r.token.token, wallet });
-  if (!ready.ok) { held = null; admissionSeen = null; return { ...ready, consent: { id: r.consent.id, daily_cap_dd: r.consent.daily_cap_dd } }; }
+  // A refused admission drops the token just minted; anything the door said is scrubbed of it first, since scrub() at the
+  // end only knows a held token (#27 independent review, 1).
+  if (!ready.ok) { held = null; admissionSeen = null; return redact({ ...ready, consent: { id: r.consent.id, daily_cap_dd: r.consent.daily_cap_dd } }, r.token.token); }
   admissionSeen = ready.admission;
   held = { token: r.token.token, token_id: r.token.token_id, expires_at: r.token.expires_at, cap_dd: r.token.cap_dd, wallet };
   consentSeen = r.consent || consentSeen;
   const price = await submitPrice();
   const low = price && r.consent && r.consent.daily_cap_dd < price;
-  return { ok: true, service: SERVICE, admission: admissionSeen, consent: r.consent ? { id: r.consent.id, daily_cap_dd: r.consent.daily_cap_dd, existing: Boolean(r.existing) } : null,
+  // Spend only if the session still belongs to the wallet this onboarding started with (#27 independent review r2, 2).
+  return { ok: true, service: SERVICE, admission: admissionSeen, ...(ready.spend && sessionSub() === wallet ? { spend: ready.spend } : {}), consent: r.consent ? { id: r.consent.id, daily_cap_dd: r.consent.daily_cap_dd, existing: Boolean(r.existing) } : null,
            token_id: held.token_id, expires_at: held.expires_at, cap_dd: held.cap_dd,
            ...(low ? { warning: `your daily consent (${r.consent.daily_cap_dd} DD) is below one submission (${price} DD): every submit would be refused. Call fleetgate_onboard with a higher daily_cap_dd to replace it (one approval).` } : {}) };
 }
@@ -122,12 +134,16 @@ async function http(method, url, { auth, body } = {}) {
   if (body !== undefined) headers['content-type'] = 'application/json';
   if (auth) headers.authorization = 'Bearer ' + auth;
   const r = await require('./http-json').requestJson(method, url, { headers, body, timeoutMs: 180000 });
-  return { status: r.status, data: r.data !== null ? r.data : { raw: r.text.slice(0, 500) } };
+  // The bearer this request carried is redacted from the answer BEFORE a raw (non-JSON) body is cut to 500 characters:
+  // cutting first could leave a token prefix that the later scrub no longer recognises (#27 independent review r3).
+  const data = redact(r.data !== null ? r.data : { raw: r.text }, auth);
+  if (data && typeof data.raw === 'string') data.raw = data.raw.slice(0, 500);
+  return { status: r.status, data };
 }
 
 const SUBMISSION_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{7,63}$/;   // the door's own pattern
 async function submit({ repo, title, body, files, submission_id }) {
-  if (!repo || !/^[A-Za-z0-9._-]{1,100}$/.test(repo)) return { ok: false, error: 'repo: the name of a repo under atlas/ (e.g. boltcluster)' };
+  if (typeof repo !== 'string' || !/^[A-Za-z0-9._-]{1,100}$/.test(repo)) return { ok: false, error: 'repo: the name of a repo under atlas/ (e.g. boltcluster)' };
   if (!title) return { ok: false, error: 'title required' };
   if (!Array.isArray(files) || !files.length) return { ok: false, error: 'files: [{path, content}] (the whole new content of each file)' };
   const sid = submission_id || crypto.randomBytes(12).toString('hex');
@@ -151,7 +167,8 @@ async function submit({ repo, title, body, files, submission_id }) {
     return { ok: false, submission_id: sid, error: e.name === 'TimeoutError' ? 'the door timed out' : 'the door could not be reached',
              next: `Retry fleetgate_submit with submission_id "${sid}": if the door already charged, it replays that charge and finds the PR.` };
   }
-  if (r.status === 201) return { ok: true, submission_id: sid, ...r.data, note: 'The release controller evaluates it under the signed charter. A retry with the same submission_id replays, never double-charges.' };
+  if (r.status === 201) return { ok: true, submission_id: sid, ...r.data, note: 'The release controller evaluates it under the signed charter. A retry with the same submission_id replays, never double-charges.',
+    next: `fleetgate_follow {repo: "${repo}", submission_id: "${sid}"} shows what the gate is waiting for, and on whom (free).` };
   return { ok: false, http_status: r.status, submission_id: sid, ...(r.data || {}),
            ...(r.status === 402 ? { hint: 'DemiPass refused the charge: no consent, not enough DD, or a cap. Nothing was created.' } : {}) };
 }
@@ -168,7 +185,69 @@ async function status() {
     door_health: health.status === 200 ? health.data : { http_status: health.status, ...(health.data || {}) },
     onboarded: Boolean(live() && ready.ok), admission: admissionSeen, ...(ready.ok ? {} : { readiness: ready }),
     token_id: live() ? held.token_id : null, expires_at: live() ? held.expires_at : null,
-    consent: consentSeen ? { id: consentSeen.id, daily_cap_dd: consentSeen.daily_cap_dd } : null };
+    consent: consentSeen ? { id: consentSeen.id, daily_cap_dd: consentSeen.daily_cap_dd } : null,
+    // Spend only as this very call's admission check verified it, and only if the held token still belongs to the
+    // session's wallet once that check returns: never a cached figure (Codex connector P2 on #27), never across a switch
+    // made while the check was in flight (#27 independent review, 3).
+    ...(ready.ok && ready.spend && live() ? { spend: ready.spend } : {}),
+    ...(admissionSeen ? { next: 'Before building, fleetgate_check {repo, paths} says whether the paths would be admitted (free).' } : {}) };
+}
+
+// One authenticated call to a free door route, re-minting once on 401 (as submit does). Never charges. The call is bound
+// to the wallet the machine's session names when it starts: if the session switches wallets before the request is
+// sent, before the retry, or before the answer is shown, nothing from the door is returned (#27 independent review r2, 1).
+const SWITCHED = { refused: { ok: false, status: 'wallet_changed', error: 'the DemiPass session on this machine switched wallets during this call; nothing from it is shown. Call again.' } };
+async function doorCall(method, route, body) {
+  const me = sessionSub();
+  if (!me) return { refused: { ok: false, error: 'no DemiPass session on this machine: sign in first (demipass_login, or set DEMIPASS_TOKEN)' } };
+  const mine = () => held && held.wallet === me && sessionSub() === me;
+  let auth;
+  try { auth = await token(); } catch (e) {
+    const b = errBody(e);
+    // A door without /v1/onboard (older than fleetgate-door/2) refuses admission with a 404 (#27 independent review, 5).
+    if (b.status === 'admission_required' && b.http_status === 404) return { refused: { ok: false, error: 'this door predates admission, follow and path checks (fleetgate-door/3)' } };
+    return { refused: b };
+  }
+  if (!mine()) return SWITCHED;
+  const url = (await door()) + route;
+  try {
+    let r = await http(method, url, { auth, body });
+    if (r.status === 401) {
+      held = null;
+      try { auth = await token(); } catch (e) { return { refused: errBody(e) }; }
+      if (!mine()) return SWITCHED;
+      r = await http(method, url, { auth, body });
+    }
+    if (sessionSub() !== me) return SWITCHED;
+    return { r };
+  } catch (e) {
+    return { refused: { ok: false, error: e.name === 'TimeoutError' ? 'the door timed out' : 'the door could not be reached' } };
+  }
+}
+// A door older than fleetgate-door/3 answers its plain 404 {route}; say so instead of passing a bare "not found" on.
+const OLD_DOOR = (r) => r.status === 404 && r.data && r.data.route && !r.data.code;
+const FOLLOW_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{5,63}$/;   // the door's own submission pattern
+
+async function check({ repo, paths }) {
+  if (typeof repo !== 'string' || !/^[A-Za-z0-9._-]{1,100}$/.test(repo)) return { ok: false, error: 'repo: the name of a repo under atlas/ (e.g. boltcluster)' };
+  if (!Array.isArray(paths) || !paths.length || paths.length > 20 || !paths.every(x => typeof x === 'string' && x.length && x.length <= 200))
+    return { ok: false, error: 'paths: 1-20 repository paths, e.g. ["docs/notes.md", "tests/new.test.js"]' };
+  const { r, refused } = await doorCall('POST', '/v1/check', { repo, paths });
+  if (refused) return refused;
+  if (OLD_DOOR(r)) return { ok: false, error: 'this door predates path checks (fleetgate-door/3); fleetgate_status lists the lanes to compare by hand' };
+  if (r.status === 200) return { ...r.data, ...(r.data.ok ? { next: 'Every path is admitted in one lane: fleetgate_submit with these paths.' } : {}) };
+  return { ok: false, http_status: r.status, ...(r.data || {}) };
+}
+
+async function follow({ repo, submission_id }) {
+  if (typeof repo !== 'string' || !/^[A-Za-z0-9._-]{1,100}$/.test(repo)) return { ok: false, error: 'repo: the repo under atlas/ you submitted to (e.g. boltcluster)' };
+  if (typeof submission_id !== 'string' || !FOLLOW_ID_RE.test(submission_id)) return { ok: false, error: 'submission_id: the one fleetgate_submit returned' };
+  const { r, refused } = await doorCall('GET', `/v1/pulls/${encodeURIComponent(repo)}/${encodeURIComponent(submission_id)}`);
+  if (refused) return refused;
+  if (OLD_DOOR(r)) return { ok: false, error: 'this door predates following a submission (fleetgate-door/3)' };
+  if (r.status === 200) return r.data;
+  if (r.status === 404) return { ok: false, http_status: 404, ...(r.data || {}), hint: 'Only this wallet\'s own submissions are visible: check the repo and the submission_id fleetgate_submit returned.' };
+  return { ok: false, http_status: r.status, ...(r.data || {}) };
 }
 
 const TOOLS = [
@@ -185,17 +264,30 @@ const TOOLS = [
       title: { type: 'string' }, body: { type: 'string', description: 'PR description' },
       files: { type: 'array', items: { type: 'object', required: ['path', 'content'], properties: { path: { type: 'string' }, content: { type: 'string', description: 'The whole new file content' } } } },
       submission_id: { type: 'string', description: 'Idempotency key (8-64 of A-Z a-z 0-9 _ -). Reuse it to retry the same submission without a second charge; omitted → a fresh one, returned.' } } } },
-  { name: 'fleetgate_status', description: 'FLEETGATE: free readiness check: repairs existing consented sessions, verifies current signed admission and door health. No payment consent is filed.', inputSchema: { type: 'object', properties: {} } },
+  { name: 'fleetgate_status', description: 'FLEETGATE: free readiness check: repairs existing consented sessions, verifies current signed admission and door health. Shows the lanes this pane may submit to (repos, paths, add-only, denied) and the service token\'s spend. No payment consent is filed.', inputSchema: { type: 'object', properties: {} } },
+  { name: 'fleetgate_check',
+    description: 'FLEETGATE: free, before building or paying: would these paths be admitted? Each path is checked against the signed lanes exactly as a submission is (add-only paths are looked up on main), and the answer names the one lane that would take them all, or why not. Nothing is charged or created.',
+    inputSchema: { type: 'object', required: ['repo', 'paths'], properties: {
+      repo: { type: 'string', description: 'Repo name under atlas/ (e.g. boltcluster)' },
+      paths: { type: 'array', items: { type: 'string' }, description: 'The repository paths you would submit (1-20)' } } } },
+  { name: 'fleetgate_follow',
+    description: 'FLEETGATE: free: where your submission stands. The release controller\'s own rules evaluated now on the PR\'s exact head: every check, the verdict, CI, each reviewer seat (on the head or not; findings when changes were requested), and next {who, what}: ci, you, operator, closer, release-controller or nobody. Only this wallet\'s own submissions are visible. A submission is never amended: a fix is a new submission_id.',
+    inputSchema: { type: 'object', required: ['repo', 'submission_id'], properties: {
+      repo: { type: 'string', description: 'The repo under atlas/ you submitted to' },
+      submission_id: { type: 'string', description: 'The submission_id fleetgate_submit returned' } } } },
 ];
 const HANDLERS = {
   fleetgate_onboard: onboard,
   fleetgate_prices: async () => { const r = await http('GET', (await door()) + '/v1/prices'); return r.status === 200 ? { ok: true, ...r.data } : { ok: false, http_status: r.status, ...(r.data || {}) }; },
   fleetgate_submit: submit,
   fleetgate_status: status,
+  fleetgate_check: check,
+  fleetgate_follow: follow,
 };
 
 // Errors never carry the token: a ServiceError's body is DemiPass's answer, and our own errors name no secret.
-function scrub(x) { const t = held && held.token; return t ? JSON.parse(JSON.stringify(x).split(t).join('[token]')) : x; }
+function redact(x, t) { return t ? JSON.parse(JSON.stringify(x).split(t).join('[token]')) : x; }
+function scrub(x) { return redact(x, held && held.token); }
 function errBody(e) { return { ok: false, error: e.message, ...(e.result || {}), ...(e.body && typeof e.body === 'object' ? { demipass: e.body } : {}), ...(e.status ? { http_status: e.status } : {}) }; }
 
 async function handleMessage(msg) {

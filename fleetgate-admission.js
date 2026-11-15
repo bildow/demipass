@@ -10,7 +10,11 @@ async function fleetgateAdmission({ endpoint, token, wallet }) {
     const d = r.data, a = d && d.admission;
     if (r.status !== 200 || !d || d.ok !== true) return no('Fleetgate admission refused or unavailable; payment consent alone is not readiness', { http_status:r.status, detail:d && typeof d.error === 'string' ? d.error : 'No admission evidence' });
     if (d.wallet !== wallet || !a || a.ok !== true || a.protocol !== 1 || a.release_authorized !== false || !/^[0-9a-f]{64}$/.test(a.charter_sha256) || !Array.isArray(a.lanes) || !a.lanes.length || !a.lanes.every(l => typeof l.name === 'string' && Array.isArray(l.repos) && l.repos.length && ['paths','add_only','deny'].every(k => Array.isArray(l[k]) && l[k].every(v => typeof v === 'string')))) return no('Fleetgate returned invalid or wrong-wallet admission evidence');
-    return { ok:true, admission:a };
+    // The token's spend as the door reports it from DemiPass verify (fleetgate-door/3); only well-formed numbers.
+    const sp = d.spend, num = v => Number.isSafeInteger(v) && v >= 0;
+    const spend = sp && num(sp.token_cap_dd) && num(sp.token_spent_dd) && num(sp.follow_up_dd)
+      ? { token_cap_dd: sp.token_cap_dd, token_spent_dd: sp.token_spent_dd, follow_up_dd: sp.follow_up_dd } : null;
+    return { ok:true, admission:a, ...(spend ? { spend } : {}) };
   } catch (_) { return no('Fleetgate admission could not be verified; no submission was attempted'); }
 }
 module.exports = { fleetgateAdmission };

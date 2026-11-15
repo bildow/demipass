@@ -37,8 +37,25 @@ const dpSrv = http.createServer(async (req, res) => {
 const doorSrv = http.createServer(async (req, res) => {
   const b = await readBody(req);
   if (req.url === '/door/v1/onboard') {
+    if (state.oldDoorOnboard) return json(res, 404, { error: 'not found', route: '/v1/onboard' });
+    if (state.echoToken) return json(res, 403, { ok: false, error: 'refused ' + req.headers.authorization });
+    if (state.switchDuringAdmission) { state.switchDuringAdmission = false; process.env.DEMIPASS_TOKEN = SESSION_B; }
     if(state.admissionRefused)return json(res,403,{ok:false,error:'no signed lane'});
-    return json(res,200,{ok:true,wallet:state.wrongWallet ? 'did:key:zWrong' : wallets.get(req.headers.authorization),admission});
+    return json(res,200,{ok:true,wallet:state.wrongWallet ? 'did:key:zWrong' : wallets.get(req.headers.authorization),admission,
+      ...(state.spend ? { spend: state.spend } : {})});
+  }
+  if (req.url === '/door/v1/check' || req.url.startsWith('/door/v1/pulls/')) {
+    state.freeCalls = (state.freeCalls || []).concat([{ url: req.url, method: req.method, auth: req.headers.authorization, body: b }]);
+    if (state.oldDoor) return json(res, 404, { error: 'not found', route: req.url.slice(5) });
+    if (state.rawEcho) { res.writeHead(502, { 'content-type': 'text/plain' }); return res.end('x'.repeat(470) + ' upstream said: Authorization: ' + req.headers.authorization + ' end'); }
+    if (state.switchDuringFree) { state.switchDuringFree = false; process.env.DEMIPASS_TOKEN = SESSION_B; }
+    if (state.freeRejectFirst) { state.freeRejectFirst = false; return json(res, 401, { error: 'token expired' }); }
+    if (req.url === '/door/v1/check') return json(res, 200, b.paths.includes('charters/x.json')
+      ? { ok: false, lane: null, paths: [{ path: 'charters/x.json', allowed: false, why: 'never accepted through the door' }], why: 'some paths are not admitted' }
+      : { ok: true, lane: 'intake', paths: b.paths.map(path => ({ path, status: 'added', allowed: true, lanes: ['intake'] })) });
+    if (req.url === '/door/v1/pulls/boltcluster/sub-follow-001') return json(res, 200, { ok: true, submission_id: 'sub-follow-001', pull: { number: 51 },
+      next: { who: 'operator', what: 'Waiting for review on aaaa from rev-open.' }, gate: { verdict: 'blocked', checks: [] }, reviews: [] });
+    return json(res, 404, { ok: false, code: 'no_submission', error: 'No submission to atlas/boltcluster from this wallet.' });
   }
   if (req.url === '/door/health') return json(res, 200, { ok: true, version: 'test', tenant: 'fleetgate' });
   if (req.url === '/door/v1/prices') return json(res, 200, { slug: 'fleetgate', actions: [{ action: 'submit', price_dd: 696 }] });
@@ -70,9 +87,9 @@ test.before(async () => {
 });
 test.after(() => { dpSrv.close(); doorSrv.close(); });
 
-test('tools/list names the four tools', async () => {
+test('tools/list names the six tools', async () => {
   const r = await mcp.handleMessage({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
-  assert.deepStrictEqual(r.result.tools.map(t => t.name).sort(), ['fleetgate_onboard', 'fleetgate_prices', 'fleetgate_status', 'fleetgate_submit']);
+  assert.deepStrictEqual(r.result.tools.map(t => t.name).sort(), ['fleetgate_check', 'fleetgate_follow', 'fleetgate_onboard', 'fleetgate_prices', 'fleetgate_status', 'fleetgate_submit']);
 });
 
 test('submit before onboarding: refused, nothing sent to the door, and no consent filed on the phone', async () => {
@@ -184,4 +201,126 @@ test('payment consent alone is not onboarded; refusal recovers on next status wi
 });
 test('a wrong-wallet admission result never counts',async()=>{
  state.wrongWallet=true;const r=await call('fleetgate_onboard');assert.strictEqual(r.ok,false);assert.match(r.error,/wrong-wallet/);state.wrongWallet=false;
+});
+
+test('check: free; admitted paths name the lane and point at submit; refusals pass through; never a submission', async () => {
+  const paid = state.doorCalls.length;
+  let r = await call('fleetgate_check', { repo: 'boltcluster', paths: ['docs/a.md'] });
+  assert.strictEqual(r.ok, true); assert.strictEqual(r.lane, 'intake'); assert.match(r.next, /fleetgate_submit/);
+  r = await call('fleetgate_check', { repo: 'boltcluster', paths: ['charters/x.json'] });
+  assert.strictEqual(r.ok, false); assert.strictEqual(r.paths[0].allowed, false);
+  r = await call('fleetgate_check', { repo: 'boltcluster', paths: [] }); assert.strictEqual(r.ok, false); assert.match(r.error, /paths/);
+  r = await call('fleetgate_check', { repo: '../x', paths: ['a'] }); assert.strictEqual(r.ok, false);
+  assert.strictEqual(state.doorCalls.length, paid, 'a check never submits');
+});
+
+test('follow: the door\'s answer with next; another or unknown id gets the own-only hint; a 401 re-mints once', async () => {
+  let r = await call('fleetgate_follow', { repo: 'boltcluster', submission_id: 'sub-follow-001' });
+  assert.strictEqual(r.ok, true); assert.strictEqual(r.next.who, 'operator');
+  r = await call('fleetgate_follow', { repo: 'boltcluster', submission_id: 'someone-elses-01' });
+  assert.strictEqual(r.ok, false); assert.strictEqual(r.code, 'no_submission'); assert.match(r.hint, /own submissions/);
+  r = await call('fleetgate_follow', { repo: 'boltcluster', submission_id: 'bad id' }); assert.strictEqual(r.ok, false); assert.match(r.error, /submission_id/);
+  const minted = state.minted.length; state.freeRejectFirst = true;
+  r = await call('fleetgate_follow', { repo: 'boltcluster', submission_id: 'sub-follow-001' });
+  assert.strictEqual(r.ok, true); assert.strictEqual(state.minted.length, minted + 1, 're-minted once');
+  const last = state.freeCalls.slice(-2); assert.notStrictEqual(last[0].auth, last[1].auth, 'retried with the new token');
+});
+
+test('an older door (no follow, no check): a plain answer saying so, not a bare 404', async () => {
+  state.oldDoor = true;
+  let r = await call('fleetgate_follow', { repo: 'boltcluster', submission_id: 'sub-follow-001' });
+  assert.strictEqual(r.ok, false); assert.match(r.error, /predates/);
+  r = await call('fleetgate_check', { repo: 'boltcluster', paths: ['docs/a.md'] });
+  assert.strictEqual(r.ok, false); assert.match(r.error, /predates/);
+  state.oldDoor = false;
+});
+
+test('status shows the token\'s spend when the door reports it, and only well-formed numbers', async () => {
+  state.spend = { token_cap_dd: 800, token_spent_dd: 12, follow_up_dd: 3000 };
+  let r = await call('fleetgate_status');
+  assert.deepStrictEqual(r.spend, { token_cap_dd: 800, token_spent_dd: 12, follow_up_dd: 3000 }); assert.match(r.next, /fleetgate_check/);
+  mcp._reset(); state.spend = { token_cap_dd: 'lots', token_spent_dd: 1, follow_up_dd: 1 };
+  r = await call('fleetgate_status'); assert.strictEqual(r.spend, undefined);
+  // never a cached figure: a failed admission check or another wallet shows no spend (Codex connector P2 on #27)
+  state.spend = { token_cap_dd: 800, token_spent_dd: 12, follow_up_dd: 3000 };
+  r = await call('fleetgate_status'); assert.ok(r.spend);
+  state.admissionRefused = true; r = await call('fleetgate_status'); assert.strictEqual(r.spend, undefined); state.admissionRefused = false;
+  process.env.DEMIPASS_TOKEN = SESSION_B; r = await call('fleetgate_status'); assert.strictEqual(r.spend, undefined, JSON.stringify(r));
+  process.env.DEMIPASS_TOKEN = SESSION_A; mcp._reset();
+  state.spend = null;
+});
+
+test('a submission answer points at fleetgate_follow with its own repo and id', async () => {
+  state.doorRejectFirst = false;
+  const r = await call('fleetgate_submit', { repo: 'boltcluster', title: 't', files: [{ path: 'docs/a.md', content: 'x' }], submission_id: 'sub-next-0001' });
+  assert.strictEqual(r.ok, true, JSON.stringify(r)); assert.match(r.next, /fleetgate_follow \{repo: "boltcluster", submission_id: "sub-next-0001"\}/);
+});
+
+test('a refused admission that echoes the just-minted token never returns it (#27 independent review, 1)', async () => {
+  mcp._reset(); state.echoToken = true;
+  for (const [name, args] of [['fleetgate_follow', { repo: 'boltcluster', submission_id: 'sub-follow-001' }], ['fleetgate_check', { repo: 'boltcluster', paths: ['docs/a.md'] }], ['fleetgate_status', {}]]) {
+    const r = await call(name, args);   // call() asserts the token is absent from the whole answer
+    assert.strictEqual(r.ok, false, name);
+  }
+  state.echoToken = false; mcp._reset();
+});
+
+test('free tools never file a payment consent, even with none active (#27 independent review, 2)', async () => {
+  mcp._reset(); const saved = state.consents; state.consents = []; const posts = state.consentPosts.length;
+  for (const [name, args] of [['fleetgate_follow', { repo: 'boltcluster', submission_id: 'sub-follow-001' }], ['fleetgate_check', { repo: 'boltcluster', paths: ['docs/a.md'] }]]) {
+    const r = await call(name, args); assert.strictEqual(r.ok, false); assert.strictEqual(r.status, 'not_onboarded', JSON.stringify(r));
+  }
+  assert.strictEqual(state.consentPosts.length, posts, 'no consent filed');
+  state.consents = saved; mcp._reset();
+});
+
+test('a wallet switch while status\'s admission check is in flight shows no spend (#27 independent review, 3)', async () => {
+  mcp._reset(); state.spend = { token_cap_dd: 800, token_spent_dd: 12, follow_up_dd: 3000 }; state.switchDuringAdmission = true;
+  const r = await call('fleetgate_status');
+  assert.strictEqual(r.spend, undefined, JSON.stringify(r)); assert.strictEqual(r.onboarded, false);
+  process.env.DEMIPASS_TOKEN = SESSION_A; state.spend = null; mcp._reset();
+});
+
+test('repo must be a string: an array is refused before any network call (#27 independent review, 4)', async () => {
+  const n = (state.freeCalls || []).length, m = state.minted.length;
+  for (const [name, args] of [['fleetgate_follow', { repo: ['boltcluster'], submission_id: 'sub-follow-001' }], ['fleetgate_check', { repo: ['boltcluster'], paths: ['a'] }], ['fleetgate_submit', { repo: ['boltcluster'], title: 't', files: [{ path: 'a', content: 'b' }] }]]) {
+    const r = await call(name, args); assert.strictEqual(r.ok, false); assert.match(r.error, /repo/);
+  }
+  assert.strictEqual((state.freeCalls || []).length, n); assert.strictEqual(state.minted.length, m);
+});
+
+test('a cold start against a door without /v1/onboard says the door is too old (#27 independent review, 5)', async () => {
+  mcp._reset(); state.oldDoorOnboard = true;
+  const r = await call('fleetgate_follow', { repo: 'boltcluster', submission_id: 'sub-follow-001' });
+  assert.strictEqual(r.ok, false); assert.match(r.error, /predates/, JSON.stringify(r));
+  state.oldDoorOnboard = false; mcp._reset();
+});
+
+test('a wallet switch while follow or check is in flight shows nothing from the door (#27 independent review r2, 1)', async () => {
+  for (const [name, args] of [['fleetgate_follow', { repo: 'boltcluster', submission_id: 'sub-follow-001' }], ['fleetgate_check', { repo: 'boltcluster', paths: ['docs/a.md'] }]]) {
+    mcp._reset(); process.env.DEMIPASS_TOKEN = SESSION_A;
+    await call('fleetgate_status');          // a token held for wallet A
+    state.switchDuringFree = true;
+    const r = await call(name, args);
+    assert.strictEqual(r.ok, false, name); assert.strictEqual(r.status, 'wallet_changed', JSON.stringify(r));
+    assert.ok(!('pull' in r) && !('paths' in r) && !('spend' in r), JSON.stringify(r));
+  }
+  process.env.DEMIPASS_TOKEN = SESSION_A; mcp._reset();
+});
+
+test('explicit onboarding with a switch during admission shows no spend (#27 independent review r2, 2)', async () => {
+  mcp._reset(); state.spend = { token_cap_dd: 800, token_spent_dd: 12, follow_up_dd: 3000 }; state.switchDuringAdmission = true;
+  const r = await call('fleetgate_onboard');
+  assert.strictEqual(r.spend, undefined, JSON.stringify(r));
+  process.env.DEMIPASS_TOKEN = SESSION_A; state.spend = null; mcp._reset();
+});
+
+test('a non-JSON error echoing the bearer across the 500-character cut leaks no fragment of it (#27 independent review r3)', async () => {
+  mcp._reset(); process.env.DEMIPASS_TOKEN = SESSION_A; await call('fleetgate_status');
+  state.rawEcho = true;
+  for (const [name, args] of [['fleetgate_follow', { repo: 'boltcluster', submission_id: 'sub-follow-001' }], ['fleetgate_check', { repo: 'boltcluster', paths: ['docs/a.md'] }]]) {
+    const r = await call(name, args);            // call() asserts no svc-token-SECRET anywhere in the answer
+    assert.strictEqual(r.ok, false); assert.ok(!/aaaaaaaaaaaa-[0-9]/.test(JSON.stringify(r)), JSON.stringify(r).slice(-200));
+  }
+  state.rawEcho = false; mcp._reset();
 });
