@@ -406,3 +406,23 @@ test('git: diff.relative and a subdirectory dir do not narrow the change; mode c
     assert.strictEqual(r.ok, false, name); assert.match(r.error, /can't be submitted/, name); assert.strictEqual(state.doorCalls.length, n, name);
   }
 });
+
+test('git: diff.ignoreSubmodules=all cannot hide a submodule change; a top level differing only by whitespace stays itself (#28 independent review r2)', async () => {
+  state.doorRejectFirst = false;
+  const sub = repo(); const { d, g } = repo();
+  fsx.writeFileSync(pathx.join(d, 'docs/a.md'), 'edit\n');
+  g('-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', sub.d, 'vendored'); g('add', '-A'); g('commit', '-q', '-m', 'edit plus submodule');
+  g('config', 'diff.ignoreSubmodules', 'all');
+  const n = state.doorCalls.length;
+  let r = await call('fleetgate_submit', { repo: 'boltcluster', git: { dir: d, ref: 'work', base: 'main' } });
+  assert.strictEqual(r.ok, false, JSON.stringify(r)); assert.match(r.error, /vendored|\.gitmodules/); assert.strictEqual(state.doorCalls.length, n);
+  // "x " and "x": the request names the one with the trailing space, and only its change is read
+  const base = fsx.mkdtempSync(pathx.join(os.tmpdir(), 'fg-ws-')), a = pathx.join(base, 'proj'), b = pathx.join(base, 'proj ');
+  for (const [dir, content] of [[a, 'from proj\n'], [b, 'from proj-space\n']]) {
+    fsx.mkdirSync(dir); const gg = (...x) => execFileSync('git', ['-C', dir, '-c', 'user.name=t', '-c', 'user.email=t@t', ...x], { stdio: 'pipe' });
+    gg('init', '-q', '-b', 'main'); fsx.writeFileSync(pathx.join(dir, 'README.md'), 'r\n'); gg('add', '-A'); gg('commit', '-q', '-m', 'base');
+    gg('checkout', '-q', '-b', 'work'); fsx.mkdirSync(pathx.join(dir, 'docs')); fsx.writeFileSync(pathx.join(dir, 'docs/a.md'), content); gg('add', '-A'); gg('commit', '-q', '-m', 'w');
+  }
+  r = await call('fleetgate_submit', { repo: 'boltcluster', git: { dir: b, ref: 'work', base: 'main' }, submission_id: 'ws-path-0001' });
+  assert.strictEqual(r.ok, true, JSON.stringify(r)); assert.strictEqual(lastDoorBody().files[0].content, 'from proj-space\n');
+});

@@ -155,6 +155,17 @@ const GIT_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
 // and `ref`, with its whole content at `ref`. The door can only create or replace UTF-8 text files, so a delete (or
 // a rename, which is a delete), a symlink, a submodule, a binary or non-UTF-8 file is refused, naming it. git runs
 // without a shell; nothing in the checkout is executed. → { files, head, merge_base, subject } | { error }
+// The checkout's top level exactly as git prints it: only git's terminating newline is removed (a trim could turn
+// "/work/project " into another checkout, "/work/project"), and a root that isn't valid UTF-8 is refused
+// (#28 independent review round 2, 2).
+function topLevel(run) {
+  const b = run('rev-parse', '--show-toplevel');
+  const raw = b.subarray(0, b.length && b[b.length - 1] === 0x0a ? b.length - 1 : b.length);
+  const dir = raw.toString('utf8');
+  if (!dir || !Buffer.from(dir, 'utf8').equals(raw) || !path.isAbsolute(dir)) return { error: 'git: the checkout\'s top-level path is not plain UTF-8' };
+  return { dir };
+}
+
 function filesFromGit(g) {
   if (!g || typeof g !== 'object' || Array.isArray(g)) return { error: 'git: {dir, ref?, base?}' };
   const { dir, ref = 'HEAD', base = 'origin/main' } = g;
@@ -164,14 +175,16 @@ function filesFromGit(g) {
     if (typeof v !== 'string' || !GIT_REF_RE.test(v) || v.includes('..') || v.endsWith('.lock')) return { error: `git.${k}: a branch, tag or commit name` };
   // Run at the repository's top level with diff.relative off: a user's git config must not narrow or re-root the change
   // (#28 independent review, 1).
-  const at = (cwd) => (...args) => execFileSync('git', ['-C', cwd, '-c', 'diff.relative=false', ...args], { stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 16 << 20, timeout: 30000 });
+  const at = (cwd) => (...args) => execFileSync('git', ['-C', cwd, '-c', 'diff.relative=false', '-c', 'diff.ignoreSubmodules=none', ...args], { stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 16 << 20, timeout: 30000 });
   let run, head, mb, listing;
   try {
-    run = at(at(dir)('rev-parse', '--show-toplevel').toString().trim());
+    const top = topLevel(at(dir));
+    if (top.error) return top;
+    run = at(top.dir);
     head = run('rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`).toString().trim();
     const b = run('rev-parse', '--verify', '--end-of-options', `${base}^{commit}`).toString().trim();
     mb = run('merge-base', b, head).toString().trim();
-    listing = run('diff', '--raw', '-z', '--no-renames', '--no-relative', '--no-abbrev', mb, head);
+    listing = run('diff', '--raw', '-z', '--no-renames', '--no-relative', '--ignore-submodules=none', '--no-abbrev', mb, head);
   } catch (e) {
     return { error: `git: ${(String(e.stderr || e.message).trim().split('\n').pop() || 'failed').slice(0, 300)}` };
   }
