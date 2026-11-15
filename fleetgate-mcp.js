@@ -195,11 +195,15 @@ function gitTooOld() {
   return err;
 }
 
+// The checkout's own git directory, exactly as git prints it (only its terminating newline removed: a trim could turn
+// "/work/project " into "/work/project", #28 r2). Every later command is pinned to it with --git-dir, so the
+// checkout's config (core.worktree) can't send git to another repository (#29 r3); comparing two commits needs no
+// work tree.
 function topLevel(run) {
-  const b = run('rev-parse', '--show-toplevel');
+  const b = run('rev-parse', '--absolute-git-dir');
   const raw = b.subarray(0, b.length && b[b.length - 1] === 0x0a ? b.length - 1 : b.length);
   const dir = raw.toString('utf8');
-  if (!dir || !Buffer.from(dir, 'utf8').equals(raw) || !path.isAbsolute(dir)) return { error: 'git: the checkout\'s top-level path is not plain UTF-8' };
+  if (!dir || !Buffer.from(dir, 'utf8').equals(raw) || !path.isAbsolute(dir)) return { error: 'git: the checkout\'s git directory path is not plain UTF-8' };
   return { dir };
 }
 
@@ -213,12 +217,12 @@ function filesFromGit(g) {
   if (gitTooOld()) return { error: gitTooOld() };
   // Run at the repository's top level with diff.relative off: a user's git config must not narrow or re-root the change
   // (#28 independent review, 1).
-  const at = (cwd) => (...args) => execFileSync('git', [...GIT_FIXED, '-C', cwd, '-c', 'diff.relative=false', '-c', 'diff.ignoreSubmodules=none', ...args], { stdio: ['ignore', 'pipe', 'pipe'], env: gitEnv(), maxBuffer: 16 << 20, timeout: 30000 });
+  const at = (cwd, gd) => (...args) => execFileSync('git', [...GIT_FIXED, ...(gd ? [`--git-dir=${gd}`] : []), '-C', cwd, '-c', 'diff.relative=false', '-c', 'diff.ignoreSubmodules=none', ...args], { stdio: ['ignore', 'pipe', 'pipe'], env: gitEnv(), maxBuffer: 16 << 20, timeout: 30000 });
   let run, head, mb, listing;
   try {
     const top = topLevel(at(dir));
     if (top.error) return top;
-    run = at(top.dir);
+    run = at(top.dir, top.dir);
     if (run('rev-parse', '--is-shallow-repository').toString().trim() !== 'false')
       return { error: 'git: this checkout is shallow, so its merge base can\'t be trusted; fetch the full history first (git fetch --unshallow)' };
     head = run('rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`).toString().trim();
@@ -278,14 +282,14 @@ function packetFromGit(g) {
   // diff.submodule=short: a submodule's own diff would run its own textconv and external drivers, which the parent's
   // --no-textconv doesn't reach (#29 r1, 1). core.bigFileThreshold high and --text below: the checkout's config or
   // attributes can't turn a change into "Binary files differ" and hide it (#29 r1, 2).
-  const at = (cwd) => (...args) => execFileSync('git', [...GIT_FIXED, '-C', cwd, '-c', 'diff.relative=false', '-c', 'diff.noprefix=false', '-c', 'diff.mnemonicPrefix=false', '-c', 'diff.ignoreSubmodules=none',
+  const at = (cwd, gd) => (...args) => execFileSync('git', [...GIT_FIXED, ...(gd ? [`--git-dir=${gd}`] : []), '-C', cwd, '-c', 'diff.relative=false', '-c', 'diff.noprefix=false', '-c', 'diff.mnemonicPrefix=false', '-c', 'diff.ignoreSubmodules=none',
     '-c', 'diff.submodule=short', '-c', 'core.bigFileThreshold=2047m', ...args],
     { stdio: ['ignore', 'pipe', 'pipe'], env: gitEnv(), maxBuffer: 32 << 20, timeout: 60000 });
   let run, head, mb, raw, diffBuf;
   try {
     const top = topLevel(at(dir));
     if (top.error) return top;
-    run = at(top.dir);
+    run = at(top.dir, top.dir);
     if (run('rev-parse', '--is-shallow-repository').toString().trim() !== 'false')
       return { error: 'git: this checkout is shallow, so its merge base can\'t be trusted; fetch the full history first (git fetch --unshallow)' };
     head = run('rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`).toString().trim();

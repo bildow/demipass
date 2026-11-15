@@ -605,3 +605,15 @@ test('review and submit: supplied ids must be strings, an empty one is not repla
   const r = await call('fleetgate_review', { git: { dir: d2, ref: 'work', base: 'main' } });
   assert.strictEqual(r.ok, false); assert.match(r.error, /SHA-256/); assert.strictEqual((state.reviewPosts || []).length, n);
 });
+
+test('git: core.worktree in the checkout cannot send git to another repository (submit and review) (#29 independent review r3)', async () => {
+  state.doorRejectFirst = false;
+  const A = repo(), B = repo();
+  fsx.writeFileSync(pathx.join(A.d, 'docs/a.md'), 'from A\n'); A.g('add', '-A'); A.g('commit', '-q', '-m', 'A change');
+  fsx.writeFileSync(pathx.join(B.d, 'docs/a.md'), 'from B (private)\n'); B.g('add', '-A'); B.g('commit', '-q', '-m', 'B change');
+  A.g('config', 'core.worktree', B.d);
+  let r = await call('fleetgate_submit', { repo: 'boltcluster', git: { dir: A.d, ref: 'work', base: 'main' }, submission_id: 'worktree-0001' });
+  assert.strictEqual(r.ok, true, JSON.stringify(r)); assert.strictEqual(lastDoorBody().files[0].content, 'from A\n');
+  r = await call('fleetgate_review', { git: { dir: A.d, ref: 'work', base: 'main' }, review_id: 'review-wt-00001' });
+  assert.strictEqual(r.ok, true, JSON.stringify(r)); assert.match(state.reviewPosts.at(-1).diff, /\+from A/); assert.ok(!/from B/.test(state.reviewPosts.at(-1).diff));
+});
