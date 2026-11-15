@@ -443,3 +443,23 @@ test('git: replace objects are ignored; paths the door would refuse (non-ASCII, 
     assert.strictEqual(r.ok, false, name); assert.match(r.error, /ASCII letters/, name); assert.strictEqual(state.doorCalls.length, n, name);
   }
 });
+
+test('git: a grafts file cannot move the merge base; a blob missing from a partial clone is refused, never fetched (#28 independent review r4)', async () => {
+  state.doorRejectFirst = false;
+  let { d, g } = repo();
+  // repo(): main has the base commit, work adds a change. Add B on main, then F on work from B; graft F onto main's root.
+  const root = g('rev-list', '--max-parents=0', 'main').toString().trim();
+  g('checkout', '-q', 'main'); fsx.writeFileSync(pathx.join(d, 'README.md'), 'B\n'); g('commit', '-q', '-am', 'B');
+  g('checkout', '-q', '-b', 'f'); fsx.mkdirSync(pathx.join(d, 'docs'), { recursive: true }); fsx.writeFileSync(pathx.join(d, 'docs/f.md'), 'F\n'); g('add', '-A'); g('commit', '-q', '-m', 'F');
+  const F = g('rev-parse', 'HEAD').toString().trim();
+  fsx.writeFileSync(pathx.join(d, '.git/info/grafts'), `${F} ${root}\n`);
+  let r = await call('fleetgate_submit', { repo: 'boltcluster', git: { dir: d, ref: 'f', base: 'main' }, submission_id: 'grafts-00001' });
+  assert.strictEqual(r.ok, true, JSON.stringify(r)); assert.deepStrictEqual(lastDoorBody().files.map(f => f.path), ['docs/f.md']);
+  // a blob the object store lacks: delete its loose object, as a partial clone would lack it
+  ({ d, g } = repo()); fsx.writeFileSync(pathx.join(d, 'docs/a.md'), 'not here\n'); g('add', '-A'); g('commit', '-q', '-m', 'missing');
+  const blob = g('rev-parse', 'HEAD:docs/a.md').toString().trim();
+  fsx.rmSync(pathx.join(d, '.git/objects', blob.slice(0, 2), blob.slice(2)));
+  const n = state.doorCalls.length;
+  r = await call('fleetgate_submit', { repo: 'boltcluster', git: { dir: d, ref: 'HEAD', base: 'main' } });
+  assert.strictEqual(r.ok, false); assert.match(r.error, /isn't in this checkout/); assert.strictEqual(state.doorCalls.length, n);
+});

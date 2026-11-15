@@ -158,13 +158,15 @@ const GIT_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
 // The checkout's top level exactly as git prints it: only git's terminating newline is removed (a trim could turn
 // "/work/project " into another checkout, "/work/project"), and a root that isn't valid UTF-8 is refused
 // (#28 independent review round 2, 2).
-// Every git call reads the objects as committed: replace refs and grafts off (#28 independent review round 3, 1), and no
+// Every git call reads the objects as committed and never touches the network: replace refs off (#28 independent review
+// round 3, 1), the legacy grafts file pointed at /dev/null and lazy fetching off for partial clones (round 4), and no
 // GIT_* variable from this process's environment (GIT_DIR, GIT_OBJECT_DIRECTORY, GIT_REPLACE_REF_BASE…) redirects it.
-const GIT_FIXED = ['--no-replace-objects'];
+// An object a partial clone doesn't have is then a local error, refused like any other.
+const GIT_FIXED = ['--no-replace-objects', '--no-lazy-fetch'];
 function gitEnv() {
   const env = {};
   for (const [k, v] of Object.entries(process.env)) if (!k.startsWith('GIT_')) env[k] = v;
-  return { ...env, GIT_NO_REPLACE_OBJECTS: '1', GIT_TERMINAL_PROMPT: '0' };
+  return { ...env, GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: '/dev/null', GIT_NO_LAZY_FETCH: '1', GIT_TERMINAL_PROMPT: '0' };
 }
 // The door's own path rule (fleet/door/door.js PATH_RE): ASCII letters, digits, . _ - /; at most 200 characters; no
 // leading slash, dot segment or empty segment. Refused here, before anything is sent (#28 independent review round 3, 2).
@@ -217,7 +219,9 @@ function filesFromGit(g) {
     // (#28 independent review, 2).
     if (newMode !== '100644') { refused.push(`${p}: mode ${newMode} (the door writes regular, non-executable files only)`); continue; }
     if (status === 'M' && oldMode !== '100644') { refused.push(`${p}: mode ${oldMode} → ${newMode} (a mode change can't go through the door)`); continue; }
-    const buf = run('cat-file', 'blob', newSha);
+    let buf;
+    try { buf = run('cat-file', 'blob', newSha); }
+    catch (_) { refused.push(`${p}: its content isn't in this checkout (a partial clone?); fetch it first`); continue; }
     const text = buf.toString('utf8');
     if (buf.includes(0) || !Buffer.from(text, 'utf8').equals(buf)) { refused.push(`${p}: not UTF-8 text`); continue; }
     if (buf.length > MAX_FILE) { refused.push(`${p}: ${buf.length} bytes, over ${MAX_FILE}`); continue; }
