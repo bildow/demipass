@@ -162,25 +162,35 @@ function filesFromGit(g) {
   if (typeof dir !== 'string' || !path.isAbsolute(dir)) return { error: 'git.dir: the absolute path of your checkout' };
   for (const [k, v] of [['ref', ref], ['base', base]])
     if (typeof v !== 'string' || !GIT_REF_RE.test(v) || v.includes('..') || v.endsWith('.lock')) return { error: `git.${k}: a branch, tag or commit name` };
-  const run = (...args) => execFileSync('git', ['-C', dir, ...args], { stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 16 << 20, timeout: 30000 });
-  let head, mb, listing;
+  // Run at the repository's top level with diff.relative off: a user's git config must not narrow or re-root the change
+  // (#28 independent review, 1).
+  const at = (cwd) => (...args) => execFileSync('git', ['-C', cwd, '-c', 'diff.relative=false', ...args], { stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 16 << 20, timeout: 30000 });
+  let run, head, mb, listing;
   try {
+    run = at(at(dir)('rev-parse', '--show-toplevel').toString().trim());
     head = run('rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`).toString().trim();
     const b = run('rev-parse', '--verify', '--end-of-options', `${base}^{commit}`).toString().trim();
     mb = run('merge-base', b, head).toString().trim();
-    listing = run('diff', '--raw', '-z', '--no-renames', '--no-abbrev', mb, head).toString('utf8');
+    listing = run('diff', '--raw', '-z', '--no-renames', '--no-relative', '--no-abbrev', mb, head);
   } catch (e) {
     return { error: `git: ${(String(e.stderr || e.message).trim().split('\n').pop() || 'failed').slice(0, 300)}` };
   }
-  // --raw -z: ":<old mode> <new mode> <old sha> <new sha> <status>\0<path>\0" per path.
-  const parts = listing.split('\0').filter(x => x !== '');
+  // --raw -z: ":<old mode> <new mode> <old sha> <new sha> <status>\0<path>\0" per path, parsed as bytes: a path that is
+  // not valid UTF-8 is refused here, never decoded with replacement characters (#28 independent review, 3).
+  const parts = [];
+  for (let at0 = 0; at0 < listing.length;) { const z = listing.indexOf(0, at0); if (z < 0) break; if (z > at0) parts.push(listing.subarray(at0, z)); at0 = z + 1; }
   const files = [], refused = [];
   for (let i = 0; i + 1 < parts.length; i += 2) {
-    const meta = parts[i].replace(/^:/, '').split(' '), p = parts[i + 1];
-    const [, newMode, , newSha, status] = meta;
+    const meta = parts[i].toString('latin1').replace(/^:/, '').split(' ');
+    const pb = parts[i + 1], p = pb.toString('utf8');
+    if (!Buffer.from(p, 'utf8').equals(pb)) { refused.push(`${pb.toString('latin1').replace(/[^\x20-\x7e]/g, '?')}: the path is not UTF-8`); continue; }
+    const [oldMode, newMode, , newSha, status] = meta;
     if (status === 'D') { refused.push(`${p}: deleted (the door can't delete or rename files)`); continue; }
-    if (!['A', 'M', 'T'].includes(status)) { refused.push(`${p}: ${status}`); continue; }
-    if (newMode !== '100644' && newMode !== '100755') { refused.push(`${p}: mode ${newMode} (a symlink or submodule can't go through the door)`); continue; }
+    if (!['A', 'M'].includes(status)) { refused.push(`${p}: ${status === 'T' ? 'its type changed' : status} (the door writes regular files only)`); continue; }
+    // The door writes plain 100644 files: an executable, a symlink, a submodule or any mode change can't be reproduced
+    // (#28 independent review, 2).
+    if (newMode !== '100644') { refused.push(`${p}: mode ${newMode} (the door writes regular, non-executable files only)`); continue; }
+    if (status === 'M' && oldMode !== '100644') { refused.push(`${p}: mode ${oldMode} → ${newMode} (a mode change can't go through the door)`); continue; }
     const buf = run('cat-file', 'blob', newSha);
     const text = buf.toString('utf8');
     if (buf.includes(0) || !Buffer.from(text, 'utf8').equals(buf)) { refused.push(`${p}: not UTF-8 text`); continue; }

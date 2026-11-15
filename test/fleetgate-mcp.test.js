@@ -386,3 +386,23 @@ test('supersedes is passed to the door, and must name another submission', async
   r = await call('fleetgate_submit', { repo: 'boltcluster', title: 't', files: [{ path: 'docs/a.md', content: 'x' }], submission_id: 'second-sub-0002', supersedes: 'second-sub-0002' });
   assert.strictEqual(r.ok, false); assert.match(r.error, /earlier submission/);
 });
+
+test('git: diff.relative and a subdirectory dir do not narrow the change; mode changes, executables and non-UTF-8 paths are refused (#28 independent review)', async () => {
+  state.doorRejectFirst = false;
+  let { d, g } = repo();
+  fsx.writeFileSync(pathx.join(d, 'docs/a.md'), 'changed\n'); fsx.writeFileSync(pathx.join(d, 'README.md'), 'changed too\n');
+  g('add', '-A'); g('commit', '-q', '-m', 'two files'); g('config', 'diff.relative', 'true');
+  let r = await call('fleetgate_submit', { repo: 'boltcluster', git: { dir: pathx.join(d, 'docs'), ref: 'work', base: 'main' }, submission_id: 'relative-0001' });
+  assert.strictEqual(r.ok, true, JSON.stringify(r));
+  assert.deepStrictEqual(lastDoorBody().files.map(f => f.path).sort(), ['README.md', 'docs/a.md']);
+  for (const [name, mutate] of [
+    ['chmod', (dd, gg) => { fsx.chmodSync(pathx.join(dd, 'README.md'), 0o755); gg('update-index', '--chmod=+x', 'README.md'); }],
+    ['executable', (dd) => { fsx.writeFileSync(pathx.join(dd, 'run.sh'), '#!/bin/sh\n', { mode: 0o755 }); }],
+    ['latin1 path', (dd) => { fsx.writeFileSync(Buffer.concat([Buffer.from(pathx.join(dd, 'docs') + '/'), Buffer.from([0xff]), Buffer.from('.md')]), 'x\n'); }],
+  ]) {
+    ({ d, g } = repo()); mutate(d, g); g('add', '-A'); g('commit', '-q', '-m', name);
+    const n = state.doorCalls.length;
+    r = await call('fleetgate_submit', { repo: 'boltcluster', git: { dir: d, ref: 'HEAD', base: 'main' } });
+    assert.strictEqual(r.ok, false, name); assert.match(r.error, /can't be submitted/, name); assert.strictEqual(state.doorCalls.length, n, name);
+  }
+});
