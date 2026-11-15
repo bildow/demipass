@@ -585,3 +585,23 @@ test('review: ssh remotes left out; binary-marking config can\'t hide a change; 
   r = await call('fleetgate_review', { git: { dir: d, ref: 'work', base: 'main' } });
   assert.strictEqual(r.ok, false); assert.match(r.error, /without newlines/); assert.strictEqual(state.reviewPosts.length, n);
 });
+
+test('review and submit: supplied ids must be strings, an empty one is not replaced; SHA-256 repositories refused locally (#29 independent review r2)', async () => {
+  state.doorRejectFirst = false;
+  let { d, g } = repo(); fsx.writeFileSync(pathx.join(d, 'docs/a.md'), 'x\n'); g('add', '-A'); g('commit', '-q', '-m', 'x');
+  const n = (state.reviewPosts || []).length, m = state.doorCalls.length;
+  for (const bad of [12345678, ['review-valid-001'], '', null, 0]) {
+    let r = await call('fleetgate_review', { git: { dir: d, ref: 'work', base: 'main' }, review_id: bad });
+    assert.strictEqual(r.ok, false, JSON.stringify(bad));
+    r = await call('fleetgate_submit', { repo: 'boltcluster', files: [{ path: 'docs/a.md', content: 'x\n' }], title: 't', submission_id: bad });
+    assert.strictEqual(r.ok, false, JSON.stringify(bad));
+  }
+  assert.strictEqual((state.reviewPosts || []).length, n); assert.strictEqual(state.doorCalls.length, m);
+  // a SHA-256 repository
+  const d2 = fsx.mkdtempSync(pathx.join(os.tmpdir(), 'fg-sha256-'));
+  const g2 = (...a) => execFileSync('git', ['-C', d2, '-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { stdio: 'pipe' });
+  g2('init', '-q', '--object-format=sha256', '-b', 'main'); fsx.writeFileSync(pathx.join(d2, 'a.md'), 'a\n'); g2('add', '-A'); g2('commit', '-q', '-m', 'base');
+  g2('checkout', '-q', '-b', 'work'); fsx.writeFileSync(pathx.join(d2, 'a.md'), 'b\n'); g2('commit', '-q', '-am', 'w');
+  const r = await call('fleetgate_review', { git: { dir: d2, ref: 'work', base: 'main' } });
+  assert.strictEqual(r.ok, false); assert.match(r.error, /SHA-256/); assert.strictEqual((state.reviewPosts || []).length, n);
+});

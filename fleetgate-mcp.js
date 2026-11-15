@@ -319,6 +319,8 @@ function packetFromGit(g) {
     const plain = `https://${url.host}${url.pathname.replace(/\.git$/, '')}`;
     if (url.protocol === 'https:' && /^https:\/\/[A-Za-z0-9.-]{1,100}(:[0-9]{1,5})?\/[A-Za-z0-9._\/-]{1,200}$/.test(plain)) remote = plain;
   } catch (_) { remote = undefined; }
+  // The door takes SHA-1 commit ids (40 hex); a SHA-256 repository is refused here, before anything is sent (#29 r2, 1).
+  if (!/^[0-9a-f]{40}$/.test(head) || !/^[0-9a-f]{40}$/.test(mb)) return { error: 'git: this repository uses commit ids the door does not take (SHA-256); reviews take SHA-1 repositories' };
   return { packet: { source: { ...(remote ? { remote } : {}), head, base: mb }, files, diff,
     subject: run('log', '-1', '--no-show-signature', '--format=%s', head).toString().trim() } };
 }
@@ -326,7 +328,10 @@ function packetFromGit(g) {
 async function review({ git, title, note, review_id }) {
   const p = packetFromGit(git);
   if (p.error) return { ok: false, error: p.error, note: 'Nothing was sent or charged.' };
-  const id = review_id || `review-${crypto.randomBytes(8).toString('hex')}`;
+  // A supplied id must be a string (no coercion); only an omitted one is generated, so a retry never becomes a second,
+  // separately charged review (#29 r2, 2).
+  if (review_id !== undefined && typeof review_id !== 'string') return { ok: false, error: 'review_id: a string (8-64 letters, digits, _ or -)' };
+  const id = review_id === undefined ? `review-${crypto.randomBytes(8).toString('hex')}` : review_id;
   if (!SUBMISSION_RE.test(id)) return { ok: false, error: 'review_id: 8-64 letters, digits, _ or -, starting with a letter or digit' };
   if (note !== undefined && (typeof note !== 'string' || note.length > 4000)) return { ok: false, error: 'note: up to 4000 characters' };
   const t = typeof title === 'string' && title.trim() ? title.trim().slice(0, 200) : p.packet.subject.slice(0, 200) || 'review';
@@ -355,7 +360,8 @@ async function submit({ repo, title, body, files, git, submission_id, supersedes
   if (!Array.isArray(files) || !files.length) return { ok: false, error: 'files: [{path, content}] (the whole new content of each file), or git: {dir, ref, base}' };
   // An earlier submission may have been made directly at the door, whose ids start at 6 characters (round 6, 2).
   if (supersedes !== undefined && (typeof supersedes !== 'string' || !FOLLOW_ID_RE.test(supersedes))) return { ok: false, error: 'supersedes: the submission_id of your own earlier submission to this repo' };
-  const sid = submission_id || crypto.randomBytes(12).toString('hex');
+  if (submission_id !== undefined && typeof submission_id !== 'string') return { ok: false, error: 'submission_id: a string (8-64 letters, digits, _ or -)' };
+  const sid = submission_id === undefined ? crypto.randomBytes(12).toString('hex') : submission_id;
   if (!SUBMISSION_RE.test(sid)) return { ok: false, error: 'submission_id: 8-64 letters, digits, _ or -, starting with a letter or digit' };
   if (supersedes !== undefined && supersedes === sid) return { ok: false, error: 'supersedes: an earlier submission, not this one' };
   const payload = { submission_id: sid, repo, title, ...(body ? { body } : {}), files, ...(supersedes !== undefined ? { supersedes } : {}) };
