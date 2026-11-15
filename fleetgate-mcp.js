@@ -12,7 +12,10 @@
  *   fleetgate_onboard({daily_cap_dd?, approval_id?})   consent (one app approval, once per wallet) + token
  *   fleetgate_prices()                                  the door's public price list
  *   fleetgate_submit({repo, title, files, body?, submission_id?})   one PR into atlas/<repo>; intake charged once; review calls metered separately
- *   fleetgate_status()                                  onboarded? token expiry, consent, door health
+ *   fleetgate_status()                                  onboarded? token expiry, consent, door health, lanes, spend
+ *   fleetgate_check({repo, paths})                      free: would these paths be admitted, in which lane, or why not
+ *   fleetgate_follow({repo, submission_id})             free: this wallet's submission as the release controller sees it
+ *                                                       now (every check, each reviewer seat) and the one next step
  *
  * The gate decides: a submitted PR is evaluated by the release controller under the signed charter like any other.
  * Nothing here merges, approves, reviews or touches a charter.
@@ -55,6 +58,7 @@ function dp(token = sessionToken()) { return services({ token, baseUrl: DEMIPASS
 let held = null;   // { token, token_id, expires_at, cap_dd }
 let consentSeen = null;
 let admissionSeen = null;
+let spendSeen = null;
 const pendingCaps = new Map();   // approval_id → the daily cap asked for: redeeming must repeat it (#17 review L4)
 // Token check before holding it: what the door accepts, so a malformed mint can never end up in a header error (L1).
 const TOKEN_RE = /^[A-Za-z0-9_.-]{20,4096}$/;
@@ -96,6 +100,7 @@ async function onboard({ daily_cap_dd, approval_id } = {}, { fileConsent = true 
   const ready = await fleetgateAdmission({ endpoint: await door(), token: r.token.token, wallet });
   if (!ready.ok) { held = null; admissionSeen = null; return { ...ready, consent: { id: r.consent.id, daily_cap_dd: r.consent.daily_cap_dd } }; }
   admissionSeen = ready.admission;
+  spendSeen = ready.spend || null;
   held = { token: r.token.token, token_id: r.token.token_id, expires_at: r.token.expires_at, cap_dd: r.token.cap_dd, wallet };
   consentSeen = r.consent || consentSeen;
   const price = await submitPrice();
@@ -151,7 +156,8 @@ async function submit({ repo, title, body, files, submission_id }) {
     return { ok: false, submission_id: sid, error: e.name === 'TimeoutError' ? 'the door timed out' : 'the door could not be reached',
              next: `Retry fleetgate_submit with submission_id "${sid}": if the door already charged, it replays that charge and finds the PR.` };
   }
-  if (r.status === 201) return { ok: true, submission_id: sid, ...r.data, note: 'The release controller evaluates it under the signed charter. A retry with the same submission_id replays, never double-charges.' };
+  if (r.status === 201) return { ok: true, submission_id: sid, ...r.data, note: 'The release controller evaluates it under the signed charter. A retry with the same submission_id replays, never double-charges.',
+    next: `fleetgate_follow {repo: "${repo}", submission_id: "${sid}"} shows what the gate is waiting for, and on whom (free).` };
   return { ok: false, http_status: r.status, submission_id: sid, ...(r.data || {}),
            ...(r.status === 402 ? { hint: 'DemiPass refused the charge: no consent, not enough DD, or a cap. Nothing was created.' } : {}) };
 }
@@ -164,11 +170,57 @@ async function status() {
     ready = held && held.wallet !== sessionSub() ? { ok:false, status:'wallet_changed', error:'The held token belongs to another wallet; onboard explicitly' } : live() ? await fleetgateAdmission({ endpoint: await door(), token: held.token, wallet: held.wallet }) : await onboard({}, { fileConsent: false });
   } catch (e) { ready = errBody(e); }
   admissionSeen = ready.ok ? ready.admission : null;
+  if (ready.ok) spendSeen = ready.spend || spendSeen;
   return { ok: health.status === 200 && health.data && health.data.ok === true && Boolean(ready.ok), door: await door(),
     door_health: health.status === 200 ? health.data : { http_status: health.status, ...(health.data || {}) },
     onboarded: Boolean(live() && ready.ok), admission: admissionSeen, ...(ready.ok ? {} : { readiness: ready }),
     token_id: live() ? held.token_id : null, expires_at: live() ? held.expires_at : null,
-    consent: consentSeen ? { id: consentSeen.id, daily_cap_dd: consentSeen.daily_cap_dd } : null };
+    consent: consentSeen ? { id: consentSeen.id, daily_cap_dd: consentSeen.daily_cap_dd } : null,
+    ...(spendSeen ? { spend: spendSeen } : {}),
+    ...(admissionSeen ? { next: 'Before building, fleetgate_check {repo, paths} says whether the paths would be admitted (free).' } : {}) };
+}
+
+// One authenticated call to a free door route, re-minting once on 401 (as submit does). Never charges.
+async function doorCall(method, route, body) {
+  let auth;
+  try { auth = await token(); } catch (e) { return { refused: errBody(e) }; }
+  const url = (await door()) + route;
+  try {
+    let r = await http(method, url, { auth, body });
+    if (r.status === 401) {
+      held = null;
+      try { auth = await token(); } catch (e) { return { refused: errBody(e) }; }
+      r = await http(method, url, { auth, body });
+    }
+    return { r };
+  } catch (e) {
+    return { refused: { ok: false, error: e.name === 'TimeoutError' ? 'the door timed out' : 'the door could not be reached' } };
+  }
+}
+// A door older than fleetgate-door/3 answers its plain 404 {route}; say so instead of passing a bare "not found" on.
+const OLD_DOOR = (r) => r.status === 404 && r.data && r.data.route && !r.data.code;
+const FOLLOW_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{5,63}$/;   // the door's own submission pattern
+
+async function check({ repo, paths }) {
+  if (!repo || !/^[A-Za-z0-9._-]{1,100}$/.test(repo)) return { ok: false, error: 'repo: the name of a repo under atlas/ (e.g. boltcluster)' };
+  if (!Array.isArray(paths) || !paths.length || paths.length > 20 || !paths.every(x => typeof x === 'string' && x.length && x.length <= 200))
+    return { ok: false, error: 'paths: 1-20 repository paths, e.g. ["docs/notes.md", "tests/new.test.js"]' };
+  const { r, refused } = await doorCall('POST', '/v1/check', { repo, paths });
+  if (refused) return refused;
+  if (OLD_DOOR(r)) return { ok: false, error: 'this door predates path checks (fleetgate-door/3); fleetgate_status lists the lanes to compare by hand' };
+  if (r.status === 200) return { ...r.data, ...(r.data.ok ? { next: 'Every path is admitted in one lane: fleetgate_submit with these paths.' } : {}) };
+  return { ok: false, http_status: r.status, ...(r.data || {}) };
+}
+
+async function follow({ repo, submission_id }) {
+  if (!repo || !/^[A-Za-z0-9._-]{1,100}$/.test(repo)) return { ok: false, error: 'repo: the repo under atlas/ you submitted to (e.g. boltcluster)' };
+  if (typeof submission_id !== 'string' || !FOLLOW_ID_RE.test(submission_id)) return { ok: false, error: 'submission_id: the one fleetgate_submit returned' };
+  const { r, refused } = await doorCall('GET', `/v1/pulls/${encodeURIComponent(repo)}/${encodeURIComponent(submission_id)}`);
+  if (refused) return refused;
+  if (OLD_DOOR(r)) return { ok: false, error: 'this door predates following a submission (fleetgate-door/3)' };
+  if (r.status === 200) return r.data;
+  if (r.status === 404) return { ok: false, http_status: 404, ...(r.data || {}), hint: 'Only this wallet\'s own submissions are visible: check the repo and the submission_id fleetgate_submit returned.' };
+  return { ok: false, http_status: r.status, ...(r.data || {}) };
 }
 
 const TOOLS = [
@@ -185,13 +237,25 @@ const TOOLS = [
       title: { type: 'string' }, body: { type: 'string', description: 'PR description' },
       files: { type: 'array', items: { type: 'object', required: ['path', 'content'], properties: { path: { type: 'string' }, content: { type: 'string', description: 'The whole new file content' } } } },
       submission_id: { type: 'string', description: 'Idempotency key (8-64 of A-Z a-z 0-9 _ -). Reuse it to retry the same submission without a second charge; omitted → a fresh one, returned.' } } } },
-  { name: 'fleetgate_status', description: 'FLEETGATE: free readiness check: repairs existing consented sessions, verifies current signed admission and door health. No payment consent is filed.', inputSchema: { type: 'object', properties: {} } },
+  { name: 'fleetgate_status', description: 'FLEETGATE: free readiness check: repairs existing consented sessions, verifies current signed admission and door health. Shows the lanes this pane may submit to (repos, paths, add-only, denied) and the service token\'s spend. No payment consent is filed.', inputSchema: { type: 'object', properties: {} } },
+  { name: 'fleetgate_check',
+    description: 'FLEETGATE: free, before building or paying: would these paths be admitted? Each path is checked against the signed lanes exactly as a submission is (add-only paths are looked up on main), and the answer names the one lane that would take them all, or why not. Nothing is charged or created.',
+    inputSchema: { type: 'object', required: ['repo', 'paths'], properties: {
+      repo: { type: 'string', description: 'Repo name under atlas/ (e.g. boltcluster)' },
+      paths: { type: 'array', items: { type: 'string' }, description: 'The repository paths you would submit (1-20)' } } } },
+  { name: 'fleetgate_follow',
+    description: 'FLEETGATE: free: where your submission stands. The release controller\'s own rules evaluated now on the PR\'s exact head: every check, the verdict, CI, each reviewer seat (on the head or not; findings when changes were requested), and next {who, what}: ci, you, operator, closer, release-controller or nobody. Only this wallet\'s own submissions are visible. A submission is never amended: a fix is a new submission_id.',
+    inputSchema: { type: 'object', required: ['repo', 'submission_id'], properties: {
+      repo: { type: 'string', description: 'The repo under atlas/ you submitted to' },
+      submission_id: { type: 'string', description: 'The submission_id fleetgate_submit returned' } } } },
 ];
 const HANDLERS = {
   fleetgate_onboard: onboard,
   fleetgate_prices: async () => { const r = await http('GET', (await door()) + '/v1/prices'); return r.status === 200 ? { ok: true, ...r.data } : { ok: false, http_status: r.status, ...(r.data || {}) }; },
   fleetgate_submit: submit,
   fleetgate_status: status,
+  fleetgate_check: check,
+  fleetgate_follow: follow,
 };
 
 // Errors never carry the token: a ServiceError's body is DemiPass's answer, and our own errors name no secret.
@@ -215,7 +279,7 @@ async function handleMessage(msg) {
   return { jsonrpc: '2.0', id, error: { code: -32601, message: `Method not found: ${method}` } };
 }
 
-module.exports = { handleMessage, _reset: () => { held = null; consentSeen = null; doorCached = null; pendingCaps.clear(); } };
+module.exports = { handleMessage, _reset: () => { held = null; consentSeen = null; spendSeen = null; doorCached = null; pendingCaps.clear(); } };
 
 if (require.main === module) {
   // Messages are answered in order through one queue; stdin closing waits for the queue (a call in flight is answered).

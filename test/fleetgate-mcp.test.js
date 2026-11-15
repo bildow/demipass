@@ -38,7 +38,19 @@ const doorSrv = http.createServer(async (req, res) => {
   const b = await readBody(req);
   if (req.url === '/door/v1/onboard') {
     if(state.admissionRefused)return json(res,403,{ok:false,error:'no signed lane'});
-    return json(res,200,{ok:true,wallet:state.wrongWallet ? 'did:key:zWrong' : wallets.get(req.headers.authorization),admission});
+    return json(res,200,{ok:true,wallet:state.wrongWallet ? 'did:key:zWrong' : wallets.get(req.headers.authorization),admission,
+      ...(state.spend ? { spend: state.spend } : {})});
+  }
+  if (req.url === '/door/v1/check' || req.url.startsWith('/door/v1/pulls/')) {
+    state.freeCalls = (state.freeCalls || []).concat([{ url: req.url, method: req.method, auth: req.headers.authorization, body: b }]);
+    if (state.oldDoor) return json(res, 404, { error: 'not found', route: req.url.slice(5) });
+    if (state.freeRejectFirst) { state.freeRejectFirst = false; return json(res, 401, { error: 'token expired' }); }
+    if (req.url === '/door/v1/check') return json(res, 200, b.paths.includes('charters/x.json')
+      ? { ok: false, lane: null, paths: [{ path: 'charters/x.json', allowed: false, why: 'never accepted through the door' }], why: 'some paths are not admitted' }
+      : { ok: true, lane: 'intake', paths: b.paths.map(path => ({ path, status: 'added', allowed: true, lanes: ['intake'] })) });
+    if (req.url === '/door/v1/pulls/boltcluster/sub-follow-001') return json(res, 200, { ok: true, submission_id: 'sub-follow-001', pull: { number: 51 },
+      next: { who: 'operator', what: 'Waiting for review on aaaa from rev-open.' }, gate: { verdict: 'blocked', checks: [] }, reviews: [] });
+    return json(res, 404, { ok: false, code: 'no_submission', error: 'No submission to atlas/boltcluster from this wallet.' });
   }
   if (req.url === '/door/health') return json(res, 200, { ok: true, version: 'test', tenant: 'fleetgate' });
   if (req.url === '/door/v1/prices') return json(res, 200, { slug: 'fleetgate', actions: [{ action: 'submit', price_dd: 696 }] });
@@ -70,9 +82,9 @@ test.before(async () => {
 });
 test.after(() => { dpSrv.close(); doorSrv.close(); });
 
-test('tools/list names the four tools', async () => {
+test('tools/list names the six tools', async () => {
   const r = await mcp.handleMessage({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
-  assert.deepStrictEqual(r.result.tools.map(t => t.name).sort(), ['fleetgate_onboard', 'fleetgate_prices', 'fleetgate_status', 'fleetgate_submit']);
+  assert.deepStrictEqual(r.result.tools.map(t => t.name).sort(), ['fleetgate_check', 'fleetgate_follow', 'fleetgate_onboard', 'fleetgate_prices', 'fleetgate_status', 'fleetgate_submit']);
 });
 
 test('submit before onboarding: refused, nothing sent to the door, and no consent filed on the phone', async () => {
@@ -184,4 +196,51 @@ test('payment consent alone is not onboarded; refusal recovers on next status wi
 });
 test('a wrong-wallet admission result never counts',async()=>{
  state.wrongWallet=true;const r=await call('fleetgate_onboard');assert.strictEqual(r.ok,false);assert.match(r.error,/wrong-wallet/);state.wrongWallet=false;
+});
+
+test('check: free; admitted paths name the lane and point at submit; refusals pass through; never a submission', async () => {
+  const paid = state.doorCalls.length;
+  let r = await call('fleetgate_check', { repo: 'boltcluster', paths: ['docs/a.md'] });
+  assert.strictEqual(r.ok, true); assert.strictEqual(r.lane, 'intake'); assert.match(r.next, /fleetgate_submit/);
+  r = await call('fleetgate_check', { repo: 'boltcluster', paths: ['charters/x.json'] });
+  assert.strictEqual(r.ok, false); assert.strictEqual(r.paths[0].allowed, false);
+  r = await call('fleetgate_check', { repo: 'boltcluster', paths: [] }); assert.strictEqual(r.ok, false); assert.match(r.error, /paths/);
+  r = await call('fleetgate_check', { repo: '../x', paths: ['a'] }); assert.strictEqual(r.ok, false);
+  assert.strictEqual(state.doorCalls.length, paid, 'a check never submits');
+});
+
+test('follow: the door\'s answer with next; another or unknown id gets the own-only hint; a 401 re-mints once', async () => {
+  let r = await call('fleetgate_follow', { repo: 'boltcluster', submission_id: 'sub-follow-001' });
+  assert.strictEqual(r.ok, true); assert.strictEqual(r.next.who, 'operator');
+  r = await call('fleetgate_follow', { repo: 'boltcluster', submission_id: 'someone-elses-01' });
+  assert.strictEqual(r.ok, false); assert.strictEqual(r.code, 'no_submission'); assert.match(r.hint, /own submissions/);
+  r = await call('fleetgate_follow', { repo: 'boltcluster', submission_id: 'bad id' }); assert.strictEqual(r.ok, false); assert.match(r.error, /submission_id/);
+  const minted = state.minted.length; state.freeRejectFirst = true;
+  r = await call('fleetgate_follow', { repo: 'boltcluster', submission_id: 'sub-follow-001' });
+  assert.strictEqual(r.ok, true); assert.strictEqual(state.minted.length, minted + 1, 're-minted once');
+  const last = state.freeCalls.slice(-2); assert.notStrictEqual(last[0].auth, last[1].auth, 'retried with the new token');
+});
+
+test('an older door (no follow, no check): a plain answer saying so, not a bare 404', async () => {
+  state.oldDoor = true;
+  let r = await call('fleetgate_follow', { repo: 'boltcluster', submission_id: 'sub-follow-001' });
+  assert.strictEqual(r.ok, false); assert.match(r.error, /predates/);
+  r = await call('fleetgate_check', { repo: 'boltcluster', paths: ['docs/a.md'] });
+  assert.strictEqual(r.ok, false); assert.match(r.error, /predates/);
+  state.oldDoor = false;
+});
+
+test('status shows the token\'s spend when the door reports it, and only well-formed numbers', async () => {
+  state.spend = { token_cap_dd: 800, token_spent_dd: 12, follow_up_dd: 3000 };
+  let r = await call('fleetgate_status');
+  assert.deepStrictEqual(r.spend, { token_cap_dd: 800, token_spent_dd: 12, follow_up_dd: 3000 }); assert.match(r.next, /fleetgate_check/);
+  mcp._reset(); state.spend = { token_cap_dd: 'lots', token_spent_dd: 1, follow_up_dd: 1 };
+  r = await call('fleetgate_status'); assert.strictEqual(r.spend, undefined);
+  state.spend = null;
+});
+
+test('a submission answer points at fleetgate_follow with its own repo and id', async () => {
+  state.doorRejectFirst = false;
+  const r = await call('fleetgate_submit', { repo: 'boltcluster', title: 't', files: [{ path: 'docs/a.md', content: 'x' }], submission_id: 'sub-next-0001' });
+  assert.strictEqual(r.ok, true, JSON.stringify(r)); assert.match(r.next, /fleetgate_follow \{repo: "boltcluster", submission_id: "sub-next-0001"\}/);
 });
