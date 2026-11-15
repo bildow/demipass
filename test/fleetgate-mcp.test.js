@@ -324,3 +324,185 @@ test('a non-JSON error echoing the bearer across the 500-character cut leaks no 
   }
   state.rawEcho = false; mcp._reset();
 });
+
+// ── item 4: submit from a git checkout ──
+const { execFileSync } = require('child_process');
+const os = require('os'), fsx = require('fs'), pathx = require('path');
+function repo() {
+  const d = fsx.mkdtempSync(pathx.join(os.tmpdir(), 'fg-git-'));
+  const g = (...a) => execFileSync('git', ['-C', d, '-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { stdio: 'pipe' });
+  g('init', '-q', '-b', 'main');
+  fsx.mkdirSync(pathx.join(d, 'docs')); fsx.writeFileSync(pathx.join(d, 'docs/a.md'), 'old\n'); fsx.writeFileSync(pathx.join(d, 'README.md'), 'r\n');
+  g('add', '-A'); g('commit', '-q', '-m', 'base');
+  g('checkout', '-q', '-b', 'work');
+  return { d, g };
+}
+const lastDoorBody = () => state.doorCalls[state.doorCalls.length - 1].body;
+
+test('git: the changed files at ref, title from the commit subject, provenance in the body; nothing else read', async () => {
+  state.doorRejectFirst = false;
+  const { d, g } = repo();
+  fsx.writeFileSync(pathx.join(d, 'docs/a.md'), 'new ü\n'); fsx.writeFileSync(pathx.join(d, 'docs/b.md'), 'added\n');
+  g('add', '-A'); g('commit', '-q', '-m', 'docs: update a, add b');
+  const r = await call('fleetgate_submit', { repo: 'boltcluster', git: { dir: d, ref: 'work', base: 'main' }, submission_id: 'from-git-0001' });
+  assert.strictEqual(r.ok, true, JSON.stringify(r));
+  const b = lastDoorBody();
+  assert.strictEqual(b.title, 'docs: update a, add b');
+  assert.deepStrictEqual(b.files.sort((x, y) => x.path.localeCompare(y.path)), [{ path: 'docs/a.md', content: 'new ü\n' }, { path: 'docs/b.md', content: 'added\n' }]);
+  assert.match(b.body, /From git: `[0-9a-f]{12}` over merge base `[0-9a-f]{12}` \(2 files\)/);
+  assert.deepStrictEqual(r.from_git.files.sort(), ['docs/a.md', 'docs/b.md']);
+});
+
+test('git: deletes, renames, symlinks and binaries are refused by name before anything is sent', async () => {
+  for (const [name, mutate] of [
+    ['delete', (d) => fsx.unlinkSync(pathx.join(d, 'README.md'))],
+    ['rename', (d) => fsx.renameSync(pathx.join(d, 'docs/a.md'), pathx.join(d, 'docs/c.md'))],
+    ['symlink', (d) => fsx.symlinkSync('README.md', pathx.join(d, 'docs/link.md'))],
+    ['binary', (d) => fsx.writeFileSync(pathx.join(d, 'docs/x.md'), Buffer.from([0x89, 0x50, 0x00, 0xff]))],
+  ]) {
+    const { d, g } = repo(); mutate(d); g('add', '-A'); g('commit', '-q', '-m', name);
+    const n = state.doorCalls.length;
+    const r = await call('fleetgate_submit', { repo: 'boltcluster', git: { dir: d, ref: 'HEAD', base: 'main' } });
+    assert.strictEqual(r.ok, false, name); assert.match(r.error, /can't be submitted/, name); assert.match(r.note, /Nothing was sent/);
+    assert.strictEqual(state.doorCalls.length, n, `${name}: nothing sent`);
+  }
+});
+
+test('git: bad dir, option-like or range refs, no changes, and files with git are refused', async () => {
+  const { d } = repo(); const n = state.doorCalls.length;
+  for (const git of [{ dir: 'relative/path' }, { dir: d, ref: '-x' }, { dir: d, ref: 'a..b' }, { dir: d, base: '--all' }, { dir: d, extra: 1 }, { dir: d, ref: 'main', base: 'main' }]) {
+    const r = await call('fleetgate_submit', { repo: 'boltcluster', title: 't', git });
+    assert.strictEqual(r.ok, false, JSON.stringify(git));
+  }
+  const r = await call('fleetgate_submit', { repo: 'boltcluster', title: 't', files: [{ path: 'a', content: 'b' }], git: { dir: d } });
+  assert.match(r.error, /not both/);
+  assert.strictEqual(state.doorCalls.length, n);
+});
+
+test('supersedes is passed to the door, and must name another submission', async () => {
+  state.doorRejectFirst = false;
+  let r = await call('fleetgate_submit', { repo: 'boltcluster', title: 't', files: [{ path: 'docs/a.md', content: 'x' }], submission_id: 'second-sub-0002', supersedes: 'first-sub-00001' });
+  assert.strictEqual(r.ok, true); assert.strictEqual(lastDoorBody().supersedes, 'first-sub-00001');
+  r = await call('fleetgate_submit', { repo: 'boltcluster', title: 't', files: [{ path: 'docs/a.md', content: 'x' }], submission_id: 'second-sub-0002', supersedes: 'second-sub-0002' });
+  assert.strictEqual(r.ok, false); assert.match(r.error, /earlier submission/);
+});
+
+test('git: diff.relative and a subdirectory dir do not narrow the change; mode changes, executables and non-UTF-8 paths are refused (#28 independent review)', async () => {
+  state.doorRejectFirst = false;
+  let { d, g } = repo();
+  fsx.writeFileSync(pathx.join(d, 'docs/a.md'), 'changed\n'); fsx.writeFileSync(pathx.join(d, 'README.md'), 'changed too\n');
+  g('add', '-A'); g('commit', '-q', '-m', 'two files'); g('config', 'diff.relative', 'true');
+  let r = await call('fleetgate_submit', { repo: 'boltcluster', git: { dir: pathx.join(d, 'docs'), ref: 'work', base: 'main' }, submission_id: 'relative-0001' });
+  assert.strictEqual(r.ok, true, JSON.stringify(r));
+  assert.deepStrictEqual(lastDoorBody().files.map(f => f.path).sort(), ['README.md', 'docs/a.md']);
+  for (const [name, mutate] of [
+    ['chmod', (dd, gg) => { fsx.chmodSync(pathx.join(dd, 'README.md'), 0o755); gg('update-index', '--chmod=+x', 'README.md'); }],
+    ['executable', (dd) => { fsx.writeFileSync(pathx.join(dd, 'run.sh'), '#!/bin/sh\n', { mode: 0o755 }); }],
+    ['latin1 path', (dd) => { fsx.writeFileSync(Buffer.concat([Buffer.from(pathx.join(dd, 'docs') + '/'), Buffer.from([0xff]), Buffer.from('.md')]), 'x\n'); }],
+  ]) {
+    ({ d, g } = repo()); mutate(d, g); g('add', '-A'); g('commit', '-q', '-m', name);
+    const n = state.doorCalls.length;
+    r = await call('fleetgate_submit', { repo: 'boltcluster', git: { dir: d, ref: 'HEAD', base: 'main' } });
+    assert.strictEqual(r.ok, false, name); assert.match(r.error, /can't be submitted/, name); assert.strictEqual(state.doorCalls.length, n, name);
+  }
+});
+
+test('git: diff.ignoreSubmodules=all cannot hide a submodule change; a top level differing only by whitespace stays itself (#28 independent review r2)', async () => {
+  state.doorRejectFirst = false;
+  const sub = repo(); const { d, g } = repo();
+  fsx.writeFileSync(pathx.join(d, 'docs/a.md'), 'edit\n');
+  g('-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', sub.d, 'vendored'); g('add', '-A'); g('commit', '-q', '-m', 'edit plus submodule');
+  g('config', 'diff.ignoreSubmodules', 'all');
+  const n = state.doorCalls.length;
+  let r = await call('fleetgate_submit', { repo: 'boltcluster', git: { dir: d, ref: 'work', base: 'main' } });
+  assert.strictEqual(r.ok, false, JSON.stringify(r)); assert.match(r.error, /vendored|\.gitmodules/); assert.strictEqual(state.doorCalls.length, n);
+  // "x " and "x": the request names the one with the trailing space, and only its change is read
+  const base = fsx.mkdtempSync(pathx.join(os.tmpdir(), 'fg-ws-')), a = pathx.join(base, 'proj'), b = pathx.join(base, 'proj ');
+  for (const [dir, content] of [[a, 'from proj\n'], [b, 'from proj-space\n']]) {
+    fsx.mkdirSync(dir); const gg = (...x) => execFileSync('git', ['-C', dir, '-c', 'user.name=t', '-c', 'user.email=t@t', ...x], { stdio: 'pipe' });
+    gg('init', '-q', '-b', 'main'); fsx.writeFileSync(pathx.join(dir, 'README.md'), 'r\n'); gg('add', '-A'); gg('commit', '-q', '-m', 'base');
+    gg('checkout', '-q', '-b', 'work'); fsx.mkdirSync(pathx.join(dir, 'docs')); fsx.writeFileSync(pathx.join(dir, 'docs/a.md'), content); gg('add', '-A'); gg('commit', '-q', '-m', 'w');
+  }
+  r = await call('fleetgate_submit', { repo: 'boltcluster', git: { dir: b, ref: 'work', base: 'main' }, submission_id: 'ws-path-0001' });
+  assert.strictEqual(r.ok, true, JSON.stringify(r)); assert.strictEqual(lastDoorBody().files[0].content, 'from proj-space\n');
+});
+
+test('git: replace objects are ignored; paths the door would refuse (non-ASCII, over 200, dot-files) are refused locally (#28 independent review r3)', async () => {
+  state.doorRejectFirst = false;
+  let { d, g } = repo();
+  fsx.writeFileSync(pathx.join(d, 'docs/a.md'), 'committed\n'); g('add', '-A'); g('commit', '-q', '-m', 'real');
+  const real = g('rev-parse', 'HEAD:docs/a.md').toString().trim();
+  const fake = execFileSync('git', ['-C', d, 'hash-object', '-w', '--stdin'], { input: 'substituted\n' }).toString().trim();
+  g('replace', real, fake);
+  let r = await call('fleetgate_submit', { repo: 'boltcluster', git: { dir: d, ref: 'HEAD', base: 'main' }, submission_id: 'replace-0001' });
+  assert.strictEqual(r.ok, true, JSON.stringify(r)); assert.strictEqual(lastDoorBody().files[0].content, 'committed\n');
+  for (const name of ['docs/caf\u00e9.md', 'docs/' + 'x'.repeat(200) + '.md', 'docs/.hidden.md']) {
+    ({ d, g } = repo()); fsx.writeFileSync(pathx.join(d, name), 'x\n'); g('add', '-A'); g('commit', '-q', '-m', 'p');
+    const n = state.doorCalls.length;
+    r = await call('fleetgate_submit', { repo: 'boltcluster', git: { dir: d, ref: 'HEAD', base: 'main' } });
+    assert.strictEqual(r.ok, false, name); assert.match(r.error, /ASCII letters/, name); assert.strictEqual(state.doorCalls.length, n, name);
+  }
+});
+
+test('git: a grafts file cannot move the merge base; a blob missing from a partial clone is refused, never fetched (#28 independent review r4)', async () => {
+  state.doorRejectFirst = false;
+  let { d, g } = repo();
+  // repo(): main has the base commit, work adds a change. Add B on main, then F on work from B; graft F onto main's root.
+  const root = g('rev-list', '--max-parents=0', 'main').toString().trim();
+  g('checkout', '-q', 'main'); fsx.writeFileSync(pathx.join(d, 'README.md'), 'B\n'); g('commit', '-q', '-am', 'B');
+  g('checkout', '-q', '-b', 'f'); fsx.mkdirSync(pathx.join(d, 'docs'), { recursive: true }); fsx.writeFileSync(pathx.join(d, 'docs/f.md'), 'F\n'); g('add', '-A'); g('commit', '-q', '-m', 'F');
+  const F = g('rev-parse', 'HEAD').toString().trim();
+  fsx.writeFileSync(pathx.join(d, '.git/info/grafts'), `${F} ${root}\n`);
+  let r = await call('fleetgate_submit', { repo: 'boltcluster', git: { dir: d, ref: 'f', base: 'main' }, submission_id: 'grafts-00001' });
+  assert.strictEqual(r.ok, true, JSON.stringify(r)); assert.deepStrictEqual(lastDoorBody().files.map(f => f.path), ['docs/f.md']);
+  // a real partial clone (blob:none from a reachable source): the work branch's blob is fetchable, so a lazy fetch would
+  // succeed; it must be refused instead, and the clone must still lack the blob afterwards
+  const src = repo(); fsx.writeFileSync(pathx.join(src.d, 'docs/a.md'), 'only upstream\n'); src.g('add', '-A'); src.g('commit', '-q', '-m', 'upstream change');
+  src.g('config', 'uploadpack.allowFilter', 'true'); src.g('config', 'uploadpack.allowAnySHA1InWant', 'true');
+  const pc = fsx.mkdtempSync(pathx.join(os.tmpdir(), 'fg-partial-'));
+  execFileSync('git', ['clone', '-q', '--no-checkout', '--filter=blob:none', '--branch', 'main', `file://${src.d}`, pc], { stdio: 'pipe' });
+  execFileSync('git', ['-C', pc, 'fetch', '-q', '--filter=blob:none', 'origin', 'work:work'], { stdio: 'pipe' });
+  const blob = execFileSync('git', ['-C', pc, 'rev-parse', 'work:docs/a.md']).toString().trim();
+  const has = () => { try { execFileSync('git', ['-C', pc, '--no-lazy-fetch', 'cat-file', '-e', blob], { stdio: 'pipe', env: { ...process.env, GIT_NO_LAZY_FETCH: '1' } }); return true; } catch (_) { return false; } };
+  assert.strictEqual(has(), false, 'the fixture lacks the blob');
+  const n = state.doorCalls.length;
+  r = await call('fleetgate_submit', { repo: 'boltcluster', git: { dir: pc, ref: 'work', base: 'main' } });
+  assert.strictEqual(r.ok, false, JSON.stringify(r)); assert.match(r.error, /isn't in this checkout/); assert.strictEqual(state.doorCalls.length, n);
+  assert.strictEqual(has(), false, 'nothing was fetched');
+});
+
+test('git: a shallow checkout is refused; no program from the checkout\'s config runs (gpg.program via log.showSignature, fsmonitor) (#28 independent review r5)', async () => {
+  state.doorRejectFirst = false;
+  const src = repo(); fsx.writeFileSync(pathx.join(src.d, 'docs/a.md'), 'x\n'); src.g('add', '-A'); src.g('commit', '-q', '-m', 'c');
+  const sh = fsx.mkdtempSync(pathx.join(os.tmpdir(), 'fg-shallow-'));
+  execFileSync('git', ['clone', '-q', '--depth', '1', '--no-single-branch', `file://${src.d}`, sh], { stdio: 'pipe' });
+  const n = state.doorCalls.length;
+  let r = await call('fleetgate_submit', { repo: 'boltcluster', git: { dir: sh, ref: 'origin/work', base: 'origin/main' } });
+  assert.strictEqual(r.ok, false); assert.match(r.error, /shallow/); assert.strictEqual(state.doorCalls.length, n);
+  // a checkout whose config names programs: none of them may run
+  const { d, g } = repo(); fsx.writeFileSync(pathx.join(d, 'docs/a.md'), 'y\n'); g('add', '-A'); g('commit', '-q', '-m', 'p');
+  const marker = pathx.join(d, '..', `ran-${pathx.basename(d)}`);
+  const prog = pathx.join(d, '..', `prog-${pathx.basename(d)}.sh`);
+  fsx.writeFileSync(prog, `#!/bin/sh\ntouch '${marker}'\nexit 1\n`, { mode: 0o755 });
+  g('config', 'log.showSignature', 'true'); g('config', 'gpg.program', prog); g('config', 'core.fsmonitor', prog);
+  // a signature-looking header makes git consult gpg.program when it is allowed to verify
+  const tree = g('rev-parse', 'HEAD^{tree}').toString().trim(), parent = g('rev-parse', 'HEAD^').toString().trim();
+  const raw = `tree ${tree}\nparent ${parent}\nauthor t <t@t> 1700000000 +0000\ncommitter t <t@t> 1700000000 +0000\ngpgsig -----BEGIN PGP SIGNATURE-----\n \n -----END PGP SIGNATURE-----\n\nsigned\n`;
+  const signed = execFileSync('git', ['-C', d, 'hash-object', '-t', 'commit', '-w', '--stdin'], { input: raw }).toString().trim();
+  g('update-ref', 'refs/heads/work', signed);
+  r = await call('fleetgate_submit', { repo: 'boltcluster', git: { dir: d, ref: 'work', base: 'main' }, submission_id: 'noprog-00001' });
+  assert.strictEqual(r.ok, true, JSON.stringify(r));
+  assert.strictEqual(fsx.existsSync(marker), false, 'no configured program ran');
+});
+
+test('the encoded request is measured before sending; supersedes takes the door\'s 6-character ids (#28 independent review r6)', async () => {
+  state.doorRejectFirst = false;
+  const { d, g } = repo();
+  for (const n of ['a', 'b', 'c']) fsx.writeFileSync(pathx.join(d, `docs/${n}.md`), '\\'.repeat(128 * 1024 - 8) + '\n');
+  g('add', '-A'); g('commit', '-q', '-m', 'backslashes');
+  const n = state.doorCalls.length;
+  let r = await call('fleetgate_submit', { repo: 'boltcluster', git: { dir: d, ref: 'work', base: 'main' } });
+  assert.strictEqual(r.ok, false, JSON.stringify(r).slice(0, 300)); assert.match(r.error, /once encoded, over the door's 524288/); assert.strictEqual(state.doorCalls.length, n);
+  r = await call('fleetgate_submit', { repo: 'boltcluster', files: [{ path: 'docs/a.md', content: 'x\n' }], title: 't', submission_id: 'newer-000001', supersedes: 'abc123' });
+  assert.strictEqual(r.ok, true, JSON.stringify(r)); assert.strictEqual(lastDoorBody().supersedes, 'abc123');
+});

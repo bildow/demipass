@@ -11,7 +11,9 @@
  *
  *   fleetgate_onboard({daily_cap_dd?, approval_id?})   consent (one app approval, once per wallet) + token
  *   fleetgate_prices()                                  the door's public price list
- *   fleetgate_submit({repo, title, files, body?, submission_id?})   one PR into atlas/<repo>; intake charged once; review calls metered separately
+ *   fleetgate_submit({repo, title, files | git, body?, submission_id?, supersedes?})   one PR into atlas/<repo>; intake charged
+ *                                                       once; review calls metered separately. git: {dir, ref, base} reads the changed files
+ *                                                       from the pane's own checkout; supersedes closes its own earlier submission
  *   fleetgate_status()                                  onboarded? token expiry, consent, door health, lanes, spend
  *   fleetgate_check({repo, paths})                      free: would these paths be admitted, in which lane, or why not
  *   fleetgate_follow({repo, submission_id})             free: this wallet's submission as the release controller sees it
@@ -24,6 +26,8 @@
  *      (default https://repo.dustroot.com/-/fleetgate/door), FLEETGATE_DAILY_CAP_DD (default 3000).
  */
 const crypto = require('crypto');
+const path = require('path');
+const { execFileSync } = require('child_process');
 const { services } = require('./services.js');
 // This machine's live DemiPass session (DEMIPASS_TOKEN, else the demipass MCP entry, else the SDK login), read each
 // time it is needed: the MCP config entry holds no copy of it (#17 review M2).
@@ -141,14 +145,142 @@ async function http(method, url, { auth, body } = {}) {
   return { status: r.status, data };
 }
 
-const SUBMISSION_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{7,63}$/;   // the door's own pattern
-async function submit({ repo, title, body, files, submission_id }) {
+const SUBMISSION_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{7,63}$/;   // ids this MCP makes or takes for a new submission (the door accepts 6+)
+const MAX_REQUEST = 512 * 1024;                               // the door's MAX_BODY and its proxy's client_max_body_size
+// The door's own limits (fleet/door/door.js): checked here too, so a git source too large is refused before a charge.
+const MAX_FILES = 20, MAX_FILE = 128 * 1024, MAX_TOTAL = 384 * 1024;
+// A ref is a branch, tag or commit: never an option (no leading '-'), no range or reflog syntax.
+const GIT_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
+
+// The submission's files from the pane's own git checkout: every path that differs between the merge base of `base`
+// and `ref`, with its whole content at `ref`. The door can only create or replace UTF-8 text files, so a delete (or
+// a rename, which is a delete), a symlink, a submodule, a binary or non-UTF-8 file is refused, naming it. git runs
+// without a shell; nothing in the checkout is executed. → { files, head, merge_base, subject } | { error }
+// The checkout's top level exactly as git prints it: only git's terminating newline is removed (a trim could turn
+// "/work/project " into another checkout, "/work/project"), and a root that isn't valid UTF-8 is refused
+// (#28 independent review round 2, 2).
+// Every git call reads the objects as committed and never touches the network: replace refs off (#28 independent review
+// round 3, 1), the legacy grafts file pointed at /dev/null and lazy fetching off for partial clones (round 4), and no
+// GIT_* variable from this process's environment (GIT_DIR, GIT_OBJECT_DIRECTORY, GIT_REPLACE_REF_BASE…) redirects it.
+// An object a partial clone doesn't have is then a local error, refused like any other. No program named by the
+// checkout's own config runs: signature verification (log.showSignature → gpg.program, round 5), fsmonitor hooks,
+// textconv and external diff drivers are all off. A shallow checkout is refused: its synthetic boundaries move the
+// merge base (round 5).
+const GIT_FIXED = ['--no-replace-objects', '--no-lazy-fetch', '-c', 'log.showSignature=false', '-c', 'core.fsmonitor=false',
+  '-c', 'diff.external=', '-c', 'core.hooksPath=/dev/null'];
+function gitEnv() {
+  const env = {};
+  for (const [k, v] of Object.entries(process.env)) if (!k.startsWith('GIT_')) env[k] = v;
+  return { ...env, GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: '/dev/null', GIT_NO_LAZY_FETCH: '1', GIT_TERMINAL_PROMPT: '0' };
+}
+// The door's own path rule (fleet/door/door.js PATH_RE): ASCII letters, digits, . _ - /; at most 200 characters; no
+// leading slash, dot segment or empty segment. Refused here, before anything is sent (#28 independent review round 3, 2).
+const DOOR_PATH_RE = /^(?!\/)(?!.*(^|\/)\.)(?!.*\/\/)[A-Za-z0-9._\-/]{1,200}$/;
+
+// --no-lazy-fetch (and GIT_NO_LAZY_FETCH) need git 2.45; an older git would fail every call with an unhelpful
+// "unknown option", so the version is checked once and named (round 7, non-blocking).
+let gitVersionError;
+function gitTooOld() {
+  if (gitVersionError === null) return null;   // only a passing check is kept: an upgrade takes effect without a restart
+  let err;
+  try {
+    const m = /git version (\d+)\.(\d+)/.exec(execFileSync('git', ['--version'], { env: gitEnv(), timeout: 10000 }).toString());
+    err = !m ? 'git: could not read git\'s version' : (+m[1] > 2 || (+m[1] === 2 && +m[2] >= 45)) ? null
+      : `git: version ${m[1]}.${m[2]} is too old; reading a checkout safely needs git 2.45 or newer (--no-lazy-fetch). Upgrade git, or send files instead.`;
+  } catch (_) { err = 'git: not found on this machine; send files instead'; }
+  if (err === null) gitVersionError = null;
+  return err;
+}
+
+function topLevel(run) {
+  const b = run('rev-parse', '--show-toplevel');
+  const raw = b.subarray(0, b.length && b[b.length - 1] === 0x0a ? b.length - 1 : b.length);
+  const dir = raw.toString('utf8');
+  if (!dir || !Buffer.from(dir, 'utf8').equals(raw) || !path.isAbsolute(dir)) return { error: 'git: the checkout\'s top-level path is not plain UTF-8' };
+  return { dir };
+}
+
+function filesFromGit(g) {
+  if (!g || typeof g !== 'object' || Array.isArray(g)) return { error: 'git: {dir, ref?, base?}' };
+  const { dir, ref = 'HEAD', base = 'origin/main' } = g;
+  for (const k of Object.keys(g)) if (!['dir', 'ref', 'base'].includes(k)) return { error: `git: unknown field ${k}` };
+  if (typeof dir !== 'string' || !path.isAbsolute(dir)) return { error: 'git.dir: the absolute path of your checkout' };
+  for (const [k, v] of [['ref', ref], ['base', base]])
+    if (typeof v !== 'string' || !GIT_REF_RE.test(v) || v.includes('..') || v.endsWith('.lock')) return { error: `git.${k}: a branch, tag or commit name` };
+  if (gitTooOld()) return { error: gitTooOld() };
+  // Run at the repository's top level with diff.relative off: a user's git config must not narrow or re-root the change
+  // (#28 independent review, 1).
+  const at = (cwd) => (...args) => execFileSync('git', [...GIT_FIXED, '-C', cwd, '-c', 'diff.relative=false', '-c', 'diff.ignoreSubmodules=none', ...args], { stdio: ['ignore', 'pipe', 'pipe'], env: gitEnv(), maxBuffer: 16 << 20, timeout: 30000 });
+  let run, head, mb, listing;
+  try {
+    const top = topLevel(at(dir));
+    if (top.error) return top;
+    run = at(top.dir);
+    if (run('rev-parse', '--is-shallow-repository').toString().trim() !== 'false')
+      return { error: 'git: this checkout is shallow, so its merge base can\'t be trusted; fetch the full history first (git fetch --unshallow)' };
+    head = run('rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`).toString().trim();
+    const b = run('rev-parse', '--verify', '--end-of-options', `${base}^{commit}`).toString().trim();
+    mb = run('merge-base', b, head).toString().trim();
+    listing = run('diff', '--raw', '-z', '--no-renames', '--no-relative', '--ignore-submodules=none', '--no-abbrev', mb, head);
+  } catch (e) {
+    return { error: `git: ${(String(e.stderr || e.message).trim().split('\n').pop() || 'failed').slice(0, 300)}` };
+  }
+  // --raw -z: ":<old mode> <new mode> <old sha> <new sha> <status>\0<path>\0" per path, parsed as bytes: a path that is
+  // not valid UTF-8 is refused here, never decoded with replacement characters (#28 independent review, 3).
+  const parts = [];
+  for (let at0 = 0; at0 < listing.length;) { const z = listing.indexOf(0, at0); if (z < 0) break; if (z > at0) parts.push(listing.subarray(at0, z)); at0 = z + 1; }
+  const files = [], refused = [];
+  for (let i = 0; i + 1 < parts.length; i += 2) {
+    const meta = parts[i].toString('latin1').replace(/^:/, '').split(' ');
+    const pb = parts[i + 1], p = pb.toString('utf8');
+    if (!Buffer.from(p, 'utf8').equals(pb)) { refused.push(`${pb.toString('latin1').replace(/[^\x20-\x7e]/g, '?')}: the path is not UTF-8`); continue; }
+    const [oldMode, newMode, , newSha, status] = meta;
+    if (status === 'D') { refused.push(`${p}: deleted (the door can't delete or rename files)`); continue; }
+    if (!DOOR_PATH_RE.test(p)) { refused.push(`${p.slice(0, 220)}: the door takes paths of ASCII letters, digits, . _ - and /, up to 200 characters, with no dot-file or dot-directory`); continue; }
+    if (!['A', 'M'].includes(status)) { refused.push(`${p}: ${status === 'T' ? 'its type changed' : status} (the door writes regular files only)`); continue; }
+    // The door writes plain 100644 files: an executable, a symlink, a submodule or any mode change can't be reproduced
+    // (#28 independent review, 2).
+    if (newMode !== '100644') { refused.push(`${p}: mode ${newMode} (the door writes regular, non-executable files only)`); continue; }
+    if (status === 'M' && oldMode !== '100644') { refused.push(`${p}: mode ${oldMode} → ${newMode} (a mode change can't go through the door)`); continue; }
+    let buf;
+    try { buf = run('cat-file', 'blob', newSha); }
+    catch (_) { refused.push(`${p}: its content isn't in this checkout (a partial clone?); fetch it first`); continue; }
+    const text = buf.toString('utf8');
+    if (buf.includes(0) || !Buffer.from(text, 'utf8').equals(buf)) { refused.push(`${p}: not UTF-8 text`); continue; }
+    if (buf.length > MAX_FILE) { refused.push(`${p}: ${buf.length} bytes, over ${MAX_FILE}`); continue; }
+    files.push({ path: p, content: text });
+  }
+  if (refused.length) return { error: `git: ${refused.length} path(s) can't be submitted: ${refused.slice(0, 10).join('; ')}`, refused };
+  if (!files.length) return { error: `git: no changes between the merge base ${mb.slice(0, 12)} and ${ref}` };
+  if (files.length > MAX_FILES) return { error: `git: ${files.length} changed files, over ${MAX_FILES}` };
+  const total = files.reduce((n, f) => n + Buffer.byteLength(f.content, 'utf8'), 0);
+  if (total > MAX_TOTAL) return { error: `git: ${total} bytes in all, over ${MAX_TOTAL}` };
+  return { files, head, merge_base: mb, subject: run('log', '-1', '--no-show-signature', '--format=%s', head).toString().trim() };
+}
+
+async function submit({ repo, title, body, files, git, submission_id, supersedes }) {
   if (typeof repo !== 'string' || !/^[A-Za-z0-9._-]{1,100}$/.test(repo)) return { ok: false, error: 'repo: the name of a repo under atlas/ (e.g. boltcluster)' };
+  if (files !== undefined && git !== undefined) return { ok: false, error: 'files or git, not both' };
+  let source = null;
+  if (git !== undefined) {
+    const g = filesFromGit(git);
+    if (g.error) return { ok: false, error: g.error, ...(g.refused ? { refused: g.refused } : {}), note: 'Nothing was sent or charged.' };
+    files = g.files; source = g;
+    if (!title) title = g.subject;
+    body = [body || '', '', `From git: \`${g.head.slice(0, 12)}\` over merge base \`${g.merge_base.slice(0, 12)}\` (${g.files.length} files).`].join('\n').trim();
+  }
   if (!title) return { ok: false, error: 'title required' };
-  if (!Array.isArray(files) || !files.length) return { ok: false, error: 'files: [{path, content}] (the whole new content of each file)' };
+  if (!Array.isArray(files) || !files.length) return { ok: false, error: 'files: [{path, content}] (the whole new content of each file), or git: {dir, ref, base}' };
+  // An earlier submission may have been made directly at the door, whose ids start at 6 characters (round 6, 2).
+  if (supersedes !== undefined && (typeof supersedes !== 'string' || !FOLLOW_ID_RE.test(supersedes))) return { ok: false, error: 'supersedes: the submission_id of your own earlier submission to this repo' };
   const sid = submission_id || crypto.randomBytes(12).toString('hex');
   if (!SUBMISSION_RE.test(sid)) return { ok: false, error: 'submission_id: 8-64 letters, digits, _ or -, starting with a letter or digit' };
-  const payload = { submission_id: sid, repo, title, ...(body ? { body } : {}), files };
+  if (supersedes !== undefined && supersedes === sid) return { ok: false, error: 'supersedes: an earlier submission, not this one' };
+  const payload = { submission_id: sid, repo, title, ...(body ? { body } : {}), files, ...(supersedes !== undefined ? { supersedes } : {}) };
+  // The door (and its proxy) refuse a request body over 512 KiB; JSON escaping can grow content well past its own size
+  // (a backslash doubles), so the serialized request is measured here, before anything is sent (round 6, 1).
+  const wire = Buffer.byteLength(JSON.stringify(payload), 'utf8');
+  if (wire > MAX_REQUEST) return { ok: false, error: `the request would be ${wire} bytes once encoded, over the door's ${MAX_REQUEST}; submit fewer or smaller files`, note: 'Nothing was sent or charged.' };
   const url = (await door()) + '/v1/pulls';
   // Minting is DemiPass's answer, not the door's: its refusal (an expired session, no consent) comes back as it is, with
   // the submission id, and says the door was not contacted (#17 review round 5).
@@ -167,7 +299,7 @@ async function submit({ repo, title, body, files, submission_id }) {
     return { ok: false, submission_id: sid, error: e.name === 'TimeoutError' ? 'the door timed out' : 'the door could not be reached',
              next: `Retry fleetgate_submit with submission_id "${sid}": if the door already charged, it replays that charge and finds the PR.` };
   }
-  if (r.status === 201) return { ok: true, submission_id: sid, ...r.data, note: 'The release controller evaluates it under the signed charter. A retry with the same submission_id replays, never double-charges.',
+  if (r.status === 201) return { ok: true, submission_id: sid, ...r.data, ...(source ? { from_git: { head: source.head, merge_base: source.merge_base, files: source.files.map(f => f.path) } } : {}), note: 'The release controller evaluates it under the signed charter. A retry with the same submission_id replays, never double-charges.',
     next: `fleetgate_follow {repo: "${repo}", submission_id: "${sid}"} shows what the gate is waiting for, and on whom (free).` };
   return { ok: false, http_status: r.status, submission_id: sid, ...(r.data || {}),
            ...(r.status === 402 ? { hint: 'DemiPass refused the charge: no consent, not enough DD, or a cap. Nothing was created.' } : {}) };
@@ -258,11 +390,14 @@ const TOOLS = [
       approval_id: { type: 'integer', description: 'The approval_id from an earlier approval_pending answer, once approved in the app' } } } },
   { name: 'fleetgate_prices', description: 'FLEETGATE: the door\'s public price list (DD per action, margin included).', inputSchema: { type: 'object', properties: {} } },
   { name: 'fleetgate_submit',
-    description: 'FLEETGATE: submit a pull request to a chartered repo under atlas/ through the door. Intake charged once; review model calls billed separately (see fleetgate_prices) to this pane\'s wallet. The gate evaluates it under the signed charter; this never merges or reviews. Not allowed: dotfiles, charters/, fleet/{controller,review,ci,door}/; at most 20 files, 128 KB each, 384 KB in all.',
-    inputSchema: { type: 'object', required: ['repo', 'title', 'files'], properties: {
+    description: 'FLEETGATE: submit a pull request to a chartered repo under atlas/ through the door. Give the change as files (each file\'s whole new content) or as git {dir, ref, base}: the changed files between base and ref in your own checkout (deletes, renames, symlinks and binaries are refused before anything is sent). Intake charged once; review model calls billed separately (see fleetgate_prices) to this pane\'s wallet. The gate evaluates it under the signed charter; this never merges or reviews. To change a submission or rebuild it on a moved main, submit again with a new submission_id and supersedes: the old one. Not allowed: dotfiles, charters/, fleet/{controller,review,ci,door}/; at most 20 files, 128 KB each, 384 KB in all.',
+    inputSchema: { type: 'object', required: ['repo'], properties: {
       repo: { type: 'string', description: 'Repo name under atlas/ (e.g. boltcluster)' },
       title: { type: 'string' }, body: { type: 'string', description: 'PR description' },
       files: { type: 'array', items: { type: 'object', required: ['path', 'content'], properties: { path: { type: 'string' }, content: { type: 'string', description: 'The whole new file content' } } } },
+      git: { type: 'object', description: 'Instead of files: {dir: absolute path of your checkout, ref: the commit to submit (default HEAD), base: what it is based on (default origin/main)}. Title defaults to the commit subject.',
+        properties: { dir: { type: 'string' }, ref: { type: 'string' }, base: { type: 'string' } } },
+      supersedes: { type: 'string', description: 'The submission_id of your own earlier submission to this repo: once this one is open, the door closes that one' },
       submission_id: { type: 'string', description: 'Idempotency key (8-64 of A-Z a-z 0-9 _ -). Reuse it to retry the same submission without a second charge; omitted → a fresh one, returned.' } } } },
   { name: 'fleetgate_status', description: 'FLEETGATE: free readiness check: repairs existing consented sessions, verifies current signed admission and door health. Shows the lanes this pane may submit to (repos, paths, add-only, denied) and the service token\'s spend. No payment consent is filed.', inputSchema: { type: 'object', properties: {} } },
   { name: 'fleetgate_check',
