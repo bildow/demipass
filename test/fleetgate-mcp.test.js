@@ -722,3 +722,16 @@ test('status never waits on a slow git past its deadline, and never blocks on it
     assert.ok(r.status === 'timed_out' || (r.git && r.git.ok === false), JSON.stringify(r).slice(0, 200));
   } finally { process.env.PATH = keep; }
 });
+
+test('a git that exists but cannot run is not reported as missing (#31 independent review r2)', async () => {
+  const dir = fsx.mkdtempSync(pathx.join(os.tmpdir(), 'fg-noexec-'));
+  fsx.writeFileSync(pathx.join(dir, 'git'), '#!/bin/sh\necho "git version 2.56.1"\n', { mode: 0o644 });   // not executable
+  const keep = process.env.PATH;
+  try {
+    process.env.PATH = `${dir}`;
+    delete require.cache[require.resolve('../fleetgate-mcp.js')];
+    const m = require('../fleetgate-mcp.js');
+    const r = JSON.parse((await m.handleMessage({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'fleetgate_status', arguments: {} } })).result.content[0].text);
+    assert.strictEqual(r.git.ok, false); assert.match(r.git.error, /git could not run \(EACCES\)/);
+  } finally { process.env.PATH = keep; }
+});

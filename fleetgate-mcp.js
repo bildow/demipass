@@ -224,6 +224,9 @@ const DOOR_PATH_RE = /^(?!\/)(?!.*(^|\/)\.)(?!.*\/\/)[A-Za-z0-9._\-/]{1,200}$/;
 const GIT_REQUIRED = '2.45';
 let gitVersionOk = null;   // only a passing check is kept: an upgrade takes effect without a restart
 const GIT_MISSING = { version: null, required: GIT_REQUIRED, ok: false, error: 'git not found on this machine: fleetgate_submit {git} and fleetgate_review will refuse; fleetgate_submit {files} works' };
+// Not found only when it isn't there; a git that exists but can't run says so (#31 independent review r2).
+const gitFailure = (err) => err && err.code === 'ENOENT' ? GIT_MISSING
+  : { version: null, required: GIT_REQUIRED, ok: false, error: `git could not run (${String((err && (err.code || err.message)) || 'error').slice(0, 80)}): fleetgate_submit {git} and fleetgate_review will refuse; fleetgate_submit {files} works` };
 function parseGitVersion(out) {
   const m = /git version (\d+)\.(\d+)(?:\.(\d+))?/.exec(out);
   if (!m) return { version: null, required: GIT_REQUIRED, ok: false, error: `could not read git's version (${String(out).slice(0, 60)})` };
@@ -236,7 +239,7 @@ function gitVersionInfo() {
   if (gitVersionOk) return gitVersionOk;
   let info;
   try { info = parseGitVersion(execFileSync('git', ['--version'], { env: gitEnv(), timeout: 10000 }).toString().trim()); }
-  catch (_) { info = GIT_MISSING; }
+  catch (e) { info = gitFailure(e); }
   if (info.ok) gitVersionOk = info;
   return info;
 }
@@ -246,7 +249,7 @@ function gitVersionInfoAsync() {
   if (gitVersionOk) return Promise.resolve(gitVersionOk);
   const timeout = Math.max(1, leftMs(10000));
   return new Promise(resolve => require('child_process').execFile('git', ['--version'], { env: gitEnv(), timeout }, (err, stdout) => {
-    const info = err ? (err.killed ? { version: null, required: GIT_REQUIRED, ok: false, error: 'git --version did not answer in time' } : GIT_MISSING) : parseGitVersion(String(stdout).trim());
+    const info = err ? (err.killed ? { version: null, required: GIT_REQUIRED, ok: false, error: 'git --version did not answer in time' } : gitFailure(err)) : parseGitVersion(String(stdout).trim());
     if (info.ok && alive()) gitVersionOk = info;
     resolve(info);
   }));
