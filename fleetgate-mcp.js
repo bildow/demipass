@@ -223,21 +223,33 @@ const DOOR_PATH_RE = /^(?!\/)(?!.*(^|\/)\.)(?!.*\/\/)[A-Za-z0-9._\-/]{1,200}$/;
 // git-path submit or review refuses) and as gitTooOld() checks it. → { version, required, ok, error? }
 const GIT_REQUIRED = '2.45';
 let gitVersionOk = null;   // only a passing check is kept: an upgrade takes effect without a restart
+const GIT_MISSING = { version: null, required: GIT_REQUIRED, ok: false, error: 'git not found on this machine: fleetgate_submit {git} and fleetgate_review will refuse; fleetgate_submit {files} works' };
+function parseGitVersion(out) {
+  const m = /git version (\d+)\.(\d+)(?:\.(\d+))?/.exec(out);
+  if (!m) return { version: null, required: GIT_REQUIRED, ok: false, error: `could not read git's version (${String(out).slice(0, 60)})` };
+  const ok = +m[1] > 2 || (+m[1] === 2 && +m[2] >= 45);
+  return { version: `${m[1]}.${m[2]}${m[3] !== undefined ? `.${m[3]}` : ''}`, required: GIT_REQUIRED, ok,
+    ...(ok ? {} : { error: `git ${m[1]}.${m[2]} is older than ${GIT_REQUIRED}: fleetgate_submit {git} and fleetgate_review will refuse; fleetgate_submit {files} works. Upgrade git (Ubuntu: ppa:git-core/ppa).` }) };
+}
+// Synchronous, for the git path itself (submit, review), which isn't under a free call's deadline.
 function gitVersionInfo() {
   if (gitVersionOk) return gitVersionOk;
   let info;
-  try {
-    const out = execFileSync('git', ['--version'], { env: gitEnv(), timeout: 10000 }).toString().trim();
-    const m = /git version (\d+)\.(\d+)(?:\.(\d+))?/.exec(out);
-    if (!m) info = { version: null, required: GIT_REQUIRED, ok: false, error: `could not read git's version (${out.slice(0, 60)})` };
-    else {
-      const ok = +m[1] > 2 || (+m[1] === 2 && +m[2] >= 45);
-      info = { version: `${m[1]}.${m[2]}${m[3] !== undefined ? `.${m[3]}` : ''}`, required: GIT_REQUIRED, ok,
-        ...(ok ? {} : { error: `git ${m[1]}.${m[2]} is older than ${GIT_REQUIRED}: fleetgate_submit {git} and fleetgate_review will refuse; fleetgate_submit {files} works. Upgrade git (Ubuntu: ppa:git-core/ppa).` }) };
-    }
-  } catch (_) { info = { version: null, required: GIT_REQUIRED, ok: false, error: 'git not found on this machine: fleetgate_submit {git} and fleetgate_review will refuse; fleetgate_submit {files} works' }; }
+  try { info = parseGitVersion(execFileSync('git', ['--version'], { env: gitEnv(), timeout: 10000 }).toString().trim()); }
+  catch (_) { info = GIT_MISSING; }
   if (info.ok) gitVersionOk = info;
   return info;
+}
+// Asynchronous, for fleetgate_status: never blocks the event loop and is bounded by the call's remaining time, so a
+// slow or hung git can't carry status past its 15 s (#31 independent review).
+function gitVersionInfoAsync() {
+  if (gitVersionOk) return Promise.resolve(gitVersionOk);
+  const timeout = Math.max(1, leftMs(10000));
+  return new Promise(resolve => require('child_process').execFile('git', ['--version'], { env: gitEnv(), timeout }, (err, stdout) => {
+    const info = err ? (err.killed ? { version: null, required: GIT_REQUIRED, ok: false, error: 'git --version did not answer in time' } : GIT_MISSING) : parseGitVersion(String(stdout).trim());
+    if (info.ok && alive()) gitVersionOk = info;
+    resolve(info);
+  }));
 }
 function gitTooOld() {
   const g = gitVersionInfo();
@@ -457,6 +469,7 @@ async function submit({ repo, title, body, files, git, submission_id, supersedes
 }
 
 async function status() {
+  const gitProbe = gitVersionInfoAsync();   // alongside the network work, never after it
   const health = await http('GET', (await door()) + '/health').catch(e => ({ status: 0, data: { error: e.message } }));
   checkAlive();   // a health answer that raced the deadline starts nothing more (#30 independent review r4)
   let ready;
@@ -469,9 +482,11 @@ async function status() {
   } catch (e) { ready = errBody(e); }
   checkAlive();
   admissionSeen = ready.ok ? ready.admission : null;
+  const gitInfo = await gitProbe;
+  checkAlive();
   return { ok: health.status === 200 && health.data && health.data.ok === true && Boolean(ready.ok), door: await door(),
     // This machine's git against what the git path needs: a pane learns it here, before a git-path call refuses.
-    git: gitVersionInfo(),
+    git: gitInfo,
     door_health: health.status === 200 ? health.data : { http_status: health.status, ...(health.data || {}) },
     onboarded: Boolean(live() && ready.ok), admission: admissionSeen, ...(ready.ok ? {} : { readiness: ready }),
     token_id: live() ? held.token_id : null, expires_at: live() ? held.expires_at : null,

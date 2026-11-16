@@ -705,3 +705,20 @@ test('status reports this machine\'s git against the 2.45 requirement; an old or
     assert.strictEqual(s3.git.ok, false); assert.match(s3.git.error, /git not found/);
   } finally { process.env.PATH = keep; }
 });
+
+test('status never waits on a slow git past its deadline, and never blocks on it (#31 independent review)', async () => {
+  const dir = fsx.mkdtempSync(pathx.join(os.tmpdir(), 'fg-slowgit-'));
+  fsx.writeFileSync(pathx.join(dir, 'git'), '#!/bin/sh\nsleep 30\necho "git version 2.56.1"\n', { mode: 0o755 });
+  const keep = process.env.PATH;
+  try {
+    process.env.PATH = `${dir}:${keep}`;
+    delete require.cache[require.resolve('../fleetgate-mcp.js')];
+    const m = require('../fleetgate-mcp.js');
+    let ticks = 0; const iv = setInterval(() => { ticks++; }, 1000);   // the event loop keeps running meanwhile
+    const t0 = Date.now();
+    const r = JSON.parse((await m.handleMessage({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'fleetgate_status', arguments: {} } })).result.content[0].text);
+    const ms = Date.now() - t0; clearInterval(iv);
+    assert.ok(ms < 15600, `took ${ms} ms`); assert.ok(ticks >= 5, `event loop ran ${ticks} ticks (a blocking probe gives 0)`);
+    assert.ok(r.status === 'timed_out' || (r.git && r.git.ok === false), JSON.stringify(r).slice(0, 200));
+  } finally { process.env.PATH = keep; }
+});
