@@ -646,3 +646,22 @@ test('status against a dead door answers within 20 s (a 15 s timeout, no second 
     process.env.FLEETGATE_DOOR_URL = keep; mcp._reset(); dead.closeAllConnections && dead.closeAllConnections(); dead.close();
   }
 });
+
+test('a free call has one 15 s deadline across its requests: a slow health then a hanging admission still answers in time (#30 independent review)', async () => {
+  const slow = http.createServer((req, res) => {
+    if (req.url.endsWith('/health')) return setTimeout(() => json(res, 200, { ok: true, version: 'fleetgate-door/4' }), 8000);
+    /* every other route hangs */
+  });
+  await new Promise(r => slow.listen(0, '127.0.0.1', r));
+  const keep = process.env.FLEETGATE_DOOR_URL;
+  process.env.FLEETGATE_DOOR_URL = `http://127.0.0.1:${slow.address().port}/door`;
+  mcp._reset();
+  try {
+    const t0 = Date.now();
+    const r = await call('fleetgate_status');
+    const ms = Date.now() - t0;
+    assert.ok(ms < 17000, `took ${ms} ms`); assert.strictEqual(r.ok, false);
+  } finally {
+    process.env.FLEETGATE_DOOR_URL = keep; mcp._reset(); slow.closeAllConnections && slow.closeAllConnections(); slow.close();
+  }
+});

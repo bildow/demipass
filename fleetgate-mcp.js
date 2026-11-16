@@ -110,7 +110,7 @@ async function onboard({ daily_cap_dd, approval_id } = {}, { fileConsent = true 
              next: `Approve "let a wallet pay fleetgate" (${r.pending.daily_cap_dd} DD/day) in the DemiPass app (Requests), then call fleetgate_onboard again with approval_id ${r.pending.approval_id} and daily_cap_dd ${r.pending.daily_cap_dd}.` };
   }
   if (!TOKEN_RE.test(String(r.token.token || ''))) return { ok: false, error: 'DemiPass returned a malformed service token; not held' };
-  const ready = await fleetgateAdmission({ endpoint: await door(), token: r.token.token, wallet });
+  const ready = await fleetgateAdmission({ endpoint: await door(), token: r.token.token, wallet, timeoutMs: leftMs(QUICK_MS) });
   // A refused admission drops the token just minted; anything the door said is scrubbed of it first, since scrub() at the
   // end only knows a held token (#27 independent review, 1).
   if (!ready.ok) { held = null; admissionSeen = null; return redact({ ...ready, consent: { id: r.consent.id, daily_cap_dd: r.consent.daily_cap_dd } }, r.token.token); }
@@ -140,7 +140,21 @@ async function token() {
 // 15 s for the free, read-only calls (health, prices, check, follow, the registry); 180 s only for submit and review,
 // which create a PR or queue a packet (code pass 2026-11-16, item 7).
 const QUICK_MS = 15000, SLOW_MS = 180000;
+// A free tool call (status, prices, check, follow) has ONE 15 s deadline across all its requests and retries, not
+// 15 s per request (#30 independent review): each request gets only what is left, and the call answers by then.
+const { AsyncLocalStorage } = require('async_hooks');
+const deadline = new AsyncLocalStorage();
+const FREE_TOOLS = new Set(['fleetgate_status', 'fleetgate_prices', 'fleetgate_check', 'fleetgate_follow']);
+const leftMs = (cap) => { const d = deadline.getStore(); return d ? Math.min(cap, d - Date.now()) : cap; };
+function withDeadline(fn) {
+  const at = Date.now() + QUICK_MS;
+  let timer;
+  const late = new Promise(ok => { timer = setTimeout(() => ok({ ok: false, status: 'timed_out', error: `no answer within ${QUICK_MS / 1000} s (the door or DemiPass is slow); nothing was charged. Try again shortly.` }), QUICK_MS + 250); });
+  return Promise.race([deadline.run(at, fn), late]).finally(() => clearTimeout(timer));
+}
 async function http(method, url, { auth, body, timeoutMs = QUICK_MS } = {}) {
+  timeoutMs = leftMs(timeoutMs);
+  if (timeoutMs <= 0) throw Object.assign(new Error(`no time left of this call's ${QUICK_MS / 1000} s`), { name: 'TimeoutError' });
   const headers = { accept: 'application/json' };
   if (body !== undefined) headers['content-type'] = 'application/json';
   if (auth) headers.authorization = 'Bearer ' + auth;
@@ -421,7 +435,7 @@ async function status() {
   if (health.status === 0) ready = { ok: false, status: 'door_unreachable', error: `the door did not answer: ${String((health.data && health.data.error) || 'no answer').slice(0, 200)}` };
   else try {
     // Existing users self-reconcile on their next status call without filing consent or spending.
-    ready = held && held.wallet !== sessionSub() ? { ok:false, status:'wallet_changed', error:'The held token belongs to another wallet; onboard explicitly' } : live() ? await fleetgateAdmission({ endpoint: await door(), token: held.token, wallet: held.wallet }) : await onboard({}, { fileConsent: false });
+    ready = held && held.wallet !== sessionSub() ? { ok:false, status:'wallet_changed', error:'The held token belongs to another wallet; onboard explicitly' } : live() ? await fleetgateAdmission({ endpoint: await door(), token: held.token, wallet: held.wallet, timeoutMs: leftMs(QUICK_MS) }) : await onboard({}, { fileConsent: false });
   } catch (e) { ready = errBody(e); }
   admissionSeen = ready.ok ? ready.admission : null;
   return { ok: health.status === 200 && health.data && health.data.ok === true && Boolean(ready.ok), door: await door(),
@@ -563,7 +577,8 @@ async function handleMessage(msg) {
   if (method === 'tools/call') {
     const h = HANDLERS[params && params.name];
     if (!h) return { jsonrpc: '2.0', id, error: { code: -32602, message: `Unknown tool: ${params && params.name}` } };
-    let out; try { out = await h((params && params.arguments) || {}); } catch (e) { out = errBody(e); }
+    const args = (params && params.arguments) || {};
+    let out; try { out = FREE_TOOLS.has(params.name) ? await withDeadline(() => h(args)) : await h(args); } catch (e) { out = errBody(e); }
     out = scrub(out);
     return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(out, null, 2) }], ...(out && out.ok === false ? { isError: true } : {}) } };
   }
