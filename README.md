@@ -17,6 +17,11 @@ DemiPass is a client SDK for the [Dustforge](https://dustforge.com) identity pla
 npm install demipass
 ```
 
+Requirements: Node 14.18 or newer to run (Node 18 or newer for the tests: `node --test`). The FLEETGATE MCP's
+`fleetgate_submit {git}` and `fleetgate_review` read a pane's checkout with `--no-lazy-fetch`, so they need **git 2.45
+or newer** (Ubuntu 24.04's packaged git is 2.43; the git-core PPA has newer); with an older git they refuse by name and
+`fleetgate_submit {files}` still works.
+
 ## MCP Setup
 
 Add to your `.mcp.json`:
@@ -147,4 +152,4 @@ Share ref codes freely — they're routing addresses, not secrets.
 
 ## License
 
-MIT — AKStrapped LLC
+MIT — AKStrapped LLC (see [LICENSE](LICENSE))

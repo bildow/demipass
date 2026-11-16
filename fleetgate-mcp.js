@@ -52,11 +52,14 @@ async function door() {
   if (doorCached) return doorCached;
   let u = process.env.FLEETGATE_DOOR_URL || '';
   if (!u) { try { const r = await http('GET', DEMIPASS_URL + '/api/services/fleetgate'); if (r.status === 200 && r.data && r.data.endpoint) u = r.data.endpoint; } catch (_) {} }
+  // A call that ran out of time during discovery caches nothing: the next call discovers again (#30 independent review r3).
+  checkAlive();
   u = (u || DOOR_DEFAULT).replace(/\/+$/, '');
   const bad = doorRefusal(u); if (bad) throw new Error(`FLEETGATE door ${u}: ${bad}`);
   return (doorCached = u);
 }
-const DEFAULT_CAP = Number(process.env.FLEETGATE_DAILY_CAP_DD || 3000);   // preserved default ceiling; an existing smaller consent is never silently raised
+// The one default, shared with demipass-onboard (fleetgate-admission.js); an existing smaller consent is never silently raised.
+const DEFAULT_CAP = require('./fleetgate-admission').fleetgateDefaultCap();
 const SERVICE = 'fleetgate';
 
 function dp(token = sessionToken()) { return services({ token, baseUrl: DEMIPASS_URL }); }
@@ -84,11 +87,13 @@ async function onboard({ daily_cap_dd, approval_id } = {}, { fileConsent = true 
   if (!session) return { ok: false, error: process.env.DEMIPASS_EXPECT_DID ? `no DemiPass session for ${process.env.DEMIPASS_EXPECT_DID} (the wallet this server was onboarded as) on this machine` : 'no DemiPass session on this machine: sign in first (demipass_login, or set DEMIPASS_TOKEN)' };
   if (approval_id && !daily_cap_dd && pendingCaps.has(Number(approval_id))) daily_cap_dd = pendingCaps.get(Number(approval_id));
   let c;
+  checkAlive();   // an expired call starts no DemiPass request (#30 independent review r4)
   if (!fileConsent) {
     // Submitting (and the free tools) never file a consent (#17 review L3): after a person said no, a submit must not ask
     // their phone again. The active consent found here is used as it is; consentAtLeast is never called on this path,
     // since it reads again and could file one if the consent were revoked in between (#27 independent review, 2).
     const all = await api.consents();
+    checkAlive();
     const mine = (all.mine || []).find(x => x.service === SERVICE && x.status === 'active');
     if (!mine) return { ok: false, status: 'not_onboarded', error: 'not onboarded: run fleetgate_onboard and approve it in the DemiPass app' };
     c = { consent: mine, existing: true };
@@ -100,7 +105,9 @@ async function onboard({ daily_cap_dd, approval_id } = {}, { fileConsent = true 
   if (!c.pending) {
     // Ordinary charges (the door's intake) stay under the server's default cap; the review rounds a submission starts
     // bill afterwards against the follow-up budget, up to the whole daily consent (the door needs at least ~one round).
+    checkAlive();   // never mint for a call that already answered
     const t = await api.mintToken({ service: SERVICE, ttl: '24h', followUpDd: c.consent.daily_cap_dd });
+    checkAlive();
     r = { consent: c.consent, existing: c.existing, token: { token: t.token, token_id: t.token_id, expires_at: t.expires_at, cap_dd: t.cap_dd } };
   }
   if (r.pending) {
@@ -109,7 +116,10 @@ async function onboard({ daily_cap_dd, approval_id } = {}, { fileConsent = true 
              next: `Approve "let a wallet pay fleetgate" (${r.pending.daily_cap_dd} DD/day) in the DemiPass app (Requests), then call fleetgate_onboard again with approval_id ${r.pending.approval_id} and daily_cap_dd ${r.pending.daily_cap_dd}.` };
   }
   if (!TOKEN_RE.test(String(r.token.token || ''))) return { ok: false, error: 'DemiPass returned a malformed service token; not held' };
-  const ready = await fleetgateAdmission({ endpoint: await door(), token: r.token.token, wallet });
+  const endpoint = await door();
+  checkAlive();   // after discovery too: an expired call starts no admission request (#30 independent review r3)
+  const ready = await fleetgateAdmission({ endpoint, token: r.token.token, wallet, timeoutMs: leftMs(QUICK_MS) });
+  checkAlive();   // a call that already answered changes nothing
   // A refused admission drops the token just minted; anything the door said is scrubbed of it first, since scrub() at the
   // end only knows a held token (#27 independent review, 1).
   if (!ready.ok) { held = null; admissionSeen = null; return redact({ ...ready, consent: { id: r.consent.id, daily_cap_dd: r.consent.daily_cap_dd } }, r.token.token); }
@@ -136,11 +146,34 @@ async function token() {
   return held.token;
 }
 
-async function http(method, url, { auth, body } = {}) {
+// 15 s for the free, read-only calls (health, prices, check, follow, the registry); 180 s only for submit and review,
+// which create a PR or queue a packet (code pass 2026-11-16, item 7).
+const QUICK_MS = 15000, SLOW_MS = 180000;
+// A free tool call (status, prices, check, follow) has ONE 15 s deadline across all its requests and retries, not
+// 15 s per request (#30 independent review): each request gets only what is left, and the call answers by then.
+const { AsyncLocalStorage } = require('async_hooks');
+const deadline = new AsyncLocalStorage();
+const FREE_TOOLS = new Set(['fleetgate_status', 'fleetgate_prices', 'fleetgate_check', 'fleetgate_follow']);
+// When the deadline is reached the call's context is marked dead: the call answers "timed_out" at that moment, and
+// whatever of it is still running can send no further request and change no shared state (held token, consent,
+// admission) once its awaits return (#30 independent review r2).
+const leftMs = (cap) => { const d = deadline.getStore(); return d ? Math.min(cap, d.at - Date.now()) : cap; };
+const alive = () => { const d = deadline.getStore(); return !d || (!d.dead && Date.now() < d.at); };
+function checkAlive() { if (!alive()) throw Object.assign(new Error(`this call ran out of its ${QUICK_MS / 1000} s; nothing more was done`), { name: 'TimeoutError' }); }
+function withDeadline(fn) {
+  const ctx = { at: Date.now() + QUICK_MS, dead: false };
+  let timer;
+  const late = new Promise(ok => { timer = setTimeout(() => { ctx.dead = true; ok({ ok: false, status: 'timed_out', error: `no answer within ${QUICK_MS / 1000} s (the door or DemiPass is slow); nothing was charged. Try again shortly.` }); }, QUICK_MS); });
+  return Promise.race([deadline.run(ctx, fn), late]).finally(() => clearTimeout(timer));
+}
+async function http(method, url, { auth, body, timeoutMs = QUICK_MS } = {}) {
+  checkAlive();
+  timeoutMs = leftMs(timeoutMs);
+  if (timeoutMs <= 0) throw Object.assign(new Error(`no time left of this call's ${QUICK_MS / 1000} s`), { name: 'TimeoutError' });
   const headers = { accept: 'application/json' };
   if (body !== undefined) headers['content-type'] = 'application/json';
   if (auth) headers.authorization = 'Bearer ' + auth;
-  const r = await require('./http-json').requestJson(method, url, { headers, body, timeoutMs: 180000 });
+  const r = await require('./http-json').requestJson(method, url, { headers, body, timeoutMs });
   // The bearer this request carried is redacted from the answer BEFORE a raw (non-JSON) body is cut to 500 characters:
   // cutting first could leave a token prefix that the later scrub no longer recognises (#27 independent review r3).
   const data = redact(r.data !== null ? r.data : { raw: r.text }, auth);
@@ -171,10 +204,14 @@ const GIT_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
 // merge base (round 5).
 const GIT_FIXED = ['--no-replace-objects', '--no-lazy-fetch', '-c', 'log.showSignature=false', '-c', 'core.fsmonitor=false',
   '-c', 'diff.external=', '-c', 'core.hooksPath=/dev/null'];
-function gitEnv() {
+// git gets neither GIT_* nor DEMIPASS_* variables of this process (a DemiPass token has no business in git's
+// environment), and the global and system config files are closed as a class (GIT_CONFIG_GLOBAL=/dev/null,
+// GIT_CONFIG_NOSYSTEM=1) rather than their settings enumerated; the checkout's own config is neutralized per setting
+// above (code pass 2026-11-16, item 3).
+function gitEnv(base = process.env) {
   const env = {};
-  for (const [k, v] of Object.entries(process.env)) if (!k.startsWith('GIT_')) env[k] = v;
-  return { ...env, GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: '/dev/null', GIT_NO_LAZY_FETCH: '1', GIT_TERMINAL_PROMPT: '0' };
+  for (const [k, v] of Object.entries(base)) if (!k.startsWith('GIT_') && !k.startsWith('DEMIPASS_')) env[k] = v;
+  return { ...env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: '/dev/null', GIT_NO_LAZY_FETCH: '1', GIT_TERMINAL_PROMPT: '0' };
 }
 // The door's own path rule (fleet/door/door.js PATH_RE): ASCII letters, digits, . _ - /; at most 200 characters; no
 // leading slash, dot segment or empty segment. Refused here, before anything is sent (#28 independent review round 3, 2).
@@ -214,7 +251,8 @@ function filesFromGit(g) {
   if (typeof dir !== 'string' || !path.isAbsolute(dir)) return { error: 'git.dir: the absolute path of your checkout' };
   for (const [k, v] of [['ref', ref], ['base', base]])
     if (typeof v !== 'string' || !GIT_REF_RE.test(v) || v.includes('..') || v.endsWith('.lock')) return { error: `git.${k}: a branch, tag or commit name` };
-  if (gitTooOld()) return { error: gitTooOld() };
+  const tooOld = gitTooOld();   // once per call (code pass 2026-11-16, item 9)
+  if (tooOld) return { error: tooOld };
   // Run at the repository's top level with diff.relative off: a user's git config must not narrow or re-root the change
   // (#28 independent review, 1).
   const at = (cwd, gd) => (...args) => execFileSync('git', [...GIT_FIXED, ...(gd ? [`--git-dir=${gd}`] : []), '-C', cwd, '-c', 'diff.relative=false', '-c', 'diff.ignoreSubmodules=none', ...args], { stdio: ['ignore', 'pipe', 'pipe'], env: gitEnv(), maxBuffer: 16 << 20, timeout: 30000 });
@@ -249,9 +287,15 @@ function filesFromGit(g) {
     // (#28 independent review, 2).
     if (newMode !== '100644') { refused.push(`${p}: mode ${newMode} (the door writes regular, non-executable files only)`); continue; }
     if (status === 'M' && oldMode !== '100644') { refused.push(`${p}: mode ${oldMode} → ${newMode} (a mode change can't go through the door)`); continue; }
+    // The size first: a file over the door's limit is refused with its size, without reading it, and only an object
+    // that isn't here at all reads as a partial clone (code pass 2026-11-16, item 8).
+    let size;
+    try { size = Number(run('cat-file', '-s', newSha).toString().trim()); }
+    catch (_) { refused.push(`${p}: its content isn't in this checkout (a partial clone?); fetch it first`); continue; }
+    if (!(size <= MAX_FILE)) { refused.push(`${p}: ${size} bytes, over ${MAX_FILE}`); continue; }
     let buf;
     try { buf = run('cat-file', 'blob', newSha); }
-    catch (_) { refused.push(`${p}: its content isn't in this checkout (a partial clone?); fetch it first`); continue; }
+    catch (e) { refused.push(`${p}: could not read it (${String(e.message).split('\n')[0].slice(0, 120)})`); continue; }
     const text = buf.toString('utf8');
     if (buf.includes(0) || !Buffer.from(text, 'utf8').equals(buf)) { refused.push(`${p}: not UTF-8 text`); continue; }
     if (buf.length > MAX_FILE) { refused.push(`${p}: ${buf.length} bytes, over ${MAX_FILE}`); continue; }
@@ -278,7 +322,8 @@ function packetFromGit(g) {
     if (typeof v !== 'string' || !GIT_REF_RE.test(v) || v.includes('..') || v.endsWith('.lock')) return { error: `git.${k}: a branch, tag or commit name` };
   // At the top level, with diff.relative off and fixed a/ b/ prefixes: a user's git config must not narrow, re-root or
   // re-shape the packet (as for submissions, #28 independent review).
-  if (gitTooOld()) return { error: gitTooOld() };
+  const tooOld = gitTooOld();   // once per call (code pass 2026-11-16, item 9)
+  if (tooOld) return { error: tooOld };
   // diff.submodule=short: a submodule's own diff would run its own textconv and external drivers, which the parent's
   // --no-textconv doesn't reach (#29 r1, 1). core.bigFileThreshold high and --text below: the checkout's config or
   // attributes can't turn a change into "Binary files differ" and hide it (#29 r1, 2).
@@ -342,7 +387,7 @@ async function review({ git, title, note, review_id }) {
   const reqBody = { review_id: id, title: t, ...(note ? { note } : {}), source: p.packet.source, files: p.packet.files, diff: p.packet.diff };
   const wire = Buffer.byteLength(JSON.stringify(reqBody), 'utf8');
   if (wire > MAX_REQUEST) return { ok: false, review_id: id, error: `the review request would be ${wire} bytes once encoded, over the door's ${MAX_REQUEST}; review a smaller change`, note: 'Nothing was sent or charged.' };
-  const { r, refused } = await doorCall('POST', '/v1/reviews', reqBody);
+  const { r, refused } = await doorCall('POST', '/v1/reviews', reqBody, SLOW_MS);
   if (refused) return { ...refused, review_id: id, next: `If the door may have charged, retry with review_id "${id}": the same diff replays and is never charged twice.` };
   if (OLD_DOOR(r)) return { ok: false, review_id: id, error: 'this door predates review-only requests (fleetgate-door/4)' };
   if (r.status === 202) return { ...r.data, review_id: id, files: p.packet.files.length, next: `fleetgate_follow {review_id: "${id}"} shows its state and, once done, every seat's verdict (free).` };
@@ -380,10 +425,10 @@ async function submit({ repo, title, body, files, git, submission_id, supersedes
   let r;
   let m = await mint(); if (m.refused) return m.refused;
   try {
-    r = await http('POST', url, { auth: m.auth, body: payload });
+    r = await http('POST', url, { auth: m.auth, body: payload, timeoutMs: SLOW_MS });
     if (r.status === 401) {   // expired or revoked: re-mint once
       held = null; m = await mint(); if (m.refused) return m.refused;
-      r = await http('POST', url, { auth: m.auth, body: payload });
+      r = await http('POST', url, { auth: m.auth, body: payload, timeoutMs: SLOW_MS });
     }
   } catch (e) {
     // The door may have charged before the connection dropped: hand back the id, so the retry replays (#17 review H1).
@@ -399,11 +444,16 @@ async function submit({ repo, title, body, files, git, submission_id, supersedes
 
 async function status() {
   const health = await http('GET', (await door()) + '/health').catch(e => ({ status: 0, data: { error: e.message } }));
+  checkAlive();   // a health answer that raced the deadline starts nothing more (#30 independent review r4)
   let ready;
-  try {
+  // A door that didn't answer at all is reported as such; its admission check would only wait out a second timeout
+  // (status answers within one 15 s timeout against a dead door: code pass 2026-11-16, item 7).
+  if (health.status === 0) ready = { ok: false, status: 'door_unreachable', error: `the door did not answer: ${String((health.data && health.data.error) || 'no answer').slice(0, 200)}` };
+  else try {
     // Existing users self-reconcile on their next status call without filing consent or spending.
-    ready = held && held.wallet !== sessionSub() ? { ok:false, status:'wallet_changed', error:'The held token belongs to another wallet; onboard explicitly' } : live() ? await fleetgateAdmission({ endpoint: await door(), token: held.token, wallet: held.wallet }) : await onboard({}, { fileConsent: false });
+    ready = held && held.wallet !== sessionSub() ? { ok:false, status:'wallet_changed', error:'The held token belongs to another wallet; onboard explicitly' } : live() ? await (async () => { const endpoint = await door(); checkAlive(); return fleetgateAdmission({ endpoint, token: held.token, wallet: held.wallet, timeoutMs: leftMs(QUICK_MS) }); })() : await onboard({}, { fileConsent: false });
   } catch (e) { ready = errBody(e); }
+  checkAlive();
   admissionSeen = ready.ok ? ready.admission : null;
   return { ok: health.status === 200 && health.data && health.data.ok === true && Boolean(ready.ok), door: await door(),
     door_health: health.status === 200 ? health.data : { http_status: health.status, ...(health.data || {}) },
@@ -421,7 +471,7 @@ async function status() {
 // to the wallet the machine's session names when it starts: if the session switches wallets before the request is
 // sent, before the retry, or before the answer is shown, nothing from the door is returned (#27 independent review r2, 1).
 const SWITCHED = { refused: { ok: false, status: 'wallet_changed', error: 'the DemiPass session on this machine switched wallets during this call; nothing from it is shown. Call again.' } };
-async function doorCall(method, route, body) {
+async function doorCall(method, route, body, timeoutMs = QUICK_MS) {
   const me = sessionSub();
   if (!me) return { refused: { ok: false, error: 'no DemiPass session on this machine: sign in first (demipass_login, or set DEMIPASS_TOKEN)' } };
   const mine = () => held && held.wallet === me && sessionSub() === me;
@@ -435,12 +485,13 @@ async function doorCall(method, route, body) {
   if (!mine()) return SWITCHED;
   const url = (await door()) + route;
   try {
-    let r = await http(method, url, { auth, body });
+    let r = await http(method, url, { auth, body, timeoutMs });
+    checkAlive();
     if (r.status === 401) {
       held = null;
       try { auth = await token(); } catch (e) { return { refused: errBody(e) }; }
       if (!mine()) return SWITCHED;
-      r = await http(method, url, { auth, body });
+      r = await http(method, url, { auth, body, timeoutMs });
     }
     if (sessionSub() !== me) return SWITCHED;
     return { r };
@@ -490,7 +541,7 @@ const TOOLS = [
       approval_id: { type: 'integer', description: 'The approval_id from an earlier approval_pending answer, once approved in the app' } } } },
   { name: 'fleetgate_prices', description: 'FLEETGATE: the door\'s public price list (DD per action, margin included).', inputSchema: { type: 'object', properties: {} } },
   { name: 'fleetgate_submit',
-    description: 'FLEETGATE: submit a pull request to a chartered repo under atlas/ through the door. Give the change as files (each file\'s whole new content) or as git {dir, ref, base}: the changed files between base and ref in your own checkout (deletes, renames, symlinks and binaries are refused before anything is sent). Intake charged once; review model calls billed separately (see fleetgate_prices) to this pane\'s wallet. The gate evaluates it under the signed charter; this never merges or reviews. To change a submission or rebuild it on a moved main, submit again with a new submission_id and supersedes: the old one. Not allowed: dotfiles, charters/, fleet/{controller,review,ci,door}/; at most 20 files, 128 KB each, 384 KB in all.',
+    description: 'FLEETGATE: submit a pull request to a chartered repo under atlas/ through the door. Give the change as files (each file\'s whole new content) or as git {dir, ref, base}: the changed files between base and ref in your own checkout (deletes, renames, symlinks and binaries are refused before anything is sent). Intake charged once; review model calls billed separately (see fleetgate_prices) to this pane\'s wallet. The gate evaluates it under the signed charter; this never merges or reviews. To change a submission or rebuild it on a moved main, submit again with a new submission_id and supersedes: the old one. Which paths a repo admits: fleetgate_status (its lanes) and fleetgate_check {repo, paths} (free, before you pay). At most 20 files, 128 KB each, 384 KB in all.',
     inputSchema: { type: 'object', required: ['repo'], properties: {
       repo: { type: 'string', description: 'Repo name under atlas/ (e.g. boltcluster)' },
       title: { type: 'string' }, body: { type: 'string', description: 'PR description' },
@@ -544,7 +595,8 @@ async function handleMessage(msg) {
   if (method === 'tools/call') {
     const h = HANDLERS[params && params.name];
     if (!h) return { jsonrpc: '2.0', id, error: { code: -32602, message: `Unknown tool: ${params && params.name}` } };
-    let out; try { out = await h((params && params.arguments) || {}); } catch (e) { out = errBody(e); }
+    const args = (params && params.arguments) || {};
+    let out; try { out = FREE_TOOLS.has(params.name) ? await withDeadline(() => h(args)) : await h(args); } catch (e) { out = errBody(e); }
     out = scrub(out);
     return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(out, null, 2) }], ...(out && out.ok === false ? { isError: true } : {}) } };
   }
@@ -552,7 +604,7 @@ async function handleMessage(msg) {
   return { jsonrpc: '2.0', id, error: { code: -32601, message: `Method not found: ${method}` } };
 }
 
-module.exports = { handleMessage, _reset: () => { held = null; consentSeen = null; doorCached = null; pendingCaps.clear(); } };
+module.exports = { handleMessage, _gitEnv: gitEnv, _reset: () => { held = null; consentSeen = null; doorCached = null; pendingCaps.clear(); } };
 
 if (require.main === module) {
   // Messages are answered in order through one queue; stdin closing waits for the queue (a call in flight is answered).

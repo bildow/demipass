@@ -17,7 +17,10 @@ function readBody(req) { return new Promise(ok => { let b = ''; req.on('data', c
 const dpSrv = http.createServer(async (req, res) => {
   const b = await readBody(req);
   if (req.headers.authorization !== 'Bearer ' + SESSION_A && req.headers.authorization !== 'Bearer ' + SESSION_B) return json(res, 401, { error: 'bad session' });
-  if (req.method === 'GET' && req.url === '/api/services/consents') return json(res, 200, { ok: true, mine: state.consents, approved_by_me: [] });
+  if (req.method === 'GET' && req.url === '/api/services/consents') {
+    if (state.delayConsentsMs) { const ms = state.delayConsentsMs; state.delayConsentsMs = 0; return setTimeout(() => json(res, 200, { ok: true, mine: state.consents, approved_by_me: [] }), ms); }
+    return json(res, 200, { ok: true, mine: state.consents, approved_by_me: [] });
+  }
   if (req.method === 'POST' && req.url === '/api/services/consent') {
     state.consentPosts.push(b);
     if (!b.approval_id) return json(res, 202, { status: 'approval_pending', approval_id: 77, expires_at: '2026-11-11T00:00:00Z' });
@@ -616,4 +619,67 @@ test('git: core.worktree in the checkout cannot send git to another repository (
   assert.strictEqual(r.ok, true, JSON.stringify(r)); assert.strictEqual(lastDoorBody().files[0].content, 'from A\n');
   r = await call('fleetgate_review', { git: { dir: A.d, ref: 'work', base: 'main' }, review_id: 'review-wt-00001' });
   assert.strictEqual(r.ok, true, JSON.stringify(r)); assert.match(state.reviewPosts.at(-1).diff, /\+from A/); assert.ok(!/from B/.test(state.reviewPosts.at(-1).diff));
+});
+
+test('git: neither a global git config nor a DemiPass variable reaches git (code pass 2026-11-16, item 3)', () => {
+  const home = fsx.mkdtempSync(pathx.join(os.tmpdir(), 'fg-home-'));
+  fsx.writeFileSync(pathx.join(home, '.gitconfig'), '[diff]\n\texternal = /nonexistent/evil-diff\n');
+  const base = { ...process.env, HOME: home, XDG_CONFIG_HOME: pathx.join(home, '.config'), DEMIPASS_TOKEN: 'secret-session', DEMIPASS_URL: 'http://x' };
+  // without the fix git would read it:
+  assert.strictEqual(execFileSync('git', ['config', '--get', 'diff.external'], { env: base }).toString().trim(), '/nonexistent/evil-diff');
+  const env = mcp._gitEnv(base);
+  assert.ok(!Object.keys(env).some(k => k.startsWith('DEMIPASS_')), 'no DEMIPASS_* variable');
+  assert.strictEqual(env.GIT_CONFIG_GLOBAL, '/dev/null'); assert.strictEqual(env.GIT_CONFIG_NOSYSTEM, '1');
+  let got = ''; try { got = execFileSync('git', ['config', '--get', 'diff.external'], { env, stdio: 'pipe' }).toString().trim(); } catch (_) { got = ''; }
+  assert.strictEqual(got, '', 'the global diff.external is not seen');
+});
+
+test('status against a dead door answers within 20 s (a 15 s timeout, no second wait) (code pass 2026-11-16, item 7)', async () => {
+  const dead = http.createServer(() => { /* accepts, never answers */ });
+  await new Promise(r => dead.listen(0, '127.0.0.1', r));
+  const keep = process.env.FLEETGATE_DOOR_URL;
+  process.env.FLEETGATE_DOOR_URL = `http://127.0.0.1:${dead.address().port}/door`;
+  mcp._reset();
+  try {
+    const t0 = Date.now();
+    const r = await call('fleetgate_status');
+    const ms = Date.now() - t0;
+    assert.ok(ms < 20000, `took ${ms} ms`); assert.strictEqual(r.ok, false);
+    assert.ok(r.status === 'timed_out' || (r.readiness && r.readiness.status === 'door_unreachable'), JSON.stringify(r).slice(0, 200));
+  } finally {
+    process.env.FLEETGATE_DOOR_URL = keep; mcp._reset(); dead.closeAllConnections && dead.closeAllConnections(); dead.close();
+  }
+});
+
+test('a free call has one 15 s deadline across its requests: a slow health then a hanging admission still answers in time (#30 independent review)', async () => {
+  const slow = http.createServer((req, res) => {
+    if (req.url.endsWith('/health')) return setTimeout(() => json(res, 200, { ok: true, version: 'fleetgate-door/4' }), 8000);
+    /* every other route hangs */
+  });
+  await new Promise(r => slow.listen(0, '127.0.0.1', r));
+  const keep = process.env.FLEETGATE_DOOR_URL;
+  process.env.FLEETGATE_DOOR_URL = `http://127.0.0.1:${slow.address().port}/door`;
+  mcp._reset();
+  try {
+    const t0 = Date.now();
+    const r = await call('fleetgate_status');
+    const ms = Date.now() - t0;
+    assert.ok(ms < 17000, `took ${ms} ms`); assert.strictEqual(r.ok, false);
+  } finally {
+    process.env.FLEETGATE_DOOR_URL = keep; mcp._reset(); slow.closeAllConnections && slow.closeAllConnections(); slow.close();
+  }
+});
+
+test('a timed-out free call is inert afterwards: its late answers mint nothing and change no held token (#30 independent review r2)', async () => {
+  mcp._reset();
+  state.consents = [{ id: 9, service: 'fleetgate', daily_cap_dd: 5000, status: 'active' }];
+  state.delayConsentsMs = 16000;   // DemiPass answers the consent lookup after the call's 15 s
+  const minted = state.minted.length;
+  const t0 = Date.now();
+  const r = await call('fleetgate_status');
+  const ms = Date.now() - t0;
+  assert.strictEqual(r.status, 'timed_out'); assert.ok(ms >= 14900 && ms < 15600, `answered at ${ms} ms, at the deadline`);
+  await new Promise(ok => setTimeout(ok, 2500));   // the abandoned lookup has now returned
+  assert.strictEqual(state.minted.length, minted, 'no token was minted after the call answered');
+  mcp._reset();
 });
