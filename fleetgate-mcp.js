@@ -219,17 +219,46 @@ const DOOR_PATH_RE = /^(?!\/)(?!.*(^|\/)\.)(?!.*\/\/)[A-Za-z0-9._\-/]{1,200}$/;
 
 // --no-lazy-fetch (and GIT_NO_LAZY_FETCH) need git 2.45; an older git would fail every call with an unhelpful
 // "unknown option", so the version is checked once and named (round 7, non-blocking).
-let gitVersionError;
+// This machine's git against the 2.45 the git path needs, as fleetgate_status reports it (so a pane learns it before a
+// git-path submit or review refuses) and as gitTooOld() checks it. → { version, required, ok, error? }
+const GIT_REQUIRED = '2.45';
+let gitVersionOk = null;   // only a passing check is kept: an upgrade takes effect without a restart
+const GIT_MISSING = { version: null, required: GIT_REQUIRED, ok: false, error: 'git not found on this machine: fleetgate_submit {git} and fleetgate_review will refuse; fleetgate_submit {files} works' };
+// Not found only when it isn't there; a git that exists but can't run says so (#31 independent review r2).
+const gitFailure = (err) => err && err.code === 'ENOENT' ? GIT_MISSING
+  : { version: null, required: GIT_REQUIRED, ok: false, error: `git could not run (${String((err && (err.code || err.message)) || 'error').slice(0, 80)}): fleetgate_submit {git} and fleetgate_review will refuse; fleetgate_submit {files} works` };
+function parseGitVersion(out) {
+  const m = /git version (\d+)\.(\d+)(?:\.(\d+))?/.exec(out);
+  if (!m) return { version: null, required: GIT_REQUIRED, ok: false, error: `could not read git's version (${String(out).slice(0, 60)})` };
+  const ok = +m[1] > 2 || (+m[1] === 2 && +m[2] >= 45);
+  return { version: `${m[1]}.${m[2]}${m[3] !== undefined ? `.${m[3]}` : ''}`, required: GIT_REQUIRED, ok,
+    ...(ok ? {} : { error: `git ${m[1]}.${m[2]} is older than ${GIT_REQUIRED}: fleetgate_submit {git} and fleetgate_review will refuse; fleetgate_submit {files} works. Upgrade git (Ubuntu: ppa:git-core/ppa).` }) };
+}
+// Synchronous, for the git path itself (submit, review), which isn't under a free call's deadline.
+function gitVersionInfo() {
+  if (gitVersionOk) return gitVersionOk;
+  let info;
+  try { info = parseGitVersion(execFileSync('git', ['--version'], { env: gitEnv(), timeout: 10000 }).toString().trim()); }
+  catch (e) { info = gitFailure(e); }
+  if (info.ok) gitVersionOk = info;
+  return info;
+}
+// Asynchronous, for fleetgate_status: never blocks the event loop and is bounded by the call's remaining time, so a
+// slow or hung git can't carry status past its 15 s (#31 independent review).
+function gitVersionInfoAsync() {
+  if (gitVersionOk) return Promise.resolve(gitVersionOk);
+  const timeout = Math.max(1, leftMs(10000));
+  return new Promise(resolve => require('child_process').execFile('git', ['--version'], { env: gitEnv(), timeout }, (err, stdout) => {
+    const info = err ? (err.killed ? { version: null, required: GIT_REQUIRED, ok: false, error: 'git --version did not answer in time' } : gitFailure(err)) : parseGitVersion(String(stdout).trim());
+    if (info.ok && alive()) gitVersionOk = info;
+    resolve(info);
+  }));
+}
 function gitTooOld() {
-  if (gitVersionError === null) return null;   // only a passing check is kept: an upgrade takes effect without a restart
-  let err;
-  try {
-    const m = /git version (\d+)\.(\d+)/.exec(execFileSync('git', ['--version'], { env: gitEnv(), timeout: 10000 }).toString());
-    err = !m ? 'git: could not read git\'s version' : (+m[1] > 2 || (+m[1] === 2 && +m[2] >= 45)) ? null
-      : `git: version ${m[1]}.${m[2]} is too old; reading a checkout safely needs git 2.45 or newer (--no-lazy-fetch). Upgrade git, or send files instead.`;
-  } catch (_) { err = 'git: not found on this machine; send files instead'; }
-  if (err === null) gitVersionError = null;
-  return err;
+  const g = gitVersionInfo();
+  if (g.ok) return null;
+  return g.version ? `git: version ${g.version} is too old; reading a checkout safely needs git ${GIT_REQUIRED} or newer (--no-lazy-fetch). Upgrade git, or send files instead.`
+    : `git: ${g.error.replace(/:.*$/, '')}; send files instead`;
 }
 
 // The checkout's own git directory, exactly as git prints it (only its terminating newline removed: a trim could turn
@@ -443,6 +472,7 @@ async function submit({ repo, title, body, files, git, submission_id, supersedes
 }
 
 async function status() {
+  const gitProbe = gitVersionInfoAsync();   // alongside the network work, never after it
   const health = await http('GET', (await door()) + '/health').catch(e => ({ status: 0, data: { error: e.message } }));
   checkAlive();   // a health answer that raced the deadline starts nothing more (#30 independent review r4)
   let ready;
@@ -455,7 +485,11 @@ async function status() {
   } catch (e) { ready = errBody(e); }
   checkAlive();
   admissionSeen = ready.ok ? ready.admission : null;
+  const gitInfo = await gitProbe;
+  checkAlive();
   return { ok: health.status === 200 && health.data && health.data.ok === true && Boolean(ready.ok), door: await door(),
+    // This machine's git against what the git path needs: a pane learns it here, before a git-path call refuses.
+    git: gitInfo,
     door_health: health.status === 200 ? health.data : { http_status: health.status, ...(health.data || {}) },
     onboarded: Boolean(live() && ready.ok), admission: admissionSeen, ...(ready.ok ? {} : { readiness: ready }),
     token_id: live() ? held.token_id : null, expires_at: live() ? held.expires_at : null,
