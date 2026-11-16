@@ -219,17 +219,31 @@ const DOOR_PATH_RE = /^(?!\/)(?!.*(^|\/)\.)(?!.*\/\/)[A-Za-z0-9._\-/]{1,200}$/;
 
 // --no-lazy-fetch (and GIT_NO_LAZY_FETCH) need git 2.45; an older git would fail every call with an unhelpful
 // "unknown option", so the version is checked once and named (round 7, non-blocking).
-let gitVersionError;
-function gitTooOld() {
-  if (gitVersionError === null) return null;   // only a passing check is kept: an upgrade takes effect without a restart
-  let err;
+// This machine's git against the 2.45 the git path needs, as fleetgate_status reports it (so a pane learns it before a
+// git-path submit or review refuses) and as gitTooOld() checks it. → { version, required, ok, error? }
+const GIT_REQUIRED = '2.45';
+let gitVersionOk = null;   // only a passing check is kept: an upgrade takes effect without a restart
+function gitVersionInfo() {
+  if (gitVersionOk) return gitVersionOk;
+  let info;
   try {
-    const m = /git version (\d+)\.(\d+)/.exec(execFileSync('git', ['--version'], { env: gitEnv(), timeout: 10000 }).toString());
-    err = !m ? 'git: could not read git\'s version' : (+m[1] > 2 || (+m[1] === 2 && +m[2] >= 45)) ? null
-      : `git: version ${m[1]}.${m[2]} is too old; reading a checkout safely needs git 2.45 or newer (--no-lazy-fetch). Upgrade git, or send files instead.`;
-  } catch (_) { err = 'git: not found on this machine; send files instead'; }
-  if (err === null) gitVersionError = null;
-  return err;
+    const out = execFileSync('git', ['--version'], { env: gitEnv(), timeout: 10000 }).toString().trim();
+    const m = /git version (\d+)\.(\d+)(?:\.(\d+))?/.exec(out);
+    if (!m) info = { version: null, required: GIT_REQUIRED, ok: false, error: `could not read git's version (${out.slice(0, 60)})` };
+    else {
+      const ok = +m[1] > 2 || (+m[1] === 2 && +m[2] >= 45);
+      info = { version: `${m[1]}.${m[2]}${m[3] !== undefined ? `.${m[3]}` : ''}`, required: GIT_REQUIRED, ok,
+        ...(ok ? {} : { error: `git ${m[1]}.${m[2]} is older than ${GIT_REQUIRED}: fleetgate_submit {git} and fleetgate_review will refuse; fleetgate_submit {files} works. Upgrade git (Ubuntu: ppa:git-core/ppa).` }) };
+    }
+  } catch (_) { info = { version: null, required: GIT_REQUIRED, ok: false, error: 'git not found on this machine: fleetgate_submit {git} and fleetgate_review will refuse; fleetgate_submit {files} works' }; }
+  if (info.ok) gitVersionOk = info;
+  return info;
+}
+function gitTooOld() {
+  const g = gitVersionInfo();
+  if (g.ok) return null;
+  return g.version ? `git: version ${g.version} is too old; reading a checkout safely needs git ${GIT_REQUIRED} or newer (--no-lazy-fetch). Upgrade git, or send files instead.`
+    : `git: ${g.error.replace(/:.*$/, '')}; send files instead`;
 }
 
 // The checkout's own git directory, exactly as git prints it (only its terminating newline removed: a trim could turn
@@ -456,6 +470,8 @@ async function status() {
   checkAlive();
   admissionSeen = ready.ok ? ready.admission : null;
   return { ok: health.status === 200 && health.data && health.data.ok === true && Boolean(ready.ok), door: await door(),
+    // This machine's git against what the git path needs: a pane learns it here, before a git-path call refuses.
+    git: gitVersionInfo(),
     door_health: health.status === 200 ? health.data : { http_status: health.status, ...(health.data || {}) },
     onboarded: Boolean(live() && ready.ok), admission: admissionSeen, ...(ready.ok ? {} : { readiness: ready }),
     token_id: live() ? held.token_id : null, expires_at: live() ? held.expires_at : null,

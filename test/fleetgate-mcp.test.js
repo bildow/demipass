@@ -683,3 +683,25 @@ test('a timed-out free call is inert afterwards: its late answers mint nothing a
   assert.strictEqual(state.minted.length, minted, 'no token was minted after the call answered');
   mcp._reset();
 });
+
+test('status reports this machine\'s git against the 2.45 requirement; an old or missing git says what still works', async () => {
+  mcp._reset();
+  let r = await call('fleetgate_status');
+  assert.strictEqual(r.git.required, '2.45'); assert.match(r.git.version, /^\d+\.\d+(\.\d+)?$/); assert.strictEqual(typeof r.git.ok, 'boolean');
+  // an old git and no git, through a fake git on PATH (the MCP reads git's own --version)
+  const dir = fsx.mkdtempSync(pathx.join(os.tmpdir(), 'fg-oldgit-'));
+  fsx.writeFileSync(pathx.join(dir, 'git'), '#!/bin/sh\necho "git version 2.43.0"\n', { mode: 0o755 });
+  const keep = process.env.PATH;
+  try {
+    process.env.PATH = `${dir}:${keep}`;
+    delete require.cache[require.resolve('../fleetgate-mcp.js')];
+    const m2 = require('../fleetgate-mcp.js');
+    const s2 = JSON.parse((await m2.handleMessage({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'fleetgate_status', arguments: {} } })).result.content[0].text);
+    assert.deepStrictEqual([s2.git.version, s2.git.ok], ['2.43.0', false]); assert.match(s2.git.error, /fleetgate_submit \{files\} works/);
+    process.env.PATH = dir.replace(/$/, '-none');   // no git at all
+    delete require.cache[require.resolve('../fleetgate-mcp.js')];
+    const m3 = require('../fleetgate-mcp.js');
+    const s3 = JSON.parse((await m3.handleMessage({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'fleetgate_status', arguments: {} } })).result.content[0].text);
+    assert.strictEqual(s3.git.ok, false); assert.match(s3.git.error, /git not found/);
+  } finally { process.env.PATH = keep; }
+});
