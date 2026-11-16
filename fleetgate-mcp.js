@@ -90,6 +90,7 @@ async function onboard({ daily_cap_dd, approval_id } = {}, { fileConsent = true 
     // their phone again. The active consent found here is used as it is; consentAtLeast is never called on this path,
     // since it reads again and could file one if the consent were revoked in between (#27 independent review, 2).
     const all = await api.consents();
+    checkAlive();
     const mine = (all.mine || []).find(x => x.service === SERVICE && x.status === 'active');
     if (!mine) return { ok: false, status: 'not_onboarded', error: 'not onboarded: run fleetgate_onboard and approve it in the DemiPass app' };
     c = { consent: mine, existing: true };
@@ -101,7 +102,9 @@ async function onboard({ daily_cap_dd, approval_id } = {}, { fileConsent = true 
   if (!c.pending) {
     // Ordinary charges (the door's intake) stay under the server's default cap; the review rounds a submission starts
     // bill afterwards against the follow-up budget, up to the whole daily consent (the door needs at least ~one round).
+    checkAlive();   // never mint for a call that already answered
     const t = await api.mintToken({ service: SERVICE, ttl: '24h', followUpDd: c.consent.daily_cap_dd });
+    checkAlive();
     r = { consent: c.consent, existing: c.existing, token: { token: t.token, token_id: t.token_id, expires_at: t.expires_at, cap_dd: t.cap_dd } };
   }
   if (r.pending) {
@@ -110,7 +113,9 @@ async function onboard({ daily_cap_dd, approval_id } = {}, { fileConsent = true 
              next: `Approve "let a wallet pay fleetgate" (${r.pending.daily_cap_dd} DD/day) in the DemiPass app (Requests), then call fleetgate_onboard again with approval_id ${r.pending.approval_id} and daily_cap_dd ${r.pending.daily_cap_dd}.` };
   }
   if (!TOKEN_RE.test(String(r.token.token || ''))) return { ok: false, error: 'DemiPass returned a malformed service token; not held' };
+  checkAlive();
   const ready = await fleetgateAdmission({ endpoint: await door(), token: r.token.token, wallet, timeoutMs: leftMs(QUICK_MS) });
+  checkAlive();   // a call that already answered changes nothing
   // A refused admission drops the token just minted; anything the door said is scrubbed of it first, since scrub() at the
   // end only knows a held token (#27 independent review, 1).
   if (!ready.ok) { held = null; admissionSeen = null; return redact({ ...ready, consent: { id: r.consent.id, daily_cap_dd: r.consent.daily_cap_dd } }, r.token.token); }
@@ -145,14 +150,20 @@ const QUICK_MS = 15000, SLOW_MS = 180000;
 const { AsyncLocalStorage } = require('async_hooks');
 const deadline = new AsyncLocalStorage();
 const FREE_TOOLS = new Set(['fleetgate_status', 'fleetgate_prices', 'fleetgate_check', 'fleetgate_follow']);
-const leftMs = (cap) => { const d = deadline.getStore(); return d ? Math.min(cap, d - Date.now()) : cap; };
+// When the deadline is reached the call's context is marked dead: the call answers "timed_out" at that moment, and
+// whatever of it is still running can send no further request and change no shared state (held token, consent,
+// admission) once its awaits return (#30 independent review r2).
+const leftMs = (cap) => { const d = deadline.getStore(); return d ? Math.min(cap, d.at - Date.now()) : cap; };
+const alive = () => { const d = deadline.getStore(); return !d || (!d.dead && Date.now() < d.at); };
+function checkAlive() { if (!alive()) throw Object.assign(new Error(`this call ran out of its ${QUICK_MS / 1000} s; nothing more was done`), { name: 'TimeoutError' }); }
 function withDeadline(fn) {
-  const at = Date.now() + QUICK_MS;
+  const ctx = { at: Date.now() + QUICK_MS, dead: false };
   let timer;
-  const late = new Promise(ok => { timer = setTimeout(() => ok({ ok: false, status: 'timed_out', error: `no answer within ${QUICK_MS / 1000} s (the door or DemiPass is slow); nothing was charged. Try again shortly.` }), QUICK_MS + 250); });
-  return Promise.race([deadline.run(at, fn), late]).finally(() => clearTimeout(timer));
+  const late = new Promise(ok => { timer = setTimeout(() => { ctx.dead = true; ok({ ok: false, status: 'timed_out', error: `no answer within ${QUICK_MS / 1000} s (the door or DemiPass is slow); nothing was charged. Try again shortly.` }); }, QUICK_MS); });
+  return Promise.race([deadline.run(ctx, fn), late]).finally(() => clearTimeout(timer));
 }
 async function http(method, url, { auth, body, timeoutMs = QUICK_MS } = {}) {
+  checkAlive();
   timeoutMs = leftMs(timeoutMs);
   if (timeoutMs <= 0) throw Object.assign(new Error(`no time left of this call's ${QUICK_MS / 1000} s`), { name: 'TimeoutError' });
   const headers = { accept: 'application/json' };
@@ -437,6 +448,7 @@ async function status() {
     // Existing users self-reconcile on their next status call without filing consent or spending.
     ready = held && held.wallet !== sessionSub() ? { ok:false, status:'wallet_changed', error:'The held token belongs to another wallet; onboard explicitly' } : live() ? await fleetgateAdmission({ endpoint: await door(), token: held.token, wallet: held.wallet, timeoutMs: leftMs(QUICK_MS) }) : await onboard({}, { fileConsent: false });
   } catch (e) { ready = errBody(e); }
+  checkAlive();
   admissionSeen = ready.ok ? ready.admission : null;
   return { ok: health.status === 200 && health.data && health.data.ok === true && Boolean(ready.ok), door: await door(),
     door_health: health.status === 200 ? health.data : { http_status: health.status, ...(health.data || {}) },
@@ -469,6 +481,7 @@ async function doorCall(method, route, body, timeoutMs = QUICK_MS) {
   const url = (await door()) + route;
   try {
     let r = await http(method, url, { auth, body, timeoutMs });
+    checkAlive();
     if (r.status === 401) {
       held = null;
       try { auth = await token(); } catch (e) { return { refused: errBody(e) }; }

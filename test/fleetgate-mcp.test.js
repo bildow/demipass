@@ -17,7 +17,10 @@ function readBody(req) { return new Promise(ok => { let b = ''; req.on('data', c
 const dpSrv = http.createServer(async (req, res) => {
   const b = await readBody(req);
   if (req.headers.authorization !== 'Bearer ' + SESSION_A && req.headers.authorization !== 'Bearer ' + SESSION_B) return json(res, 401, { error: 'bad session' });
-  if (req.method === 'GET' && req.url === '/api/services/consents') return json(res, 200, { ok: true, mine: state.consents, approved_by_me: [] });
+  if (req.method === 'GET' && req.url === '/api/services/consents') {
+    if (state.delayConsentsMs) { const ms = state.delayConsentsMs; state.delayConsentsMs = 0; return setTimeout(() => json(res, 200, { ok: true, mine: state.consents, approved_by_me: [] }), ms); }
+    return json(res, 200, { ok: true, mine: state.consents, approved_by_me: [] });
+  }
   if (req.method === 'POST' && req.url === '/api/services/consent') {
     state.consentPosts.push(b);
     if (!b.approval_id) return json(res, 202, { status: 'approval_pending', approval_id: 77, expires_at: '2026-11-11T00:00:00Z' });
@@ -641,7 +644,8 @@ test('status against a dead door answers within 20 s (a 15 s timeout, no second 
     const t0 = Date.now();
     const r = await call('fleetgate_status');
     const ms = Date.now() - t0;
-    assert.ok(ms < 20000, `took ${ms} ms`); assert.strictEqual(r.ok, false); assert.strictEqual(r.readiness.status, 'door_unreachable');
+    assert.ok(ms < 20000, `took ${ms} ms`); assert.strictEqual(r.ok, false);
+    assert.ok(r.status === 'timed_out' || (r.readiness && r.readiness.status === 'door_unreachable'), JSON.stringify(r).slice(0, 200));
   } finally {
     process.env.FLEETGATE_DOOR_URL = keep; mcp._reset(); dead.closeAllConnections && dead.closeAllConnections(); dead.close();
   }
@@ -664,4 +668,18 @@ test('a free call has one 15 s deadline across its requests: a slow health then 
   } finally {
     process.env.FLEETGATE_DOOR_URL = keep; mcp._reset(); slow.closeAllConnections && slow.closeAllConnections(); slow.close();
   }
+});
+
+test('a timed-out free call is inert afterwards: its late answers mint nothing and change no held token (#30 independent review r2)', async () => {
+  mcp._reset();
+  state.consents = [{ id: 9, service: 'fleetgate', daily_cap_dd: 5000, status: 'active' }];
+  state.delayConsentsMs = 16000;   // DemiPass answers the consent lookup after the call's 15 s
+  const minted = state.minted.length;
+  const t0 = Date.now();
+  const r = await call('fleetgate_status');
+  const ms = Date.now() - t0;
+  assert.strictEqual(r.status, 'timed_out'); assert.ok(ms >= 14900 && ms < 15600, `answered at ${ms} ms, at the deadline`);
+  await new Promise(ok => setTimeout(ok, 2500));   // the abandoned lookup has now returned
+  assert.strictEqual(state.minted.length, minted, 'no token was minted after the call answered');
+  mcp._reset();
 });
