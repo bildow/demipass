@@ -13,3 +13,11 @@ test('readiness refuses legacy 404, malformed evidence, redirects and wrong auth
   assert.equal((await fleetgateAdmission({endpoint:'http://public.example',token:'service-token',wallet:'wallet'})).ok,false);
  }finally{server.close();}
 });
+
+test('an exhausted budget sends no admission request (#30 independent review r3)', async () => {
+  const { fleetgateAdmission } = require('../fleetgate-admission');
+  for (const timeoutMs of [0, -5]) {
+    const r = await fleetgateAdmission({ endpoint: 'http://127.0.0.1:9/door', token: 'x', wallet: 'did:key:z', timeoutMs });
+    assert.strictEqual(r.ok, false); assert.match(r.error, /nothing was sent/);
+  }
+});

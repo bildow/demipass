@@ -61,7 +61,7 @@ test('fleetgate: consent filed and waited for, then the MCP server is registered
   const logs = [];
   const r = await ob.onboardService({ service: 'fleetgate', mcpConfig: cfg, waitMs: 30000, log: m => logs.push(m) });
   assert.strictEqual(r.ok, true, JSON.stringify(r));
-  assert.strictEqual(st.posts[0].daily_cap_dd, 3480, 'default cap: five of the dearest open action');
+  assert.strictEqual(st.posts[0].daily_cap_dd, 3000, 'fleetgate: the one default shared with its MCP (fleetgate-admission.js), not five of the dearest action');
   assert.match(logs[0], /Approve .* in the DemiPass app/);
   assert.ok(!JSON.stringify(r).includes(SESSION), 'the session never appears in the answer');
   assert.strictEqual(r.mcp.attached, true); assert.strictEqual(r.mcp.changed, true); assert.strictEqual(r.endpoint, tenants.fleetgate.endpoint);
