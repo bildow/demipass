@@ -617,3 +617,32 @@ test('git: core.worktree in the checkout cannot send git to another repository (
   r = await call('fleetgate_review', { git: { dir: A.d, ref: 'work', base: 'main' }, review_id: 'review-wt-00001' });
   assert.strictEqual(r.ok, true, JSON.stringify(r)); assert.match(state.reviewPosts.at(-1).diff, /\+from A/); assert.ok(!/from B/.test(state.reviewPosts.at(-1).diff));
 });
+
+test('git: neither a global git config nor a DemiPass variable reaches git (code pass 2026-11-16, item 3)', () => {
+  const home = fsx.mkdtempSync(pathx.join(os.tmpdir(), 'fg-home-'));
+  fsx.writeFileSync(pathx.join(home, '.gitconfig'), '[diff]\n\texternal = /nonexistent/evil-diff\n');
+  const base = { ...process.env, HOME: home, XDG_CONFIG_HOME: pathx.join(home, '.config'), DEMIPASS_TOKEN: 'secret-session', DEMIPASS_URL: 'http://x' };
+  // without the fix git would read it:
+  assert.strictEqual(execFileSync('git', ['config', '--get', 'diff.external'], { env: base }).toString().trim(), '/nonexistent/evil-diff');
+  const env = mcp._gitEnv(base);
+  assert.ok(!Object.keys(env).some(k => k.startsWith('DEMIPASS_')), 'no DEMIPASS_* variable');
+  assert.strictEqual(env.GIT_CONFIG_GLOBAL, '/dev/null'); assert.strictEqual(env.GIT_CONFIG_NOSYSTEM, '1');
+  let got = ''; try { got = execFileSync('git', ['config', '--get', 'diff.external'], { env, stdio: 'pipe' }).toString().trim(); } catch (_) { got = ''; }
+  assert.strictEqual(got, '', 'the global diff.external is not seen');
+});
+
+test('status against a dead door answers within 20 s (a 15 s timeout, no second wait) (code pass 2026-11-16, item 7)', async () => {
+  const dead = http.createServer(() => { /* accepts, never answers */ });
+  await new Promise(r => dead.listen(0, '127.0.0.1', r));
+  const keep = process.env.FLEETGATE_DOOR_URL;
+  process.env.FLEETGATE_DOOR_URL = `http://127.0.0.1:${dead.address().port}/door`;
+  mcp._reset();
+  try {
+    const t0 = Date.now();
+    const r = await call('fleetgate_status');
+    const ms = Date.now() - t0;
+    assert.ok(ms < 20000, `took ${ms} ms`); assert.strictEqual(r.ok, false); assert.strictEqual(r.readiness.status, 'door_unreachable');
+  } finally {
+    process.env.FLEETGATE_DOOR_URL = keep; mcp._reset(); dead.closeAllConnections && dead.closeAllConnections(); dead.close();
+  }
+});

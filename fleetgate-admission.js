@@ -17,4 +17,12 @@ async function fleetgateAdmission({ endpoint, token, wallet }) {
     return { ok:true, admission:a, ...(spend ? { spend } : {}) };
   } catch (_) { return no('Fleetgate admission could not be verified; no submission was attempted'); }
 }
-module.exports = { fleetgateAdmission };
+// The fleetgate consent's default daily cap, for the MCP's fleetgate_onboard and for demipass-onboard alike (code pass
+// 2026-11-16, item 4). It must cover the door's follow-up floor (1,800 DD, atlas/boltcluster #90) plus the intake.
+// FLEETGATE_DAILY_CAP_DD overrides it on both paths.
+const FLEETGATE_DEFAULT_CAP_DD = 3000;
+function fleetgateDefaultCap(env = process.env) {
+  const n = Number(env.FLEETGATE_DAILY_CAP_DD);
+  return Number.isInteger(n) && n > 0 ? n : FLEETGATE_DEFAULT_CAP_DD;
+}
+module.exports = { fleetgateAdmission, FLEETGATE_DEFAULT_CAP_DD, fleetgateDefaultCap };

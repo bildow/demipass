@@ -1,0 +1,26 @@
+# Tests on every push and pull request. fleetgate-mcp reads a pane's git checkout with --no-lazy-fetch, which needs
+# git >= 2.45; Ubuntu 24.04's own git is 2.43, so a newer git comes from the git-core PPA when the runner's is older,
+# and the job fails if it still isn't (code pass 2026-11-16, item 1). Tests need Node >= 18 (node --test).
+name: test
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: git >= 2.45
+        run: |
+          need() { v=$(git --version | sed -E 's/^git version ([0-9]+)\.([0-9]+).*/\1 \2/'); set -- $v; [ "$1" -gt 2 ] || { [ "$1" -eq 2 ] && [ "$2" -ge 45 ]; }; }
+          if ! need; then sudo add-apt-repository -y ppa:git-core/ppa && sudo apt-get update -q && sudo apt-get install -y -q git; fi
+          git --version
+          need || { echo "git >= 2.45 is required (fleetgate_submit / fleetgate_review read checkouts with --no-lazy-fetch)"; exit 1; }
+      - run: npm install --no-audit --no-fund
+      - run: npm test

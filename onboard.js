@@ -142,7 +142,9 @@ async function onboardService({ service, capDd, approvalId, wait = true, waitMs 
   // One call must fit the daily consent: default to 5 of the dearest open action, at least 300 and at most 10,000 DD
   // (a tenant's prices never make the default ask for more; above it, the person passes --cap; #17 review L).
   const dearest = Math.max(0, ...(t.actions || []).filter(a => a.open).map(a => a.max_price_dd || a.price_dd || 0));
-  const cap = capDd || Math.min(10000, Math.max(300, dearest * 5));
+  // fleetgate has one default for this CLI and its MCP alike (fleetgate-admission.js); other services keep 5 of the
+  // dearest open action, at least 300 and at most 10,000 DD.
+  const cap = capDd || (slug === 'fleetgate' ? require('./fleetgate-admission').fleetgateDefaultCap() : Math.min(10000, Math.max(300, dearest * 5)));
   const ask = (id) => consentAtLeast(dp, { service: slug, cap, explicit: Boolean(capDd), approvalId: id });
   let c = await ask(approvalId);
   if (c.pending && wait) {

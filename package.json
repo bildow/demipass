@@ -44,7 +44,7 @@
   },
   "homepage": "https://demipass.com",
   "engines": {
-    "node": ">=14"
+    "node": ">=14.18"
   },
   "files": [
     "index.js",
