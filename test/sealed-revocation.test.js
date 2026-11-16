@@ -118,3 +118,20 @@ test("checkpoint symlink, shared permissions and FIFO refuse before journal read
   assert.equal(spawnSync("mkfifo",["-m","600",file]).status,0);
   const got=f.command(f.request()); assert.equal(got.status,2); assert.equal(got.signal,null);
 });
+test("wrapper rejects FIFO, directory, symlink and shared lock paths before open", async t => {
+  const f=await fixture(t), lock=path.join(f.dir,"lease.lock"), target=path.join(f.root,"lock-target");
+  for (const kind of ["fifo","directory","symlink","shared"]) await t.test(kind,()=>{
+    if(kind==="fifo") assert.equal(spawnSync("mkfifo",["-m","600",lock]).status,0);
+    if(kind==="directory") fs.mkdirSync(lock,{mode:0o700});
+    if(kind==="symlink") {fs.writeFileSync(target,"unchanged",{mode:0o600});fs.symlinkSync(target,lock);}
+    if(kind==="shared") {fs.writeFileSync(lock,"",{mode:0o600});fs.chmodSync(lock,0o644);}
+    const got=spawnSync("sh",[path.resolve(__dirname,"../sealed/revocation.sh"),f.dir,f.write(f.request())],
+      {encoding:"utf8",timeout:2000});
+    assert.equal(got.error,undefined); assert.equal(got.signal,null); assert.equal(got.status,2);
+    assert.equal(fs.existsSync(path.join(f.dir,"status.jsonl")),false);
+    if(kind==="symlink") assert.equal(fs.readFileSync(target,"utf8"),"unchanged");
+    fs.rmSync(lock,{recursive:true});
+  });
+  // Refusal leaves the instance usable once the bad entry is removed.
+  assert.equal(f.command(f.request()).status,0);
+});

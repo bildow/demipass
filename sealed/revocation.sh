@@ -8,6 +8,11 @@ instance=$1
 [ "$(stat -c %u -- "$instance")" = "$(id -u)" ] || exit 2
 [ "$(stat -c %a -- "$instance")" = 700 ] || exit 2
 [ ! -L "$instance/lease.lock" ] || exit 2
+if [ -e "$instance/lease.lock" ]; then
+  [ -f "$instance/lease.lock" ] || exit 2
+  [ "$(stat -c %u -- "$instance/lease.lock")" = "$(id -u)" ] || exit 2
+  [ "$(stat -c %a -- "$instance/lease.lock")" = 600 ] || exit 2
+fi
 exec 9>>"$instance/lease.lock"
 /usr/bin/flock --exclusive --nonblock 9 || exit 3
 exec node "$(dirname "$0")/revocation-cli.js" "$instance" "$2"
