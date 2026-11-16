@@ -67,7 +67,8 @@
     "fleetgate-admission.js",
     "sealed/",
     "docs/conduit-sealed.md",
-    "docs/conduit-wave2.md"
+    "docs/conduit-wave2.md",
+    "docs/conduit-wave3.md"
   ],
   "dependencies": {
     "hpke-js": "1.8.1",
