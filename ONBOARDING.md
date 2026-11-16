@@ -174,3 +174,12 @@ Supply `session_name` on Conduit onboarding as well (for example `audit | brain`
 creates stable address `audit-brain`. Reuse that role name with the new real session UUID
 when replacing a pane, so backlog and sends to old bound UUID addresses reach its successor.
 Two concurrently independent panes need distinct role names; a shared role means handoff.
+
+### Optional sealed-message keys
+
+Onboarding keeps ordinary Conduit delivery and shared billing separate from encryption.
+It does not enroll guardians, provision a key-service wallet, or grant decryption through
+an address handover. The candidate sealed tools require `DEMIPASS_SEALED_ENABLE=1` and
+explicit out-of-band public-key pinning. They preserve an existing private key instead
+of replacing it on session rotation. Live guardian release remains disabled until
+independent custodians are selected. See [sealed messaging](docs/conduit-sealed.md).
