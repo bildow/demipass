@@ -78,6 +78,25 @@ test("real process restarts retain checkpoints, reject stale callers, and never 
   assert.equal(f.command(f.request(JSON.parse(restart.stdout).checkpoint_hash,{fixture:false})).status,2);
   assert.deepEqual(fs.readFileSync(path.join(f.dir,"status.jsonl")),source);
 });
+test("malformed prior entries cannot erase a guardian's recorded revocation", async t => {
+  const f=await fixture(t), revoked=r.evaluate({...f.input,snapshots:f.snapshots(2,"revoked")}).checkpoint;
+  for (const value of [null,false,0,""]) await t.test(JSON.stringify(value),()=>{
+    const previous=structuredClone(revoked); previous.entries["guardian-0"]=value;
+    assert.throws(()=>r.evaluate({...f.input,snapshots:f.snapshots(3),previous}));
+  });
+  const held=r.evaluate({...f.input,snapshots:f.snapshots(3),previous:revoked});
+  assert.equal(held.verdict,"hold"); assert.deepEqual(held.revoked,["guardian-0"]);
+});
+test("persisted malformed checkpoint refuses without overwriting the journal", async t => {
+  const f=await fixture(t), previous=r.evaluate({...f.input,snapshots:f.snapshots(2,"revoked")}).checkpoint;
+  previous.entries["guardian-0"]=null;
+  // A well-formed hash chain is not proof that the checkpoint schema is valid.
+  const {Journal}=require("../sealed/journal"), file=path.join(f.dir,"status.jsonl"), journal=new Journal(file);
+  try {journal.set("checkpoint",previous);} finally {journal.close();}
+  const before=fs.readFileSync(file), got=f.command(f.request(p.hash(previous),{snapshots:f.snapshots(3)}));
+  assert.equal(got.status,2); assert.equal(JSON.parse(got.stdout).verdict,"hold");
+  assert.deepEqual(fs.readFileSync(file),before);
+});
 test("deleted, truncated, corrupt or rolled-back storage cannot satisfy the caller's newer checkpoint", async t => {
   const f=await fixture(t), a=JSON.parse(f.command(f.request()).stdout), file=path.join(f.dir,"status.jsonl");
   const old=fs.readFileSync(file), b=JSON.parse(f.command(f.request(a.checkpoint_hash,{snapshots:f.snapshots(2)})).stdout);

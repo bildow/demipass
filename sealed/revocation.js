@@ -30,7 +30,7 @@ function evaluate({ policy, evidence, trusted, snapshots, previous = null, now =
     const { signature, ...body } = s;
     if (!p.verify(body, signature, t.issuer_key)) throw Error("invalid status signature");
     const hash = p.hash(s), old = previous && previous.entries[g.id];
-    if (old) {
+    if (previous !== null) {
       p.fields(old, ["serial", "hash", "issued_at", "revoked"]);
       if (!Number.isSafeInteger(old.serial) || old.serial < 1 || !/^[a-f0-9]{64}$/.test(old.hash) ||
           !Number.isSafeInteger(old.issued_at) || old.issued_at < 0 || typeof old.revoked !== "boolean")
