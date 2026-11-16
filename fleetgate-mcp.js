@@ -87,6 +87,7 @@ async function onboard({ daily_cap_dd, approval_id } = {}, { fileConsent = true 
   if (!session) return { ok: false, error: process.env.DEMIPASS_EXPECT_DID ? `no DemiPass session for ${process.env.DEMIPASS_EXPECT_DID} (the wallet this server was onboarded as) on this machine` : 'no DemiPass session on this machine: sign in first (demipass_login, or set DEMIPASS_TOKEN)' };
   if (approval_id && !daily_cap_dd && pendingCaps.has(Number(approval_id))) daily_cap_dd = pendingCaps.get(Number(approval_id));
   let c;
+  checkAlive();   // an expired call starts no DemiPass request (#30 independent review r4)
   if (!fileConsent) {
     // Submitting (and the free tools) never file a consent (#17 review L3): after a person said no, a submit must not ask
     // their phone again. The active consent found here is used as it is; consentAtLeast is never called on this path,
@@ -443,6 +444,7 @@ async function submit({ repo, title, body, files, git, submission_id, supersedes
 
 async function status() {
   const health = await http('GET', (await door()) + '/health').catch(e => ({ status: 0, data: { error: e.message } }));
+  checkAlive();   // a health answer that raced the deadline starts nothing more (#30 independent review r4)
   let ready;
   // A door that didn't answer at all is reported as such; its admission check would only wait out a second timeout
   // (status answers within one 15 s timeout against a dead door: code pass 2026-11-16, item 7).
