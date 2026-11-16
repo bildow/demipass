@@ -52,6 +52,8 @@ async function door() {
   if (doorCached) return doorCached;
   let u = process.env.FLEETGATE_DOOR_URL || '';
   if (!u) { try { const r = await http('GET', DEMIPASS_URL + '/api/services/fleetgate'); if (r.status === 200 && r.data && r.data.endpoint) u = r.data.endpoint; } catch (_) {} }
+  // A call that ran out of time during discovery caches nothing: the next call discovers again (#30 independent review r3).
+  checkAlive();
   u = (u || DOOR_DEFAULT).replace(/\/+$/, '');
   const bad = doorRefusal(u); if (bad) throw new Error(`FLEETGATE door ${u}: ${bad}`);
   return (doorCached = u);
@@ -113,8 +115,9 @@ async function onboard({ daily_cap_dd, approval_id } = {}, { fileConsent = true 
              next: `Approve "let a wallet pay fleetgate" (${r.pending.daily_cap_dd} DD/day) in the DemiPass app (Requests), then call fleetgate_onboard again with approval_id ${r.pending.approval_id} and daily_cap_dd ${r.pending.daily_cap_dd}.` };
   }
   if (!TOKEN_RE.test(String(r.token.token || ''))) return { ok: false, error: 'DemiPass returned a malformed service token; not held' };
-  checkAlive();
-  const ready = await fleetgateAdmission({ endpoint: await door(), token: r.token.token, wallet, timeoutMs: leftMs(QUICK_MS) });
+  const endpoint = await door();
+  checkAlive();   // after discovery too: an expired call starts no admission request (#30 independent review r3)
+  const ready = await fleetgateAdmission({ endpoint, token: r.token.token, wallet, timeoutMs: leftMs(QUICK_MS) });
   checkAlive();   // a call that already answered changes nothing
   // A refused admission drops the token just minted; anything the door said is scrubbed of it first, since scrub() at the
   // end only knows a held token (#27 independent review, 1).
@@ -446,7 +449,7 @@ async function status() {
   if (health.status === 0) ready = { ok: false, status: 'door_unreachable', error: `the door did not answer: ${String((health.data && health.data.error) || 'no answer').slice(0, 200)}` };
   else try {
     // Existing users self-reconcile on their next status call without filing consent or spending.
-    ready = held && held.wallet !== sessionSub() ? { ok:false, status:'wallet_changed', error:'The held token belongs to another wallet; onboard explicitly' } : live() ? await fleetgateAdmission({ endpoint: await door(), token: held.token, wallet: held.wallet, timeoutMs: leftMs(QUICK_MS) }) : await onboard({}, { fileConsent: false });
+    ready = held && held.wallet !== sessionSub() ? { ok:false, status:'wallet_changed', error:'The held token belongs to another wallet; onboard explicitly' } : live() ? await (async () => { const endpoint = await door(); checkAlive(); return fleetgateAdmission({ endpoint, token: held.token, wallet: held.wallet, timeoutMs: leftMs(QUICK_MS) }); })() : await onboard({}, { fileConsent: false });
   } catch (e) { ready = errBody(e); }
   checkAlive();
   admissionSeen = ready.ok ? ready.admission : null;
