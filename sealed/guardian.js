@@ -228,7 +228,7 @@ class Coordinator {
     this.now = now;
     this.locks = new Map();
   }
-  async release(request, token) {
+  async authorize(request, token) {
     const { envelope, capsule, grant } = request;
     const h = p.validateEnvelope(envelope, this.sender, this.recipient);
     p.validateCapsule(envelope, capsule);
@@ -260,6 +260,13 @@ class Coordinator {
         recipient: h.recipient_key,
         policy: h.policy_hash,
       });
+    return {key, who};
+  }
+  async release(request, token) {
+    const {key, who} = await this.authorize(request, token);
+    return this.exclusive(key, () => this._release(key, request, who));
+  }
+  async exclusive(key, operation) {
     const previous = this.locks.get(key) || Promise.resolve();
     let unlock;
     const held = new Promise((r) => (unlock = r));
@@ -267,11 +274,41 @@ class Coordinator {
     this.locks.set(key, tail);
     await previous;
     try {
-      return await this._release(key, request, who);
+      return await operation();
     } finally {
       unlock();
       if (this.locks.get(key) === tail) this.locks.delete(key);
     }
+  }
+  // A signed complaint is a durable request for review, NOT a refund or proof
+  // of faulty ciphertext. It neither returns shares nor invokes the meter.
+  async dispute(request, token, complaint) {
+    const {key, who} = await this.authorize(request, token);
+    p.fields(complaint, ["body", "signature"]);
+    p.fields(complaint.body, ["version", "type", "envelope_hash", "grant_hash", "reason"]);
+    const body = complaint.body;
+    if (body.version !== 1 || body.type !== "conduit-release-dispute" ||
+        !["decryption_failed", "package_unavailable", "billing_mismatch"].includes(body.reason) ||
+        body.envelope_hash !== p.hash(request.envelope) ||
+        body.grant_hash !== p.hash(request.grant.body) ||
+        !p.verify(body, complaint.signature, this.recipient.sign))
+      throw Error("invalid signed dispute");
+    return this.exclusive(key, () => {
+      const record = this.journal.get(key);
+      if (!record || record.status !== "paid" || record.payer !== who.wallet ||
+          record.grant_hash !== body.grant_hash)
+        throw Error("paid original grant required; uncertain payment needs reconciliation");
+      validateGrant(request.grant, request.envelope, this.recipient, this.now(), true);
+      const disputeKey = "dispute:" + p.hash({key, complaint});
+      const old = this.journal.get(disputeKey);
+      if (old) return {...old, replayed:true};
+      const at = this.now();
+      if (!Number.isSafeInteger(at) || at < 0) throw Error("invalid dispute clock");
+      const row = {dispute_id:disputeKey, charge_id:record.charge.charge_id,
+        complaint, at, status:"manual_review_required", refund:"not_issued"};
+      this.journal.set(disputeKey,row);
+      return {...row, replayed:false};
+    });
   }
   async _release(key, request, who) {
     const { envelope, capsule, grant } = request;

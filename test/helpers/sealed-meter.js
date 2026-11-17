@@ -24,6 +24,8 @@ async function meterFixture() {
       );
   const state = {
     margin: 0,
+    contract: true,
+    requests: [],
     service: "conduit-keys",
     action: "release",
     badLookup: false,
@@ -38,7 +40,7 @@ async function meterFixture() {
         type: "dustforge_service_charge",
         issuer,
         ...charge,
-        ...(state.wrongToken ? { token_id: "another-token" } : {}),
+        ...(state.wrongPayer ? { payer: "another-wallet" } : {}),
       }),
       sig = c
         .sign(
@@ -64,8 +66,10 @@ async function meterFixture() {
         return send(403, {});
       const b = raw ? JSON.parse(raw) : {},
         url = new URL(req.url, "http://localhost");
+      state.requests.push({path:url.pathname, body:b});
       if (url.pathname === "/api/services/conduit-keys")
         return send(200, {
+          charge_contract: state.contract ? {version:1,max_total_dd:true,signed_lookup:true} : undefined,
           slug: state.service,
           margin_pct: state.margin,
           actions: [
@@ -89,7 +93,7 @@ async function meterFixture() {
             : {
                 received: [
                   state.ledger.get(url.searchParams.get("idempotency_key")),
-                ].filter(Boolean),
+                ].filter(Boolean).map(row => ({...row,...signed(row)})),
               },
         );
       if (url.pathname === "/api/services/charge") {
@@ -99,8 +103,11 @@ async function meterFixture() {
           b.token_id !== "fixture-token-id"
         )
           return send(400, {});
+        if (b.max_total_dd !== 2 || Math.ceil(2*(1+state.margin/100)) > b.max_total_dd)
+          return send(409, {refused:"max_total_dd"});
         if (b.dry_run) return send(200, { ok: true, would_charge_dd: 2 });
         let row = state.ledger.get(b.idempotency_key);
+        const replayed = Boolean(row);
         if (!row) {
           state.charges++;
           row = {
@@ -110,6 +117,7 @@ async function meterFixture() {
             payee: "fixture-service",
             action: "release",
             cost_dd: 2,
+            max_total_dd: b.max_total_dd,
             margin_pct: 0,
             dd: 2,
             token_id: b.token_id,
@@ -118,7 +126,7 @@ async function meterFixture() {
           };
           state.ledger.set(b.idempotency_key, row);
         }
-        return send(201, { ok: true, ...row, ...signed(row) });
+        return send(replayed ? 200 : 201, { ok: true, replayed, ...row, ...signed(row) });
       }
       send(404, {});
     });
