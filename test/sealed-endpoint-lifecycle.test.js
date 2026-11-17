@@ -33,6 +33,24 @@ test("durable acknowledgment follows actual decrypt, is bound and replayed, cont
  const other=await p.seal({sender:f.a.key(),recipient:f.recipient,plaintext:"other"});
  assert.throws(()=>l.verifyAcknowledgment({...args,envelope:other.envelope,ack:got.ack,recipient:f.recipient}));
 });
+test("padding requires exact bucket size, including for encrypted short frames; capacity includes the 19-byte header",async t=>{
+ const f=await fixture(t),magic=Buffer.from("conduit-pad-v1\n"),header=magic.length+4;
+ assert.equal(header,19);
+ for(const [padding,size] of Object.entries(l.BLOCKS)){
+  const capacity=size-header,full=l.encode("x".repeat(capacity),padding);
+  assert.equal(Buffer.from(full,"base64url").length,size);
+  assert.equal(l.decode(full,padding),"x".repeat(capacity));
+  assert.throws(()=>l.encode("x".repeat(capacity+1),padding),/exceeds/);
+  for(const length of [header+1,size-1,size+1]){
+   const frame=Buffer.alloc(length);magic.copy(frame);frame.writeUInt32BE(1,magic.length);frame[header]=120;
+   const plaintext=frame.toString("base64url");
+   assert.throws(()=>l.decode(plaintext,padding),/invalid encoded length/);
+   const packet=await p.seal({sender:f.a.key(),recipient:f.recipient,plaintext});
+   await assert.rejects(f.b.openAcknowledged({...packet,sender:f.sender,padding}),/invalid encoded length/);
+   assert.equal(fs.existsSync(path.join(f.root,"b/acknowledgments")),false);
+  }
+ }
+});
 test("failed authentication or wrong padding never creates acknowledgment; signing cannot imply reading",async t=>{
  const f=await fixture(t),packet=await p.seal({sender:f.a.key(),recipient:f.recipient,plaintext:"ordinary unpadded text"});
  await assert.rejects(f.b.openAcknowledged({...packet,capsule:undefined,sender:f.sender}));

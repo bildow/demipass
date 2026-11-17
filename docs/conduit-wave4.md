@@ -62,7 +62,7 @@ Directly bypassing the wrapper or changing its code is outside that boundary.
 Default remains `none`. A selected bucket creates a random fixed-size binary
 frame with a typed marker, byte length and UTF-8 plaintext; the base64url frame is
 then encrypted by the unchanged signed v1 envelope protocol. A 1-KiB frame fits
-1006 plaintext bytes; 4/16-KiB frames fit 4078/16366 bytes. Overflow refuses rather
+1005 plaintext bytes; 4/16-KiB frames fit 4077/16365 bytes. Overflow refuses rather
 than silently selecting a larger bucket. Padding adds overhead and hides only
 within-bucket content length, not addresses, timing, bucket size or encryption use.
 No automatic format detection: recipients select the same `padding` when opening.

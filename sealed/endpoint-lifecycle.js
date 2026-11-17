@@ -15,6 +15,7 @@ function encode(plaintext,padding="none") {
 function decode(plaintext,padding="none") {
   if(padding==="none")return plaintext;
   if(!Object.hasOwn(BLOCKS,padding))throw Error("unknown padding bucket");
+  // bytes' second argument requires exact length (b.length !== length), not a cap.
   const frame=p.bytes(plaintext,BLOCKS[padding]);
   try{
     if(!frame.subarray(0,MAGIC.length).equals(MAGIC))throw Error("padding frame mismatch");
