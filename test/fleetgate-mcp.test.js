@@ -28,6 +28,7 @@ const dpSrv = http.createServer(async (req, res) => {
       if (!b.approval_id) { const same = state.raiseFor && state.raiseFor.service === b.service && state.raiseFor.daily_cap_dd === b.daily_cap_dd && state.raise == null;
         if (!same) state.cards = (state.cards || 0) + 1;
         state.raiseFor = { service: b.service, daily_cap_dd: b.daily_cap_dd };
+        if (state.switchDuringRaise) { state.switchDuringRaise = false; process.env.DEMIPASS_TOKEN = SESSION_B; }
         if (state.slowRaiseMs) { const ms = state.slowRaiseMs; state.slowRaiseMs = 0; return setTimeout(() => json(res, 202, { status: 'approval_pending', approval_id: 88 }), ms); }
         return json(res, 202, { status: 'approval_pending', approval_id: 88, expires_at: '2026-11-18T00:00:00Z' }); }
       // redeeming binds to what was approved: the same id, service and cap (#35 r1, 4)
@@ -859,4 +860,14 @@ test('a raise whose answer is still in flight holds the wallet: a timed-out foll
   assert.strictEqual(state.cards || 0, cards0, 'no card re-sent or added');
   state.raise = null;
   state.consents = saved; mcp._reset();
+});
+
+
+test('a wallet switch while the payment ask is in flight shows nothing of the first wallet\'s review (Codex connector P2 on #35)', async () => {
+  mcp._reset(); const saved = state.consents; state.consents = [{ id: 9, service: 'fleetgate', daily_cap_dd: 5000, status: 'active' }]; state.raise = null; state.raiseFor = null;
+  state.switchDuringRaise = true;
+  try {
+    const r = await call('fleetgate_follow', { review_id: 'review-waiting-41' });
+    assert.strictEqual(r.status, 'wallet_changed', JSON.stringify(r)); assert.strictEqual(r.review_id, undefined); assert.strictEqual(r.payment, undefined);
+  } finally { process.env.DEMIPASS_TOKEN = SESSION_A; state.consents = saved; mcp._reset(); }
 });

@@ -155,7 +155,15 @@ const FILING_HOLD_MS = 24 * 3600e3;   // after the owner declines (or lets expir
 const asks = new Map();
 const askView = (a, extra = {}) => ({ status: a.status, ...(a.approval_id ? { approval_id: a.approval_id } : {}), daily_cap_dd: a.daily_cap_dd, ...extra });
 const posInt = (x) => { const n = Number(x); return Number.isFinite(n) && n > 0 ? Math.ceil(n) : 0; };   // #35 r1, 3
+// The wallet the answer belongs to is re-checked after the ask's own requests, as doorCall checks it after the door's
+// (Codex connector P2 on #35): a session that switched wallet meanwhile is shown nothing of the first wallet's work.
 async function payAsk(result, subject) {
+  const before = sessionSub();
+  const out = await payAskInner(result, subject);
+  if (out !== result && sessionSub() !== before) return { ok: false, status: 'wallet_changed', error: 'the session switched to another wallet while this ran; nothing of the earlier wallet\'s work is shown. Ask again.' };
+  return out;
+}
+async function payAskInner(result, subject) {
   const p = result && result.payment;
   if (!p || !p.ask || !p.resumable) return result;
   if (p.ask.kind !== 'consent') return { ...result, ask: { status: 'yours', kind: p.ask.kind, next: p.next } };
