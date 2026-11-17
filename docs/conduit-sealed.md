@@ -77,6 +77,9 @@ port: 0 or a chosen loopback port
 
 The coordinator uses `role: "coordinator"`, the same public pins/policy, its own
 transport token, `guardian_endpoints: {id: {url,token}}`, and `meter: {url,token,issuer}`.
+Both roles now also require Wave 4 `admission` pins, a private signed status feed
+and an independently retained checkpoint; see [Wave 4](conduit-wave4.md). Old
+fixture configs without admission refuse; no implicit bootstrap is added.
 The fixture launcher restricts **all** endpoints to loopback, including the meter, so
 it cannot accidentally debit a real wallet. Each server reports only role, fixture
 status and listening URL. Every service binds loopback and requires a private token.

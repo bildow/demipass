@@ -1335,7 +1335,11 @@ async function conduitSealedSend({id}){
   if(!Array.isArray(card.payload_types)||!card.payload_types.includes(payload.payload_type))throw new Error('relay lacks sealed transport capability; no message sent');
   return _conduit('POST','/messages',payload);
 }
-async function conduitSealedOpen(args){return {plaintext:await conduitSealedClient().open(args)};}
+async function conduitSealedOpen(args){
+  if(args.acknowledge!==undefined&&typeof args.acknowledge!=="boolean")throw Error("acknowledge must be boolean");
+  const client=conduitSealedClient();
+  return args.acknowledge?client.openAcknowledged(args):{plaintext:await client.open(args)};
+}
 async function conduitSealedCapsule({id}){return {capsule:conduitSealedClient().capsule(id),note:'Recipient-encrypted capsule; publish later through your separately selected channel. It is not a plaintext key.'};}
 /** Pending and recent messages for this name. Costs 1 DD only when it turns ≥1 message from delivered to read. */
 async function conduitInbox({ since, limit, include_acked } = {}) {
