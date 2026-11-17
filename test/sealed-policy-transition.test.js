@@ -32,3 +32,22 @@ test("revoked governor cannot vote; two remaining current governors can review t
  input.approvals=[sign(input.proposal,0),sign(input.proposal,1)];assert.throws(()=>reviewTransition(input),/governance/);
  input.approvals=[sign(input.proposal,1),sign(input.proposal,2)];assert.equal(reviewTransition(input).live_guardian_release,false);
 });
+test("missing, unknown or malformed status cannot authorize transition review even with two valid approvals",async t=>{
+ const {input}=await transition(t);
+ for(const count of [0,1,2]){
+  const x=structuredClone(input);x.current.snapshots=x.current.snapshots.slice(0,count);
+  assert.throws(()=>evaluate({...x.current,now:x.now}),/three status snapshots required/);
+  assert.throws(()=>reviewTransition(x),/three status snapshots required/);
+ }
+ for(const mutate of [x=>{x.current.snapshots[0].state="unknown";},
+  x=>{delete x.current.snapshots[0].expires_at;},
+  x=>{delete x.current.evidence[0].expires_at;},
+  x=>{delete x.next.evidence[0].expires_at;}]){
+  const x=structuredClone(input);mutate(x);assert.throws(()=>reviewTransition(x));
+ }
+});
+test("transition evaluation refuses invalid clock types instead of bypassing time comparisons",async t=>{
+ const {input}=await transition(t);
+ for(const now of ["not-a-time",{},null,true,-1,1.5,NaN,Infinity])
+  assert.throws(()=>reviewTransition({...input,now}));
+});
