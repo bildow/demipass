@@ -25,7 +25,11 @@ const dpSrv = http.createServer(async (req, res) => {
     state.consentPosts.push(b);
     // a raise of an existing consent (the payment ask): approval 88, approved, declined or expired as the test says
     if (b.daily_cap_dd !== 5000 && b.daily_cap_dd !== 3000) {
-      if (!b.approval_id) { state.raiseFor = { service: b.service, daily_cap_dd: b.daily_cap_dd }; return json(res, 202, { status: 'approval_pending', approval_id: 88, expires_at: '2026-11-18T00:00:00Z' }); }
+      if (!b.approval_id) { const same = state.raiseFor && state.raiseFor.service === b.service && state.raiseFor.daily_cap_dd === b.daily_cap_dd && state.raise == null;
+        if (!same) state.cards = (state.cards || 0) + 1;
+        state.raiseFor = { service: b.service, daily_cap_dd: b.daily_cap_dd };
+        if (state.slowRaiseMs) { const ms = state.slowRaiseMs; state.slowRaiseMs = 0; return setTimeout(() => json(res, 202, { status: 'approval_pending', approval_id: 88 }), ms); }
+        return json(res, 202, { status: 'approval_pending', approval_id: 88, expires_at: '2026-11-18T00:00:00Z' }); }
       // redeeming binds to what was approved: the same id, service and cap (#35 r1, 4)
       if (b.approval_id !== 88 || !state.raiseFor || b.service !== state.raiseFor.service || b.daily_cap_dd !== state.raiseFor.daily_cap_dd) return json(res, 409, { error: 'approval was for a different call' });
       if (state.raise === 'declined') return json(res, 403, { error: 'the owner declined this request' });
@@ -831,4 +835,22 @@ test('a raise keeps the consent\'s Conduit opt-in, filed and redeemed alike (dus
   const posts = state.consentPosts.slice(n).filter(b => b.daily_cap_dd === 7000);
   assert.strictEqual(posts.length, 2, 'filed, then redeemed'); assert.ok(posts.every(b => b.on_request_cap_dd === 500), JSON.stringify(posts));
   state.consents = saved; state.raise = null; mcp._reset();
+});
+
+
+test('a raise whose answer is still in flight holds the wallet: a timed-out follow and another refusal file nothing more (#35 r2, 1)', async () => {
+  mcp._reset(); const saved = state.consents; state.consents = [{ id: 9, service: 'fleetgate', daily_cap_dd: 5000, status: 'active' }]; state.raise = null;
+  const fresh = () => state.consentPosts.filter(b => b.daily_cap_dd > 5000 && !b.approval_id).length;
+  state.raiseFor = null; state.cards = 0;
+  state.slowRaiseMs = 16000;   // the POST answers after the follow's 15 s deadline
+  const first = await call('fleetgate_follow', { review_id: 'review-waiting-31' });
+  assert.strictEqual(first.status, 'timed_out', JSON.stringify(first));
+  const cards0 = state.cards || 0;
+  // the first request ended with no answer (the SDK's own 15 s timeout): the identical request recovers the card's id
+  let r = await call('fleetgate_follow', { review_id: 'review-waiting-32' });
+  assert.strictEqual(r.ask.status, 'asked', JSON.stringify(r.ask)); assert.strictEqual(r.ask.approval_id, 88);
+  r = await call('fleetgate_follow', { review_id: 'review-waiting-31' });
+  assert.strictEqual(r.ask.status, 'asked'); assert.strictEqual(r.ask.approval_id, 88);
+  assert.strictEqual(state.cards || 0, cards0, 'the resend found the same pending card: no card added');
+  state.consents = saved; mcp._reset();
 });
