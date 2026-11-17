@@ -147,7 +147,9 @@ async function onboard({ daily_cap_dd, approval_id } = {}, { fileConsent = true 
 const AUTO_ASK = process.env.FLEETGATE_AUTO_ASK !== '0';
 const CONSENT_MAX_DD = 100000;
 const NO_REASK_MS = 24 * 3600e3;
-const FILING_HOLD_MS = 3600e3;     // a filing with no answer holds the wallet's asks for an hour (#35 r2, 1)   // after the owner declines (or lets expire) a raise, no automatic ask for a day
+// A filing whose outcome is unknown holds the wallet's automatic asks for as long as the card it may have made can be
+// pending (DemiPass keeps a consent approval 24 h): never a second card beside it (#35 r3, 2).
+const FILING_HOLD_MS = 24 * 3600e3;   // after the owner declines (or lets expire) a raise, no automatic ask for a day
 // `${wallet}|${subject}` → the ask record. Subjects that meet the same pending ask share ONE record (the same object),
 // so its outcome, approved, declined or expired, is every subject's (#35 independent review 2).
 const asks = new Map();
@@ -166,25 +168,13 @@ async function payAsk(result, subject) {
     // An ask already filed for this wallet and still waiting: this subject shares it; redeem it if the owner approved.
     // A filing whose answer never came (the deadline, a dropped connection): a card MAY exist, so nothing else is filed
     // for this wallet until it is older than FILING_HOLD_MS (#35 r2, 1).
-    // While its request is in flight, nothing else is filed. Once that request ended with no answer, the IDENTICAL request
-    // is sent again: DemiPass returns the same pending approval for the same wallet and bound parameters
-    // (already_pending, use_approvals gate), so this recovers the card's id and never adds a card.
+    // A filing whose outcome is unknown (in flight, or its answer never came): a card MAY exist, so nothing else is filed
+    // for this wallet until it could no longer be pending. Never re-sent: after a decline a resend would make a new card
+    // (#35 r3, 1). The owner finds the card in the app; the pane is told so.
     const filing = walletAsks().find(a => a.status === 'filing' && Date.now() - a.started < FILING_HOLD_MS);
-    if (filing && filing.inflight) { asks.set(key, filing); return { ...result, ask: { status: 'filing', daily_cap_dd: filing.daily_cap_dd, next: `An ask for ${filing.daily_cap_dd} DD/day is being filed; nothing more is filed for this wallet meanwhile. Keep following.` } }; }
-    if (filing) {
-      asks.set(key, filing);
-      checkAlive();
-      filing.inflight = true;
-      try { await api.consent({ service: SERVICE, dailyCapDd: filing.daily_cap_dd, onRequestCapDd: filing.on_request_cap_dd }); }
-      catch (e) {
-        filing.inflight = false;
-        if (e.pending && filing.status === 'filing') { filing.approval_id = e.body.approval_id; filing.status = 'asked'; pendingCaps.set(Number(filing.approval_id), filing.daily_cap_dd);
-          return { ...result, ask: askView(filing, { next: `Waiting for the owner to approve "let a wallet pay fleetgate" at ${filing.daily_cap_dd} DD/day in the DemiPass app (approval ${filing.approval_id}). Nothing for you to do: keep following.` }) }; }
-        throw e;
-      }
-      filing.inflight = false;
-      return { ...result, ask: askView(filing) };
-    }
+    if (filing) { asks.set(key, filing); return { ...result, ask: { status: 'filing', daily_cap_dd: filing.daily_cap_dd, next: filing.inflight
+      ? `An ask for ${filing.daily_cap_dd} DD/day is being filed; nothing more is filed for this wallet meanwhile. Keep following.`
+      : `An ask for ${filing.daily_cap_dd} DD/day was sent but its answer was lost; nothing more is filed automatically for this wallet for a day. If a card is in the DemiPass app, the owner approves it there and the pane redeems it with fleetgate_onboard {approval_id, daily_cap_dd: ${filing.daily_cap_dd}}. Keep following.` } }; }
     const pend = (asks.get(key) && asks.get(key).status === 'asked') ? asks.get(key) : walletAsks().find(a => a.status === 'asked');
     if (pend) {
       asks.set(key, pend);

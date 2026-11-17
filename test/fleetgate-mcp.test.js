@@ -846,11 +846,17 @@ test('a raise whose answer is still in flight holds the wallet: a timed-out foll
   const first = await call('fleetgate_follow', { review_id: 'review-waiting-31' });
   assert.strictEqual(first.status, 'timed_out', JSON.stringify(first));
   const cards0 = state.cards || 0;
-  // the first request ended with no answer (the SDK's own 15 s timeout): the identical request recovers the card's id
+  // the first request ended with no answer (the SDK's own 15 s timeout): its outcome is unknown, so the wallet is held
+  // for a day; nothing is re-sent (a resend after a decline would make a new card: #35 r3, 1)
   let r = await call('fleetgate_follow', { review_id: 'review-waiting-32' });
-  assert.strictEqual(r.ask.status, 'asked', JSON.stringify(r.ask)); assert.strictEqual(r.ask.approval_id, 88);
-  r = await call('fleetgate_follow', { review_id: 'review-waiting-31' });
-  assert.strictEqual(r.ask.status, 'asked'); assert.strictEqual(r.ask.approval_id, 88);
-  assert.strictEqual(state.cards || 0, cards0, 'the resend found the same pending card: no card added');
+  assert.strictEqual(r.ask.status, 'filing', 'still in flight, or lost: either way held');
+  await new Promise(ok => setTimeout(ok, 1500));   // past the SDK's own 15 s timeout: the answer is lost
+  r = await call('fleetgate_follow', { review_id: 'review-waiting-32' });
+  assert.strictEqual(r.ask.status, 'filing', JSON.stringify(r.ask)); assert.match(r.ask.next, /answer was lost/);
+  state.raise = 'declined';
+  r = await call('fleetgate_follow', { review_id: 'review-waiting-33' });
+  assert.strictEqual(r.ask.status, 'filing');
+  assert.strictEqual(state.cards || 0, cards0, 'no card re-sent or added');
+  state.raise = null;
   state.consents = saved; mcp._reset();
 });
