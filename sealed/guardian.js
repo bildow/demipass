@@ -1,6 +1,7 @@
 "use strict";
 const crypto = require("node:crypto");
 const p = require("./crypto");
+const { requireGate } = require("./release-gate");
 
 function makeGrant(
   envelope,
@@ -89,10 +90,12 @@ class Guardian {
     recipient,
     journal,
     fixture = false,
+    admission,
     now = Date.now,
   }) {
     p.policyForUse(policy, { fixture });
     this.policy = structuredClone(policy);
+    this.checkStatus = requireGate(admission, this.policy);
     this.id = id;
     this.identity = identity;
     this.sender = sender;
@@ -113,6 +116,8 @@ class Guardian {
     const context = p.validateCapsule(envelope, capsule),
       gh = validateGrant(grant, envelope, this.recipient, this.now());
     checkApproval(approval, this.guardian, grant, gh);
+    this.checkStatus();
+    validateGrant(grant, envelope, this.recipient, this.now());
     // A nonce is bound to one immutable request; retries return the saved encrypted response.
     const key = "guardian:" + this.id + ":" + grant.body.request_id,
       old = this.journal.get(key);
@@ -149,6 +154,9 @@ class Guardian {
         body,
         signature: p.sign(body, this.identity.signPrivate),
       };
+      // Revocation or expiry during crypto must prevent disclosure, including a raced retry.
+      this.checkStatus();
+      validateGrant(grant, envelope, this.recipient, this.now());
       // Compare again after crypto awaits; one in-process request may have completed meanwhile.
       const raced = this.journal.get(key);
       if (raced) {
@@ -158,6 +166,8 @@ class Guardian {
       }
       validateGrant(grant, envelope, this.recipient, this.now());
       this.journal.set(key, { grant_hash: gh, response });
+      this.checkStatus();
+      validateGrant(grant, envelope, this.recipient, this.now());
       return response;
     } finally {
       fragment.fill(0);
@@ -204,10 +214,12 @@ class Coordinator {
     meter,
     guardians,
     fixture = false,
+    admission,
     now = Date.now,
   }) {
     p.policyForUse(policy, { fixture });
     this.policy = structuredClone(policy);
+    this.checkStatus = requireGate(admission, this.policy);
     this.sender = sender;
     this.recipient = recipient;
     this.journal = journal;
@@ -283,7 +295,9 @@ class Coordinator {
           "paid release missing local state: reconcile, do not reconstruct",
         );
       validateGrant(grant, envelope, this.recipient, this.now());
+      this.checkStatus();
       await this.meter.precheck(who, 2);
+      this.checkStatus();
       const responses = [];
       // All RPCs have deadlines in the HTTP adapter; unavailable guardians cannot stall forever.
       const results = await Promise.allSettled(
@@ -304,6 +318,8 @@ class Coordinator {
       });
       if (responses.length < this.policy.threshold)
         throw Error("quorum unavailable: nothing charged");
+      this.checkStatus();
+      validateGrant(grant, envelope, this.recipient, this.now());
       record = {
         status: "prepared",
         payer: who.wallet,
@@ -322,7 +338,10 @@ class Coordinator {
     let charge = await this.meter.lookup(key);
     if (!charge) {
       validateGrant(grant, envelope, this.recipient, this.now());
+      this.checkStatus();
       await this.meter.precheck(who, 2);
+      this.checkStatus();
+      validateGrant(grant, envelope, this.recipient, this.now());
       charge = await this.meter.charge(who, 2, key);
     }
     if (

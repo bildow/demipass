@@ -49,6 +49,10 @@ async function fixture(t) {
     journals.push(j);
     return j;
   };
+  const status = await require("./helpers/sealed-status").statusFixture(policy);
+  const { ReleaseGate } = require("../sealed/release-gate");
+  const gate = name => new ReleaseGate({policy,trusted:status.trusted,
+    journal:journal(name+"-status"),feed:()=>status.packet(),expected_checkpoint:"new",fixture:true});
   const guardians = gids.map(
     (id, i) =>
       new Guardian({
@@ -58,6 +62,7 @@ async function fixture(t) {
         sender: sender.publicKey,
         recipient: recipient.publicKey,
         journal: journal("g" + i),
+        admission: gate("g" + i),
         fixture: true,
       }),
   );
@@ -107,6 +112,7 @@ async function fixture(t) {
     sender: sender.publicKey,
     recipient: recipient.publicKey,
     journal: journal("coordinator"),
+    admission: gate("coordinator"),
     meter,
     guardians: calls,
     fixture: true,

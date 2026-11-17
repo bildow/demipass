@@ -89,6 +89,9 @@ test(
         ),
       })),
     };
+    const status = await require("./helpers/sealed-status").statusFixture(policy);
+    const feed = path.join(root,"evidence.json"); writeNew(feed,status.packet());
+    const admission = {trusted:status.trusted,feed_file:feed,expected_checkpoint:"new"};
     const start = async (name, cfg) => {
       const dir = path.join(root, name);
       if (cfg) {
@@ -129,6 +132,7 @@ test(
     };
     const common = {
       fixture: true,
+      admission,
       policy,
       sender: sender.publicKey,
       recipient: recipient.publicKey,
@@ -193,7 +197,19 @@ test(
       }),
       "private real-process output",
     );
+    // Refresh the signed feed while processes are live. A saved guardian share
+    // must now refuse, but a paid coordinator package remains recoverable.
+    fs.writeFileSync(feed,JSON.stringify(status.packet(2,true)),{mode:0o600});
+    await assert.rejects(request(guards[0].url+"/release",{...req.request,approval:approvals["guardian-0"]},
+      {token:endpoints["guardian-0"].token,fixture:true}),{status:409});
     await stop(coordinator.child);
+    // Operator retains and reconciles the accepted checkpoint; restart never resets to 'new'.
+    const {Journal}=require("../sealed/journal");
+    const checkpointJournal=new Journal(path.join(root,"coordinator/status.jsonl"));
+    const checkpointHash=p.hash(checkpointJournal.get("checkpoint")); checkpointJournal.close();
+    const configFile=path.join(root,"coordinator/config.json");
+    const config=JSON.parse(fs.readFileSync(configFile)); config.admission.expected_checkpoint=checkpointHash;
+    fs.writeFileSync(configFile,JSON.stringify(config),{mode:0o600});
     coordinator = await start("coordinator");
     const retry = await request(coordinator.url + "/release", req, {
       token: coordinatorToken,
@@ -202,6 +218,13 @@ test(
     assert.equal(retry.replayed, true);
     assert.deepEqual(retry.responses, out.responses);
     assert.equal(meter.state.charges, 1);
+    const nextPacket=await p.seal({sender,recipient:recipient.publicKey,plaintext:"next",policy,fixture:true});
+    const nextGrant=makeGrant(nextPacket.envelope,recipient);
+    const nextApprovals=Object.fromEntries(policy.guardians.map((g,i)=>[g.id,approve(nextGrant,g.id,approvers[i])]));
+    await assert.rejects(request(coordinator.url+"/release",{payer_token:"fixture-payer-token",
+      request:{...nextPacket,grant:nextGrant,approvals:nextApprovals}},
+      {token:coordinatorToken,fixture:true}),{status:409});
+    assert.equal(meter.state.charges,1);
     const journal = fs.readFileSync(
       path.join(root, "coordinator/journal.jsonl"),
       "utf8",

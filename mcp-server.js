@@ -59,6 +59,10 @@ const TOOLS = [
         "maxLength": 1024,
         "description": "Optional clear text; empty encrypts the whole content."
       },
+      "padding": {
+        "type": "string", "enum": ["none", "1k", "4k", "16k"], "default": "none",
+        "description": "Optional fixed-size encrypted frame; recipient must select the same bucket when opening. Does not hide addresses or timing."
+      },
       "defer_capsule": {
         "type": "boolean",
         "default": true
@@ -115,8 +119,11 @@ const TOOLS = [
       "capsule": {
         "type": "object"
       },
-      "sender": {
-        "type": "object"
+      "sender": { "type": "object" },
+      "padding": { "type": "string", "enum": ["none", "1k", "4k", "16k"], "default": "none" },
+      "acknowledge": {
+        "type": "boolean", "default": false,
+        "description": "After successful decryption, save and return a recipient-signed acknowledgment. Does not send it or prove a human/model read it."
       }
     },
     "required": [

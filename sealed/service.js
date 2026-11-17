@@ -4,6 +4,7 @@ const path = require("node:path"),
   fs = require("node:fs");
 const { readPrivate, privateDirectory } = require("./client"),
   { Journal } = require("./journal");
+const { ReleaseGate } = require("./release-gate"), p = require("./crypto");
 const { Guardian, Coordinator } = require("./guardian"),
   { DemiPassMeter } = require("./demipass-meter"),
   { request, serve } = require("./http");
@@ -17,6 +18,11 @@ function loopback(url) {
   )
     throw Error("fixture endpoints must be loopback");
   return url;
+}
+function readPrivateStatus(file) {
+  const st = fs.lstatSync(file);
+  if (!st.isFile() || st.isSymbolicLink() || st.uid !== process.getuid() || (st.mode & 0o077))
+    throw Error("unsafe status journal");
 }
 async function main() {
   const dir = path.resolve(process.argv[2] || "");
@@ -36,9 +42,23 @@ async function main() {
     b = fs.lstatSync(path.join(dir, "lease.lock"));
   if (!a.isFile() || a.ino !== b.ino || a.dev !== b.dev || b.isSymbolicLink())
     throw Error("run through service.sh");
-  const journal = new Journal(path.join(dir, "journal.jsonl"));
+  // Pins come from the private local configuration, never the release request/feed.
+  p.fields(cfg.admission, ["trusted", "feed_file", "expected_checkpoint"]);
+  if (typeof cfg.admission.feed_file !== "string" || !path.isAbsolute(cfg.admission.feed_file))
+    throw Error("absolute private evidence feed required");
+  const statusFile = path.join(dir, "status.jsonl");
+  if (!fs.existsSync(statusFile) && cfg.admission.expected_checkpoint !== "new")
+    throw Error("release checkpoint missing");
+  if (fs.existsSync(statusFile)) readPrivateStatus(statusFile);
+  const statusJournal = new Journal(statusFile);
+  const admission = new ReleaseGate({ policy: cfg.policy, trusted: cfg.admission.trusted,
+    journal: statusJournal, feed: () => readPrivate(cfg.admission.feed_file),
+    expected_checkpoint: cfg.admission.expected_checkpoint, fixture: cfg.fixture });
+  const releaseFile = path.join(dir, "journal.jsonl");
+  if (fs.existsSync(releaseFile)) readPrivateStatus(releaseFile);
+  const journal = new Journal(releaseFile);
   let service;
-  if (cfg.role === "guardian") service = new Guardian({ ...cfg, journal });
+  if (cfg.role === "guardian") service = new Guardian({ ...cfg, journal, admission });
   else {
     loopback(cfg.meter.url);
     const guardians = Object.fromEntries(
@@ -63,6 +83,7 @@ async function main() {
     service = new Coordinator({
       ...cfg,
       journal,
+      admission,
       guardians,
       meter: new DemiPassMeter({ ...cfg.meter, fixture: true }),
     });
@@ -87,6 +108,7 @@ async function main() {
       server.server.closeAllConnections();
       server.server.close();
       journal.close();
+      statusJournal.close();
       process.exit(0);
     });
 }

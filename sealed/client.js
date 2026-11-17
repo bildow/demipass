@@ -15,7 +15,7 @@ function privateDirectory(dir) {
     throw Error("sealed directory must be owned and private");
 }
 function readPrivate(file) {
-  const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
   try {
     const st = fs.fstatSync(fd);
     if (
@@ -115,6 +115,7 @@ class Client {
     recipient,
     plaintext,
     public_text = "",
+    padding = "none",
     defer_capsule = true,
     policy = null,
     fixture = false,
@@ -125,7 +126,7 @@ class Client {
     const packet = await p.seal({
       sender: this.key(),
       recipient,
-      plaintext,
+      plaintext: require("./endpoint-lifecycle").encode(plaintext, padding),
       publicText: public_text,
       policy,
       fixture,
@@ -141,6 +142,7 @@ class Client {
       id,
       recipient_fingerprint: p.keyId(recipient),
       capsule_deferred: defer_capsule,
+      padding,
       capsule_file: this.file("capsules", id),
       bytes: Buffer.byteLength(JSON.stringify(packet.envelope)),
       private_bytes: Buffer.byteLength(plaintext),
@@ -164,8 +166,8 @@ class Client {
   capsule(id) {
     return readPrivate(this.file("capsules", id));
   }
-  async open({ envelope, capsule, sender, policy = null, release = null }) {
-    return p.open({
+  async open({ envelope, capsule, sender, policy = null, release = null, padding = "none" }) {
+    const plaintext = await p.open({
       envelope,
       capsule,
       sender,
@@ -173,6 +175,26 @@ class Client {
       release,
       recipient: this.key(),
     });
+    return require("./endpoint-lifecycle").decode(plaintext, padding);
+  }
+  async openAcknowledged(args) {
+    const lifecycle = require("./endpoint-lifecycle");
+    const result = await lifecycle.openAcknowledged({ ...args, recipient: this.key() });
+    const dir = path.join(this.dir,"acknowledgments"); privateDirectory(dir);
+    const file = path.join(dir, result.ack.body.envelope_hash + ".json");
+    try { writeNew(file,result.ack); }
+    catch (e) {
+      if(e.code!=="EEXIST")throw e;
+      const ack=readPrivate(file);
+      lifecycle.verifyAcknowledgment({ ...args,ack,recipient:this.key().publicKey });
+      // A previous exclusive create may have failed during fsync. Re-sync before
+      // returning the retained receipt; never report durable replay on uncertainty.
+      const fd=fs.openSync(file,fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW|fs.constants.O_NONBLOCK);
+      try{fs.fsyncSync(fd);}finally{fs.closeSync(fd);}
+      const d=fs.openSync(dir,"r");try{fs.fsyncSync(d);}finally{fs.closeSync(d);}
+      result.ack=ack;
+    }
+    return result;
   }
 }
 module.exports = { Client, readPrivate, writeNew, privateDirectory };
