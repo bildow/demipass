@@ -1,6 +1,7 @@
 #!/bin/sh
 # Fixture-only Linux runner. flock's descriptor stays open in the Node process.
 set -eu
+# Apply before redirection: inherited 022 must still create a private 0600 lock.
 umask 077
 [ "$#" -eq 1 ] || { echo 'usage: service.sh PRIVATE_INSTANCE_DIRECTORY' >&2; exit 2; }
 instance=$1

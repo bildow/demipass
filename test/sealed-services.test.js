@@ -100,7 +100,7 @@ test(
       }
       const child = spawn(
         "sh",
-        [path.resolve(__dirname, "../sealed/service.sh"), dir],
+        ["-c", 'umask 022; exec sh "$1" "$2"', "fixture-wrapper", path.resolve(__dirname, "../sealed/service.sh"), dir],
         { stdio: ["ignore", "pipe", "pipe"] },
       );
       children.push(child);
@@ -128,6 +128,7 @@ test(
           }
         });
       });
+      assert.equal(fs.statSync(path.join(dir,"lease.lock")).mode & 0o777,0o600);
       return { child, ...ready };
     };
     const common = {
