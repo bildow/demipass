@@ -2,6 +2,22 @@
 // Offline status evaluation. No accepted result is permission to release a key.
 const p = require("./crypto"), { verifyEnrollment } = require("./enrollment");
 const FORMAT = "conduit-guardian-status-v1", MAX_LIFETIME = 300000;
+// Shape only: inspection cannot certify issuer provenance, freshness or trust pins.
+function validateCheckpoint(checkpoint) {
+  p.fields(checkpoint, ["context_hash", "entries"]);
+  if (typeof checkpoint.context_hash !== "string" || !/^[a-f0-9]{64}$/.test(checkpoint.context_hash))
+    throw Error("invalid checkpoint context");
+  const ids = Object.keys(checkpoint.entries || {});
+  p.fields(checkpoint.entries, ids);
+  if (ids.length !== 3 || ids.some(id => !/^[a-z][a-z0-9-]{1,40}$/.test(id)))
+    throw Error("invalid checkpoint guardians");
+  for (const old of Object.values(checkpoint.entries)) {
+    p.fields(old, ["serial", "hash", "issued_at", "revoked"]);
+    if (!Number.isSafeInteger(old.serial) || old.serial < 1 || typeof old.hash !== "string" ||
+        !/^[a-f0-9]{64}$/.test(old.hash) || !Number.isSafeInteger(old.issued_at) || old.issued_at < 0 ||
+        typeof old.revoked !== "boolean") throw Error("invalid prior checkpoint");
+  }
+}
 function evaluate({ policy, evidence, trusted, snapshots, previous = null, now = Date.now() }) {
   const encoded = p.canonical({ policy, evidence, trusted, snapshots, previous });
   if (Buffer.byteLength(encoded) > 98304) throw Error("oversize status packet");
@@ -10,7 +26,7 @@ function evaluate({ policy, evidence, trusted, snapshots, previous = null, now =
   const context_hash = p.hash({ policy, trusted });
   if (!Array.isArray(snapshots) || snapshots.length !== 3) throw Error("three status snapshots required");
   if (previous !== null) {
-    p.fields(previous, ["context_hash", "entries"]);
+    validateCheckpoint(previous);
     if (previous.context_hash !== context_hash) throw Error("trust context changed; separate acceptance required");
     p.fields(previous.entries, policy.guardians.map(g => g.id));
   }
@@ -31,10 +47,6 @@ function evaluate({ policy, evidence, trusted, snapshots, previous = null, now =
     if (!p.verify(body, signature, t.issuer_key)) throw Error("invalid status signature");
     const hash = p.hash(s), old = previous && previous.entries[g.id];
     if (previous !== null) {
-      p.fields(old, ["serial", "hash", "issued_at", "revoked"]);
-      if (!Number.isSafeInteger(old.serial) || old.serial < 1 || !/^[a-f0-9]{64}$/.test(old.hash) ||
-          !Number.isSafeInteger(old.issued_at) || old.issued_at < 0 || typeof old.revoked !== "boolean")
-        throw Error("invalid prior checkpoint");
       if (s.serial < old.serial || s.issued_at < old.issued_at || (s.serial === old.serial && hash !== old.hash))
         throw Error("status rollback or same-serial fork");
     }
@@ -47,4 +59,4 @@ function evaluate({ policy, evidence, trusted, snapshots, previous = null, now =
   return { verdict: revoked.length ? "hold" : "evidence_current", revoked, expires_at,
     checkpoint, checkpoint_hash: p.hash(checkpoint), live_guardian_release: false };
 }
-module.exports = { FORMAT, MAX_LIFETIME, evaluate };
+module.exports = { FORMAT, MAX_LIFETIME, validateCheckpoint, evaluate };

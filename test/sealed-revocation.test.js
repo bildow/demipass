@@ -97,6 +97,29 @@ test("persisted malformed checkpoint refuses without overwriting the journal", a
   assert.equal(got.status,2); assert.equal(JSON.parse(got.stdout).verdict,"hold");
   assert.deepEqual(fs.readFileSync(file),before);
 });
+test("inspect refuses malformed persisted checkpoint schema without altering bytes", async t => {
+  const f=await fixture(t), valid=r.evaluate(f.input).checkpoint;
+  const cases={
+    nullEntry:x=>{x.entries["guardian-0"]=null;},
+    falseEntry:x=>{x.entries["guardian-0"]=false;},
+    badHash:x=>{x.entries["guardian-0"].hash=[];},
+    badSerial:x=>{x.entries["guardian-0"].serial=0;},
+    badTime:x=>{x.entries["guardian-0"].issued_at=-1;},
+    badRevoked:x=>{x.entries["guardian-0"].revoked="false";},
+    badContext:x=>{x.context_hash="unknown";},
+    missingGuardian:x=>{delete x.entries["guardian-0"];},
+    badGuardianId:x=>{x.entries["INVALID"]=x.entries["guardian-0"];delete x.entries["guardian-0"];},
+    extraField:x=>{x.entries["guardian-0"].allow=true;},
+  };
+  const {Journal}=require("../sealed/journal"), file=path.join(f.dir,"status.jsonl");
+  for(const [name,mutate] of Object.entries(cases)) await t.test(name,()=>{
+    const checkpoint=structuredClone(valid); mutate(checkpoint);
+    const journal=new Journal(file); try {journal.set("checkpoint",checkpoint);} finally {journal.close();}
+    const before=fs.readFileSync(file), got=f.command({fixture:true,mode:"inspect"});
+    assert.equal(got.status,2); assert.equal(JSON.parse(got.stdout).verdict,"hold");
+    assert.deepEqual(fs.readFileSync(file),before);
+  });
+});
 test("deleted, truncated, corrupt or rolled-back storage cannot satisfy the caller's newer checkpoint", async t => {
   const f=await fixture(t), a=JSON.parse(f.command(f.request()).stdout), file=path.join(f.dir,"status.jsonl");
   const old=fs.readFileSync(file), b=JSON.parse(f.command(f.request(a.checkpoint_hash,{snapshots:f.snapshots(2)})).stdout);

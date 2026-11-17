@@ -2,7 +2,7 @@
 "use strict";
 const fs = require("node:fs"), path = require("node:path"), p = require("./crypto");
 const { privateDirectory, readPrivate } = require("./client"), { Journal } = require("./journal");
-const { evaluate } = require("./revocation");
+const { evaluate, validateCheckpoint } = require("./revocation");
 function main(args) {
   if (args.length !== 2) throw Error("arguments");
   const dir = path.resolve(args[0]); privateDirectory(dir);
@@ -29,7 +29,7 @@ function main(args) {
   const journal = new Journal(journalFile);
   try {
     const stored = journal.get("checkpoint");
-    if (stored !== undefined) p.fields(stored, ["context_hash", "entries"]);
+    if (stored !== undefined) validateCheckpoint(stored);
     const previous = stored === undefined ? null : stored;
     const actual = previous ? p.hash(previous) : "new";
     if (request.mode === "inspect") return { verdict: "inspect_only", checkpoint_hash: actual, live_guardian_release: false };

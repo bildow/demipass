@@ -64,7 +64,8 @@ verdict is HOLD. Repeated identical records do not append duplicate state.
 On write/fsync uncertainty, the process returns HOLD with nonzero exit. A fresh
 process verifies and re-fsyncs replayed state. An operator may inspect it with
 `{fixture:true,mode:"inspect"}` to reconcile an uncertain append. Inspection
-returns only `inspect_only` and a checkpoint hash; it does not certify current
+validates the complete checkpoint schema before returning `inspect_only` and a
+checkpoint hash; malformed contents refuse without rewriting state. It does not certify current
 status or reset state. Do not replace a known newer checkpoint with an older
 value merely because inspection returned it. Preserve the external checkpoint
 and evidence when investigating rollback. Never truncate the journal to repair it.
