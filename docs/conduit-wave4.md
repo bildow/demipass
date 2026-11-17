@@ -75,7 +75,9 @@ signed `conduit-decryption-ack-v1`, save it privately and return it with plainte
 The ack contains the envelope/capsule hashes, recipient pin, optional immutable
 release hash, padding choice and endpoint timestamp; never plaintext, keys or a
 plaintext digest. Existing valid receipts replay without rewriting; corrupt or
-uncertain storage refuses. The endpoint timestamp is an assertion, not trusted
+uncertain storage refuses. The timestamp comes from the endpoint clock after
+decryption/decoding, never from request arguments; replay retains the original
+signed time. The endpoint timestamp is an assertion, not trusted
 external delivery time. `verifyAcknowledgment` requires pinned sender/recipient
 and exact envelope/release/padding bindings.
 

@@ -39,10 +39,12 @@ function verifyAcknowledgment({ack,envelope,release=null,sender,recipient,paddin
   return {event:"decrypted",envelope_hash:expected.envelope_hash,at:expected.at,
     assertion:"recipient-signed endpoint assertion; not proof a human/model read it"};
 }
-async function openAcknowledged({envelope,capsule,sender,recipient,policy=null,release=null,padding="none",now=Date.now()}) {
+async function openAcknowledged({envelope,capsule,sender,recipient,policy=null,release=null,padding="none"}) {
   // Never sign an acknowledgment on missing keys, invalid crypto or framing failure.
   const plaintext=decode(await p.open({envelope,capsule,sender,recipient,policy,release}),padding);
-  const body=receiptBody(envelope,release,recipient.publicKey,now,padding);
+  // Sample the endpoint clock after successful decrypt/decode. Request fields
+  // (including an extra `now`) cannot choose the time signed by this endpoint.
+  const body=receiptBody(envelope,release,recipient.publicKey,Date.now(),padding);
   return {plaintext,ack:{body,signature:p.sign(body,recipient.signPrivate)}};
 }
 module.exports={encode,decode,openAcknowledged,verifyAcknowledgment,BLOCKS};

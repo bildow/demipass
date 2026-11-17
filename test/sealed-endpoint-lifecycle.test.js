@@ -42,16 +42,45 @@ test("failed authentication or wrong padding never creates acknowledgment; signi
  assert.match(l.verifyAcknowledgment({...packet,sender:f.sender,recipient:f.recipient,ack:got.ack}).assertion,/not proof/);
 });
 
+test("SDK request time cannot forge a signed timestamp or replace a durable acknowledgment",async t=>{
+ const f=await fixture(t);
+ for(const now of [0,4102444800000]){
+  const packet=await p.seal({sender:f.a.key(),recipient:f.recipient,plaintext:"time control"});
+  const args={...packet,sender:f.sender,now};
+  const before=Date.now(),got=await f.b.openAcknowledged(args),after=Date.now();
+  assert(got.ack.body.at>=before && got.ack.body.at<=after);
+  assert.notEqual(got.ack.body.at,now);
+  assert.equal(l.verifyAcknowledgment({...args,ack:got.ack,recipient:f.recipient}).at,got.ack.body.at);
+  assert.deepEqual((await f.b.openAcknowledged({...args,now:now===0?4102444800000:0})).ack,got.ack);
+  const saved=JSON.parse(fs.readFileSync(path.join(f.root,"b/acknowledgments",p.hash(packet.envelope)+".json"),"utf8"));
+  assert.deepEqual(saved,got.ack);
+ }
+});
+
+test("acknowledgment samples endpoint time after asynchronous decrypt, never request time",async t=>{
+ const f=await fixture(t),packet=await p.seal({sender:f.a.key(),recipient:f.recipient,plaintext:"clock boundary"});
+ const original=p.open;let clock=1000;
+ t.mock.method(Date,"now",()=>clock);
+ t.mock.method(p,"open",async args=>{const plaintext=await original(args);clock=2000;return plaintext;});
+ const got=await l.openAcknowledged({...packet,sender:f.sender,recipient:f.b.key(),now:4102444800000});
+ assert.equal(got.ack.body.at,2000);
+ assert.equal(l.verifyAcknowledgment({...packet,sender:f.sender,recipient:f.recipient,ack:got.ack}).at,2000);
+});
+
 test("actual MCP open returns opt-in acknowledgment and decodes padding without service access",async t=>{
  const f=await fixture(t),out=await f.a.prepare({recipient:f.recipient,plaintext:"MCP private",padding:"1k",defer_capsule:false});
  const packet=JSON.parse(f.a.transport(out.id).body),config=path.join(f.root,"conduit.json");
  fs.writeFileSync(config,JSON.stringify({name:"recipient"}),{mode:0o600});
  const request={jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"conduit_sealed_open",
-  arguments:{...packet,sender:f.sender,padding:"1k",acknowledge:true}}};
+  arguments:{...packet,sender:f.sender,padding:"1k",acknowledge:true,now:4102444800000}}};
+ const before=Date.now();
  const result=require("node:child_process").spawnSync(process.execPath,[path.resolve(__dirname,"../mcp-server.js")],
   {input:JSON.stringify(request)+"\n",encoding:"utf8",timeout:10000,env:{PATH:process.env.PATH,HOME:f.root,
    CONDUIT_CONFIG:config,DEMIPASS_SEALED_ENABLE:"1",DEMIPASS_SEALED_DIRECTORY:path.join(f.root,"b")}});
  assert.equal(result.status,0,result.stderr);const reply=JSON.parse(result.stdout.trim());
  assert.equal(reply.result.isError,undefined);const value=JSON.parse(reply.result.content[0].text);
  assert.equal(value.plaintext,"MCP private");assert.equal(value.ack.body.event,"decrypted");
+ assert(value.ack.body.at>=before && value.ack.body.at<=Date.now());
+ assert.notEqual(value.ack.body.at,4102444800000);
+ assert.equal(l.verifyAcknowledgment({...packet,sender:f.sender,recipient:f.recipient,padding:"1k",ack:value.ack}).at,value.ack.body.at);
 });
