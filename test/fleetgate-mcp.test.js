@@ -23,6 +23,22 @@ const dpSrv = http.createServer(async (req, res) => {
   }
   if (req.method === 'POST' && req.url === '/api/services/consent') {
     state.consentPosts.push(b);
+    // a raise of an existing consent (the payment ask): approval 88, approved, declined or expired as the test says
+    if (b.daily_cap_dd !== 5000 && b.daily_cap_dd !== 3000) {
+      if (!b.approval_id) { const same = state.raiseFor && state.raiseFor.service === b.service && state.raiseFor.daily_cap_dd === b.daily_cap_dd && state.raise == null;
+        if (!same) state.cards = (state.cards || 0) + 1;
+        state.raiseFor = { service: b.service, daily_cap_dd: b.daily_cap_dd };
+        if (state.switchDuringRaise) { state.switchDuringRaise = false; process.env.DEMIPASS_TOKEN = SESSION_B; }
+        if (state.slowRaiseMs) { const ms = state.slowRaiseMs; state.slowRaiseMs = 0; return setTimeout(() => json(res, 202, { status: 'approval_pending', approval_id: 88 }), ms); }
+        return json(res, 202, { status: 'approval_pending', approval_id: 88, expires_at: '2026-11-18T00:00:00Z' }); }
+      // redeeming binds to what was approved: the same id, service and cap (#35 r1, 4)
+      if (b.approval_id !== 88 || !state.raiseFor || b.service !== state.raiseFor.service || b.daily_cap_dd !== state.raiseFor.daily_cap_dd) return json(res, 409, { error: 'approval was for a different call' });
+      if (state.raise === 'declined') return json(res, 403, { error: 'the owner declined this request' });
+      if (state.raise === 'expired') return json(res, 410, { error: 'this request expired' });
+      if (state.raise !== 'approved') return json(res, 202, { status: 'approval_pending', approval_id: 88 });
+      state.consents = state.consents.filter(c => c.service !== b.service).concat([{ id: 12, service: b.service, daily_cap_dd: b.daily_cap_dd, status: 'active' }]);
+      return json(res, 201, { ok: true, consent_id: 12, service: b.service, daily_cap_dd: b.daily_cap_dd });
+    }
     if (!b.approval_id) return json(res, 202, { status: 'approval_pending', approval_id: 77, expires_at: '2026-11-11T00:00:00Z' });
     if (!state.approved || b.approval_id !== 77) return json(res, 202, { status: 'approval_pending', approval_id: 77 });
     if (b.daily_cap_dd !== 5000) return json(res, 409, { error: 'approval was for a different call' });
@@ -53,6 +69,11 @@ const doorSrv = http.createServer(async (req, res) => {
   }
   if (req.url.startsWith('/door/v1/reviews/')) {
     const id = req.url.slice('/door/v1/reviews/'.length);
+    const pay = (refused, ask) => ({ refused, needed_dd: 1589, resumable: true, ask, next: 'Your fleetgate daily consent is used up for today. The work waits and resumes by itself.' });
+    if (id.startsWith('review-waiting-')) return json(res, 200, { ok: true, review_id: id, state: 'waiting_payment', next: { who: 'you', what: 'raise it' },
+      payment: pay('daily_cap', { kind: 'consent', service: 'fleetgate', more_dd: id === 'review-waiting-neg' ? -1 : 1589 }) });
+    if (id === 'review-fund-01') return json(res, 200, { ok: true, review_id: id, state: 'waiting_payment', next: { who: 'you', what: 'fund it' },
+      payment: { ...pay('insufficient', { kind: 'fund', more_dd: 1589 }), next: 'Fund it in the DemiPass app.' } });
     return id === 'review-known-01' ? json(res, 200, { ok: true, review_id: id, state: 'done', verdict: 'approved by all three seats', seats: [1, 2, 3], receipt_sha256: 'c'.repeat(64) })
       : json(res, 404, { ok: false, code: 'no_review', error: 'No review from this wallet.' });
   }
@@ -734,4 +755,119 @@ test('a git that exists but cannot run is not reported as missing (#31 independe
     const r = JSON.parse((await m.handleMessage({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'fleetgate_status', arguments: {} } })).result.content[0].text);
     assert.strictEqual(r.git.ok, false); assert.match(r.git.error, /git could not run \(EACCES\)/);
   } finally { process.env.PATH = keep; }
+});
+
+
+// ── the payment ask (Aaron 2026-11-17: agents and panes never block on a spending limit) ──
+test('a review waiting on the daily consent: follow files ONE raise (current + need, to 500), redeems it once approved, never re-asks', async () => {
+  mcp._reset(); const saved = state.consents; state.consents = [{ id: 9, service: 'fleetgate', daily_cap_dd: 5000, status: 'active' }]; state.raise = null;
+  const posts = () => state.consentPosts.filter(b => b.daily_cap_dd === 7000);
+  let r = await call('fleetgate_follow', { review_id: 'review-waiting-01' });
+  assert.strictEqual(r.state, 'waiting_payment'); assert.strictEqual(r.ask.status, 'asked', JSON.stringify(r));
+  assert.strictEqual(r.ask.approval_id, 88); assert.strictEqual(r.ask.daily_cap_dd, 7000); assert.strictEqual(r.ask.from_dd, 5000);
+  assert.match(r.ask.next, /from 5000 to 7000 DD\/day/); assert.match(r.ask.next, /Nothing for you to do/);
+  assert.strictEqual(posts().length, 1); assert.strictEqual(posts()[0].approval_id, undefined, 'filed as a new request');
+  r = await call('fleetgate_follow', { review_id: 'review-waiting-01' });
+  assert.strictEqual(r.ask.status, 'asked'); assert.strictEqual(posts().filter(b => !b.approval_id).length, 1, 'not filed twice');
+  // another refusal while the first ask waits: no second card
+  r = await call('fleetgate_follow', { review_id: 'review-waiting-02' });
+  assert.strictEqual(r.ask.status, 'asked'); assert.strictEqual(posts().filter(b => !b.approval_id).length, 1, 'one ask per wallet at a time');
+  state.raise = 'approved';
+  r = await call('fleetgate_follow', { review_id: 'review-waiting-01' });
+  assert.strictEqual(r.ask.status, 'raised'); assert.strictEqual(r.ask.daily_cap_dd, 7000); assert.match(r.ask.next, /resumes by itself/);
+  r = await call('fleetgate_follow', { review_id: 'review-waiting-01' });
+  assert.strictEqual(r.ask.status, 'raised'); assert.strictEqual(posts().filter(b => !b.approval_id).length, 1, 'raised: never asked again for this refusal');
+  const st = await call('fleetgate_status'); assert.ok(st.payment_asks.some(a => a.subject === 'review:review-waiting-01' && a.status === 'raised'));
+  state.consents = saved; state.raise = null; mcp._reset();
+});
+
+test('a declined or expired raise is never filed again for that refusal', async () => {
+  for (const how of ['declined', 'expired']) {
+    mcp._reset(); const saved = state.consents; state.consents = [{ id: 9, service: 'fleetgate', daily_cap_dd: 5000, status: 'active' }]; state.raise = null;
+    const before = state.consentPosts.filter(b => b.daily_cap_dd === 7000 && !b.approval_id).length;
+    let r = await call('fleetgate_follow', { review_id: 'review-waiting-03' }); assert.strictEqual(r.ask.status, 'asked');
+    state.raise = how;
+    r = await call('fleetgate_follow', { review_id: 'review-waiting-03' }); assert.strictEqual(r.ask.status, how); assert.match(r.ask.next, /not asked again/);
+    r = await call('fleetgate_follow', { review_id: 'review-waiting-03' }); assert.strictEqual(r.ask.status, how);
+    assert.strictEqual(state.consentPosts.filter(b => b.daily_cap_dd === 7000 && !b.approval_id).length, before + 1, `${how}: one ask only`);
+    state.consents = saved; state.raise = null;
+  }
+  mcp._reset();
+});
+
+test('a wallet short of funds: the next step is the owner\'s (fund it); no consent is filed', async () => {
+  mcp._reset(); const saved = state.consents; state.consents = [{ id: 9, service: 'fleetgate', daily_cap_dd: 5000, status: 'active' }];
+  const n = state.consentPosts.length;
+  const r = await call('fleetgate_follow', { review_id: 'review-fund-01' });
+  assert.strictEqual(r.ask.status, 'yours'); assert.strictEqual(r.ask.kind, 'fund'); assert.strictEqual(state.consentPosts.length, n);
+  state.consents = saved; mcp._reset();
+});
+
+
+test('a declined raise is never re-filed from another refusal of the same wallet (#35 r1, 2)', async () => {
+  mcp._reset(); const saved = state.consents; state.consents = [{ id: 9, service: 'fleetgate', daily_cap_dd: 5000, status: 'active' }]; state.raise = null;
+  const fresh = () => state.consentPosts.filter(b => b.daily_cap_dd > 5000 && !b.approval_id).length;
+  const n0 = fresh();
+  let r = await call('fleetgate_follow', { review_id: 'review-waiting-11' }); assert.strictEqual(r.ask.status, 'asked');
+  r = await call('fleetgate_follow', { review_id: 'review-waiting-12' }); assert.strictEqual(r.ask.status, 'asked', 'B shares A\'s pending ask');
+  state.raise = 'declined';
+  r = await call('fleetgate_follow', { review_id: 'review-waiting-11' }); assert.strictEqual(r.ask.status, 'declined');
+  r = await call('fleetgate_follow', { review_id: 'review-waiting-12' }); assert.strictEqual(r.ask.status, 'declined', 'B sees the same decline');
+  r = await call('fleetgate_follow', { review_id: 'review-waiting-13' }); assert.strictEqual(r.ask.status, 'declined', 'a new refusal is not asked either');
+  assert.strictEqual(fresh(), n0 + 1, 'one card in all');
+  state.consents = saved; state.raise = null; mcp._reset();
+});
+
+
+test('an amount the door sends that is not a positive number is not trusted: the step\'s need sizes the raise (#35 r1, 3)', async () => {
+  mcp._reset(); const saved = state.consents; state.consents = [{ id: 9, service: 'fleetgate', daily_cap_dd: 5000, status: 'active' }]; state.raise = null;
+  const r = await call('fleetgate_follow', { review_id: 'review-waiting-neg' });
+  assert.strictEqual(r.ask.status, 'asked'); assert.strictEqual(r.ask.daily_cap_dd, 7000, 'current 5000 + needed 1589, to 500');
+  state.consents = saved; mcp._reset();
+});
+
+
+test('a raise keeps the consent\'s Conduit opt-in, filed and redeemed alike (dustforge#131 review 2)', async () => {
+  mcp._reset(); const saved = state.consents; state.consents = [{ id: 9, service: 'fleetgate', daily_cap_dd: 5000, on_request_cap_dd: 500, status: 'active' }]; state.raise = null;
+  const n = state.consentPosts.length;
+  let r = await call('fleetgate_follow', { review_id: 'review-waiting-21' }); assert.strictEqual(r.ask.status, 'asked');
+  state.raise = 'approved';
+  r = await call('fleetgate_follow', { review_id: 'review-waiting-21' }); assert.strictEqual(r.ask.status, 'raised');
+  const posts = state.consentPosts.slice(n).filter(b => b.daily_cap_dd === 7000);
+  assert.strictEqual(posts.length, 2, 'filed, then redeemed'); assert.ok(posts.every(b => b.on_request_cap_dd === 500), JSON.stringify(posts));
+  state.consents = saved; state.raise = null; mcp._reset();
+});
+
+
+test('a raise whose answer is still in flight holds the wallet: a timed-out follow and another refusal file nothing more (#35 r2, 1)', async () => {
+  mcp._reset(); const saved = state.consents; state.consents = [{ id: 9, service: 'fleetgate', daily_cap_dd: 5000, status: 'active' }]; state.raise = null;
+  const fresh = () => state.consentPosts.filter(b => b.daily_cap_dd > 5000 && !b.approval_id).length;
+  state.raiseFor = null; state.cards = 0;
+  state.slowRaiseMs = 16000;   // the POST answers after the follow's 15 s deadline
+  const first = await call('fleetgate_follow', { review_id: 'review-waiting-31' });
+  assert.strictEqual(first.status, 'timed_out', JSON.stringify(first));
+  const cards0 = state.cards || 0;
+  // the first request ended with no answer (the SDK's own 15 s timeout): its outcome is unknown, so the wallet is held
+  // for a day; nothing is re-sent (a resend after a decline would make a new card: #35 r3, 1)
+  let r = await call('fleetgate_follow', { review_id: 'review-waiting-32' });
+  assert.strictEqual(r.ask.status, 'filing', 'still in flight, or lost: either way held');
+  await new Promise(ok => setTimeout(ok, 1500));   // past the SDK's own 15 s timeout: the answer is lost
+  r = await call('fleetgate_follow', { review_id: 'review-waiting-32' });
+  assert.strictEqual(r.ask.status, 'filing', JSON.stringify(r.ask)); assert.match(r.ask.next, /answer was lost/);
+  state.raise = 'declined';
+  r = await call('fleetgate_follow', { review_id: 'review-waiting-33' });
+  assert.strictEqual(r.ask.status, 'filing');
+  assert.strictEqual(state.cards || 0, cards0, 'no card re-sent or added');
+  state.raise = null;
+  state.consents = saved; mcp._reset();
+});
+
+
+test('a wallet switch while the payment ask is in flight shows nothing of the first wallet\'s review (Codex connector P2 on #35)', async () => {
+  mcp._reset(); const saved = state.consents; state.consents = [{ id: 9, service: 'fleetgate', daily_cap_dd: 5000, status: 'active' }]; state.raise = null; state.raiseFor = null;
+  state.switchDuringRaise = true;
+  try {
+    const r = await call('fleetgate_follow', { review_id: 'review-waiting-41' });
+    assert.strictEqual(r.status, 'wallet_changed', JSON.stringify(r)); assert.strictEqual(r.review_id, undefined); assert.strictEqual(r.payment, undefined);
+  } finally { process.env.DEMIPASS_TOKEN = SESSION_A; state.consents = saved; mcp._reset(); }
 });

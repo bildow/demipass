@@ -99,7 +99,8 @@ function services({ token, baseUrl = DEFAULT_BASE, timeoutMs = 15000 } = {}) {
     // ── caller side ──────────────────────────────────────────────────────────────────────────────────────────────
     /** Consent to pay a service up to dailyCapDd a day. First call → ServiceError 202 (pending): the person who answers
      *  for this wallet approves it in the DemiPass app; then call again with approvalId. Needed before mintToken. */
-    consent({ service, dailyCapDd, approvalId } = {}) { return req('POST', '/api/services/consent', opt({ service, daily_cap_dd: dailyCapDd, approval_id: approvalId })); },
+    // onRequestCapDd: a consent filed without it replaces the payer's Conduit opt-in; a raise passes the one it has.
+    consent({ service, dailyCapDd, approvalId, onRequestCapDd } = {}) { return req('POST', '/api/services/consent', opt({ service, daily_cap_dd: dailyCapDd, approval_id: approvalId, on_request_cap_dd: onRequestCapDd })); },
     consents() { return req('GET', '/api/services/consents'); },
     /** The standing consent for `service`, filed for app approval when there is none. Resolves to
      *  { consent: {id, service, daily_cap_dd, status}, existing } or, while the person has not approved it yet,
