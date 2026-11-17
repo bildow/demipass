@@ -134,6 +134,76 @@ async function onboard({ daily_cap_dd, approval_id } = {}, { fileConsent = true 
            ...(low ? { warning: `your daily consent (${r.consent.daily_cap_dd} DD) is below one submission (${price} DD): every submit would be refused. Call fleetgate_onboard with a higher daily_cap_dd to replace it (one approval).` } : {}) };
 }
 
+// ── The payment ask (Aaron 2026-11-17: "I can't have agents and panes block on this; it would be considered a bug /
+// design flaw"). The door (fleetgate-door/5) answers a review or a PR whose payment was refused with
+// payment: {refused, needed_dd, resumable, ask, next}. When the ask is a raise of this wallet's fleetgate daily consent,
+// this server files it: one approval card in the owner's DemiPass app, sized to the current cap + what the step needs
+// (rounded up to 500 DD, at most DemiPass's 100,000), and redeems it on a later call once approved. The work itself
+// waits at the door and resumes by itself; the pane only keeps following.
+// This is the one place a free tool (fleetgate_follow) files a consent, a deliberate exception to #17 review L3, kept
+// as narrow as that rule's reason: at most ONE ask per refusal episode (wallet + review or PR head) per server process,
+// never re-filed once the owner declined it or let it expire, and FLEETGATE_AUTO_ASK=0 turns it off (the next step is
+// then said, not filed).
+const AUTO_ASK = process.env.FLEETGATE_AUTO_ASK !== '0';
+const CONSENT_MAX_DD = 100000;
+const asks = new Map();   // `${wallet}|${subject}` → { wallet, subject, approval_id, daily_cap_dd, status: asked|raised|declined|expired, at }
+const askView = (a, extra = {}) => ({ status: a.status, ...(a.approval_id ? { approval_id: a.approval_id } : {}), daily_cap_dd: a.daily_cap_dd, ...extra });
+async function payAsk(result, subject) {
+  const p = result && result.payment;
+  if (!p || !p.ask || !p.resumable) return result;
+  if (p.ask.kind !== 'consent') return { ...result, ask: { status: 'yours', kind: p.ask.kind, next: p.next } };
+  if (!AUTO_ASK) return { ...result, ask: { status: 'off', next: `${p.next} (FLEETGATE_AUTO_ASK=0: file it yourself with fleetgate_onboard {daily_cap_dd}).` } };
+  const session = sessionToken(), wallet = subOf(session);
+  if (!session || !wallet) return result;
+  const api = dp(session), key = `${wallet}|${subject}`;
+  const mine = asks.get(key);
+  try {
+    // An ask already filed for this wallet (this episode, or another still waiting): redeem it if the owner approved.
+    const pend = mine && mine.status === 'asked' ? mine : [...asks.values()].find(a => a.wallet === wallet && a.status === 'asked');
+    if (pend) {
+      checkAlive();
+      let c;
+      try { c = await consentAtLeast(api, { service: SERVICE, cap: pend.daily_cap_dd, explicit: true, approvalId: pend.approval_id }); }
+      catch (e) {
+        if (e.status === 403 || e.status === 410) {
+          pend.status = e.status === 403 ? 'declined' : 'expired';
+          if (pend.subject !== subject) asks.set(key, { ...pend, subject });
+          return { ...result, ask: askView(pend, { next: `The owner ${pend.status === 'declined' ? 'declined' : 'did not answer'} the raise to ${pend.daily_cap_dd} DD/day (approval ${pend.approval_id}); it is not asked again. ${p.next}` }) };
+        }
+        throw e;
+      }
+      checkAlive();
+      if (c.pending) return { ...result, ask: askView(pend, { next: `Waiting for the owner to approve "let a wallet pay fleetgate" at ${pend.daily_cap_dd} DD/day in the DemiPass app (approval ${pend.approval_id}). Nothing for you to do: keep following; the work resumes by itself once it is approved.` }) };
+      pend.status = 'raised'; consentSeen = c.consent || consentSeen;
+      if (pend.subject !== subject) asks.set(key, { ...pend, subject });
+      return { ...result, ask: askView(pend, { daily_cap_dd: (c.consent && c.consent.daily_cap_dd) || pend.daily_cap_dd,
+        next: 'The owner approved the raise. The work resumes by itself within 5 minutes; sending the same request again with the same id (fleetgate_review) resumes it now.' }) };
+    }
+    if (mine) return { ...result, ask: askView(mine, { next: mine.status === 'raised' ? 'Raised already for this refusal; if the work still waits, the step needs more than the raise: the owner can file it with fleetgate_onboard {daily_cap_dd}.' : `${p.next}` }) };
+    // File the one ask for this episode.
+    checkAlive();
+    const all = await api.consents();
+    checkAlive();
+    const active = (all.mine || []).find(x => x.service === SERVICE && x.status === 'active');
+    const current = active ? active.daily_cap_dd : 0;
+    const target = Math.min(CONSENT_MAX_DD, Math.ceil((current + (Number(p.ask.more_dd) || Number(p.needed_dd) || 500)) / 500) * 500);
+    if (!(target > current)) return { ...result, ask: { status: 'at_max', daily_cap_dd: current, next: `The fleetgate daily consent is already at DemiPass's most (${current} DD): the step waits for tomorrow's allowance.` } };
+    const c = await consentAtLeast(api, { service: SERVICE, cap: target, explicit: true });
+    checkAlive();
+    if (c.pending) {
+      const a = { wallet, subject, approval_id: c.pending.approval_id, daily_cap_dd: target, status: 'asked', at: new Date().toISOString() };
+      asks.set(key, a); pendingCaps.set(Number(a.approval_id), target);
+      return { ...result, ask: askView(a, { from_dd: current, next: `Asked the owner to raise the fleetgate daily consent from ${current} to ${target} DD/day: one approval in the DemiPass app (approval ${a.approval_id}). Nothing for you to do: keep following; the work resumes by itself once it is approved.` }) };
+    }
+    const a = { wallet, subject, daily_cap_dd: (c.consent && c.consent.daily_cap_dd) || target, status: 'raised', at: new Date().toISOString() };
+    asks.set(key, a); consentSeen = c.consent || consentSeen;
+    return { ...result, ask: askView(a, { from_dd: current, next: 'Raised. The work resumes by itself within 5 minutes.' }) };
+  } catch (e) {
+    if (e && e.name === 'TimeoutError') throw e;
+    return { ...result, ask: { status: 'error', error: String((e && e.message) || e).slice(0, 200), next: p.next } };
+  }
+}
+
 // A live token, minting one when the consent already exists; an onboarding that needs an approval is reported, not waited on.
 async function submitPrice() {
   try { const r = await http('GET', (await door()) + '/v1/prices'); const a = ((r.data && r.data.actions) || []); return a.filter(x => x.action === 'submit').reduce((n, x) => n + (x.price_dd || 0), 0) || null; }
@@ -419,7 +489,7 @@ async function review({ git, title, note, review_id }) {
   const { r, refused } = await doorCall('POST', '/v1/reviews', reqBody, SLOW_MS);
   if (refused) return { ...refused, review_id: id, next: `If the door may have charged, retry with review_id "${id}": the same diff replays and is never charged twice.` };
   if (OLD_DOOR(r)) return { ok: false, review_id: id, error: 'this door predates review-only requests (fleetgate-door/4)' };
-  if (r.status === 202) return { ...r.data, review_id: id, files: p.packet.files.length, next: `fleetgate_follow {review_id: "${id}"} shows its state and, once done, every seat's verdict (free).` };
+  if (r.status === 202) return payAsk({ ...r.data, review_id: id, files: p.packet.files.length, next: r.data.payment ? r.data.next : `fleetgate_follow {review_id: "${id}"} shows its state and, once done, every seat's verdict (free).` }, `review:${id}`);
   return { ok: false, http_status: r.status, review_id: id, ...(r.data || {}) };
 }
 
@@ -494,6 +564,7 @@ async function status() {
     onboarded: Boolean(live() && ready.ok), admission: admissionSeen, ...(ready.ok ? {} : { readiness: ready }),
     token_id: live() ? held.token_id : null, expires_at: live() ? held.expires_at : null,
     consent: consentSeen ? { id: consentSeen.id, daily_cap_dd: consentSeen.daily_cap_dd } : null,
+    ...((() => { const me = sessionSub(); const mine = [...asks.values()].filter(a => a.wallet === me); return mine.length ? { payment_asks: mine.map(a => ({ subject: a.subject, ...askView(a), at: a.at })) } : {}; })()),
     // Spend only as this very call's admission check verified it, and only if the held token still belongs to the
     // session's wallet once that check returns: never a cached figure (Codex connector P2 on #27), never across a switch
     // made while the check was in flight (#27 independent review, 3).
@@ -554,7 +625,7 @@ async function follow({ repo, submission_id, review_id }) {
     const { r, refused } = await doorCall('GET', `/v1/reviews/${encodeURIComponent(review_id)}`);
     if (refused) return refused;
     if (OLD_DOOR(r)) return { ok: false, error: 'this door predates review-only requests (fleetgate-door/4)' };
-    if (r.status === 200) return r.data;
+    if (r.status === 200) return payAsk(r.data, `review:${review_id}`);
     return { ok: false, http_status: r.status, ...(r.data || {}), ...(r.status === 404 ? { hint: 'Only this wallet\'s own reviews are visible.' } : {}) };
   }
   if (typeof repo !== 'string' || !/^[A-Za-z0-9._-]{1,100}$/.test(repo)) return { ok: false, error: 'repo: the repo under atlas/ you submitted to (e.g. boltcluster)' };
@@ -562,7 +633,7 @@ async function follow({ repo, submission_id, review_id }) {
   const { r, refused } = await doorCall('GET', `/v1/pulls/${encodeURIComponent(repo)}/${encodeURIComponent(submission_id)}`);
   if (refused) return refused;
   if (OLD_DOOR(r)) return { ok: false, error: 'this door predates following a submission (fleetgate-door/3)' };
-  if (r.status === 200) return r.data;
+  if (r.status === 200) return payAsk(r.data, `pull:${repo}/${submission_id}@${(r.data.pull && r.data.pull.head) || ''}`);
   if (r.status === 404) return { ok: false, http_status: 404, ...(r.data || {}), hint: 'Only this wallet\'s own submissions are visible: check the repo and the submission_id fleetgate_submit returned.' };
   return { ok: false, http_status: r.status, ...(r.data || {}) };
 }
@@ -591,7 +662,7 @@ const TOOLS = [
       repo: { type: 'string', description: 'Repo name under atlas/ (e.g. boltcluster)' },
       paths: { type: 'array', items: { type: 'string' }, description: 'The repository paths you would submit (1-20)' } } } },
   { name: 'fleetgate_follow',
-    description: 'FLEETGATE: free: where your submission stands. The release controller\'s own rules evaluated now on the PR\'s exact head: every check, the verdict, CI, each reviewer seat (on the head or not; findings when changes were requested), and next {who, what}: ci, you, operator, closer, release-controller or nobody. Only this wallet\'s own submissions are visible. A submission is never amended: a fix is a new submission_id.',
+    description: 'FLEETGATE: free: where your submission or review stands. When the payer can\'t pay yet (the daily consent used up), the answer says so in payment {refused, needed_dd, next} and this tool files ONE raise of your fleetgate daily consent for the owner to approve in the DemiPass app (ask {status: asked|raised|declined|expired}); the work waits at the door and resumes by itself once approved: nothing to work out, just keep following. where your submission stands. The release controller\'s own rules evaluated now on the PR\'s exact head: every check, the verdict, CI, each reviewer seat (on the head or not; findings when changes were requested), and next {who, what}: ci, you, operator, closer, release-controller or nobody. Only this wallet\'s own submissions are visible. A submission is never amended: a fix is a new submission_id.',
     inputSchema: { type: 'object', properties: {
       repo: { type: 'string', description: 'The repo under atlas/ you submitted to' },
       submission_id: { type: 'string', description: 'The submission_id fleetgate_submit returned' },
@@ -638,7 +709,7 @@ async function handleMessage(msg) {
   return { jsonrpc: '2.0', id, error: { code: -32601, message: `Method not found: ${method}` } };
 }
 
-module.exports = { handleMessage, _gitEnv: gitEnv, _reset: () => { held = null; consentSeen = null; doorCached = null; pendingCaps.clear(); } };
+module.exports = { handleMessage, _gitEnv: gitEnv, _reset: () => { held = null; consentSeen = null; doorCached = null; pendingCaps.clear(); asks.clear(); } };
 
 if (require.main === module) {
   // Messages are answered in order through one queue; stdin closing waits for the queue (a call in flight is answered).
