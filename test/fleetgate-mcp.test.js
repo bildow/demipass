@@ -25,7 +25,9 @@ const dpSrv = http.createServer(async (req, res) => {
     state.consentPosts.push(b);
     // a raise of an existing consent (the payment ask): approval 88, approved, declined or expired as the test says
     if (b.daily_cap_dd !== 5000 && b.daily_cap_dd !== 3000) {
-      if (!b.approval_id) return json(res, 202, { status: 'approval_pending', approval_id: 88, expires_at: '2026-11-18T00:00:00Z' });
+      if (!b.approval_id) { state.raiseFor = { service: b.service, daily_cap_dd: b.daily_cap_dd }; return json(res, 202, { status: 'approval_pending', approval_id: 88, expires_at: '2026-11-18T00:00:00Z' }); }
+      // redeeming binds to what was approved: the same id, service and cap (#35 r1, 4)
+      if (b.approval_id !== 88 || !state.raiseFor || b.service !== state.raiseFor.service || b.daily_cap_dd !== state.raiseFor.daily_cap_dd) return json(res, 409, { error: 'approval was for a different call' });
       if (state.raise === 'declined') return json(res, 403, { error: 'the owner declined this request' });
       if (state.raise === 'expired') return json(res, 410, { error: 'this request expired' });
       if (state.raise !== 'approved') return json(res, 202, { status: 'approval_pending', approval_id: 88 });
@@ -64,7 +66,7 @@ const doorSrv = http.createServer(async (req, res) => {
     const id = req.url.slice('/door/v1/reviews/'.length);
     const pay = (refused, ask) => ({ refused, needed_dd: 1589, resumable: true, ask, next: 'Your fleetgate daily consent is used up for today. The work waits and resumes by itself.' });
     if (id.startsWith('review-waiting-')) return json(res, 200, { ok: true, review_id: id, state: 'waiting_payment', next: { who: 'you', what: 'raise it' },
-      payment: pay('daily_cap', { kind: 'consent', service: 'fleetgate', more_dd: 1589 }) });
+      payment: pay('daily_cap', { kind: 'consent', service: 'fleetgate', more_dd: id === 'review-waiting-neg' ? -1 : 1589 }) });
     if (id === 'review-fund-01') return json(res, 200, { ok: true, review_id: id, state: 'waiting_payment', next: { who: 'you', what: 'fund it' },
       payment: { ...pay('insufficient', { kind: 'fund', more_dd: 1589 }), next: 'Fund it in the DemiPass app.' } });
     return id === 'review-known-01' ? json(res, 200, { ok: true, review_id: id, state: 'done', verdict: 'approved by all three seats', seats: [1, 2, 3], receipt_sha256: 'c'.repeat(64) })
@@ -793,5 +795,28 @@ test('a wallet short of funds: the next step is the owner\'s (fund it); no conse
   const n = state.consentPosts.length;
   const r = await call('fleetgate_follow', { review_id: 'review-fund-01' });
   assert.strictEqual(r.ask.status, 'yours'); assert.strictEqual(r.ask.kind, 'fund'); assert.strictEqual(state.consentPosts.length, n);
+  state.consents = saved; mcp._reset();
+});
+
+
+test('a declined raise is never re-filed from another refusal of the same wallet (#35 r1, 2)', async () => {
+  mcp._reset(); const saved = state.consents; state.consents = [{ id: 9, service: 'fleetgate', daily_cap_dd: 5000, status: 'active' }]; state.raise = null;
+  const fresh = () => state.consentPosts.filter(b => b.daily_cap_dd > 5000 && !b.approval_id).length;
+  const n0 = fresh();
+  let r = await call('fleetgate_follow', { review_id: 'review-waiting-11' }); assert.strictEqual(r.ask.status, 'asked');
+  r = await call('fleetgate_follow', { review_id: 'review-waiting-12' }); assert.strictEqual(r.ask.status, 'asked', 'B shares A\'s pending ask');
+  state.raise = 'declined';
+  r = await call('fleetgate_follow', { review_id: 'review-waiting-11' }); assert.strictEqual(r.ask.status, 'declined');
+  r = await call('fleetgate_follow', { review_id: 'review-waiting-12' }); assert.strictEqual(r.ask.status, 'declined', 'B sees the same decline');
+  r = await call('fleetgate_follow', { review_id: 'review-waiting-13' }); assert.strictEqual(r.ask.status, 'declined', 'a new refusal is not asked either');
+  assert.strictEqual(fresh(), n0 + 1, 'one card in all');
+  state.consents = saved; state.raise = null; mcp._reset();
+});
+
+
+test('an amount the door sends that is not a positive number is not trusted: the step\'s need sizes the raise (#35 r1, 3)', async () => {
+  mcp._reset(); const saved = state.consents; state.consents = [{ id: 9, service: 'fleetgate', daily_cap_dd: 5000, status: 'active' }]; state.raise = null;
+  const r = await call('fleetgate_follow', { review_id: 'review-waiting-neg' });
+  assert.strictEqual(r.ask.status, 'asked'); assert.strictEqual(r.ask.daily_cap_dd, 7000, 'current 5000 + needed 1589, to 500');
   state.consents = saved; mcp._reset();
 });

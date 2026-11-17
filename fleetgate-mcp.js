@@ -146,8 +146,12 @@ async function onboard({ daily_cap_dd, approval_id } = {}, { fileConsent = true 
 // then said, not filed).
 const AUTO_ASK = process.env.FLEETGATE_AUTO_ASK !== '0';
 const CONSENT_MAX_DD = 100000;
-const asks = new Map();   // `${wallet}|${subject}` → { wallet, subject, approval_id, daily_cap_dd, status: asked|raised|declined|expired, at }
+const NO_REASK_MS = 24 * 3600e3;   // after the owner declines (or lets expire) a raise, no automatic ask for a day
+// `${wallet}|${subject}` → the ask record. Subjects that meet the same pending ask share ONE record (the same object),
+// so its outcome, approved, declined or expired, is every subject's (#35 independent review 2).
+const asks = new Map();
 const askView = (a, extra = {}) => ({ status: a.status, ...(a.approval_id ? { approval_id: a.approval_id } : {}), daily_cap_dd: a.daily_cap_dd, ...extra });
+const posInt = (x) => { const n = Number(x); return Number.isFinite(n) && n > 0 ? Math.ceil(n) : 0; };   // #35 r1, 3
 async function payAsk(result, subject) {
   const p = result && result.payment;
   if (!p || !p.ask || !p.resumable) return result;
@@ -156,47 +160,54 @@ async function payAsk(result, subject) {
   const session = sessionToken(), wallet = subOf(session);
   if (!session || !wallet) return result;
   const api = dp(session), key = `${wallet}|${subject}`;
-  const mine = asks.get(key);
+  const walletAsks = () => [...new Set([...asks.values()].filter(a => a.wallet === wallet))];
   try {
-    // An ask already filed for this wallet (this episode, or another still waiting): redeem it if the owner approved.
-    const pend = mine && mine.status === 'asked' ? mine : [...asks.values()].find(a => a.wallet === wallet && a.status === 'asked');
+    // An ask already filed for this wallet and still waiting: this subject shares it; redeem it if the owner approved.
+    const pend = (asks.get(key) && asks.get(key).status === 'asked') ? asks.get(key) : walletAsks().find(a => a.status === 'asked');
     if (pend) {
+      asks.set(key, pend);
       checkAlive();
-      let c;
-      try { c = await consentAtLeast(api, { service: SERVICE, cap: pend.daily_cap_dd, explicit: true, approvalId: pend.approval_id }); }
+      let r;
+      try { r = await api.consent({ service: SERVICE, dailyCapDd: pend.daily_cap_dd, approvalId: pend.approval_id }); }
       catch (e) {
+        if (e.pending) return { ...result, ask: askView(pend, { next: `Waiting for the owner to approve "let a wallet pay fleetgate" at ${pend.daily_cap_dd} DD/day in the DemiPass app (approval ${pend.approval_id}). Nothing for you to do: keep following; the work resumes by itself once it is approved.` }) };
         if (e.status === 403 || e.status === 410) {
-          pend.status = e.status === 403 ? 'declined' : 'expired';
-          if (pend.subject !== subject) asks.set(key, { ...pend, subject });
+          pend.status = e.status === 403 ? 'declined' : 'expired'; pend.ended = Date.now();   // recorded even past the deadline
           return { ...result, ask: askView(pend, { next: `The owner ${pend.status === 'declined' ? 'declined' : 'did not answer'} the raise to ${pend.daily_cap_dd} DD/day (approval ${pend.approval_id}); it is not asked again. ${p.next}` }) };
         }
         throw e;
       }
-      checkAlive();
-      if (c.pending) return { ...result, ask: askView(pend, { next: `Waiting for the owner to approve "let a wallet pay fleetgate" at ${pend.daily_cap_dd} DD/day in the DemiPass app (approval ${pend.approval_id}). Nothing for you to do: keep following; the work resumes by itself once it is approved.` }) };
-      pend.status = 'raised'; consentSeen = c.consent || consentSeen;
-      if (pend.subject !== subject) asks.set(key, { ...pend, subject });
-      return { ...result, ask: askView(pend, { daily_cap_dd: (c.consent && c.consent.daily_cap_dd) || pend.daily_cap_dd,
+      // Approved and redeemed: recorded even if the deadline passed while DemiPass answered.
+      pend.status = 'raised'; pend.ended = Date.now();
+      consentSeen = { id: r.consent_id, service: r.service, daily_cap_dd: r.daily_cap_dd, status: 'active' };
+      return { ...result, ask: askView(pend, { daily_cap_dd: r.daily_cap_dd || pend.daily_cap_dd,
         next: 'The owner approved the raise. The work resumes by itself within 5 minutes; sending the same request again with the same id (fleetgate_review) resumes it now.' }) };
     }
-    if (mine) return { ...result, ask: askView(mine, { next: mine.status === 'raised' ? 'Raised already for this refusal; if the work still waits, the step needs more than the raise: the owner can file it with fleetgate_onboard {daily_cap_dd}.' : `${p.next}` }) };
-    // File the one ask for this episode.
+    const mine = asks.get(key);
+    if (mine) return { ...result, ask: askView(mine, { next: mine.status === 'raised' ? 'Raised already for this refusal; if the work still waits, the step needs more than the raise: the owner can file it with fleetgate_onboard {daily_cap_dd}.' : `The owner ${mine.status} the raise; it is not asked again. ${p.next}` }) };
+    // The owner said no (or let it lapse) to a raise for this wallet within a day: never ask again automatically.
+    const refusedLately = walletAsks().find(a => ['declined', 'expired'].includes(a.status) && Date.now() - (a.ended || 0) < NO_REASK_MS);
+    if (refusedLately) return { ...result, ask: askView(refusedLately, { next: `The owner ${refusedLately.status} a raise for this wallet within the last day; this server does not ask again. ${p.next}` }) };
+    // File the one ask for this episode: ONE request, checked against the deadline before it starts, and recorded
+    // whatever the deadline says once DemiPass answers, so a card that was filed is never forgotten (#35 r1, 1).
     checkAlive();
     const all = await api.consents();
-    checkAlive();
     const active = (all.mine || []).find(x => x.service === SERVICE && x.status === 'active');
     const current = active ? active.daily_cap_dd : 0;
-    const target = Math.min(CONSENT_MAX_DD, Math.ceil((current + (Number(p.ask.more_dd) || Number(p.needed_dd) || 500)) / 500) * 500);
+    const more = posInt(p.ask.more_dd) || posInt(p.needed_dd) || 500;
+    const target = Math.min(CONSENT_MAX_DD, Math.ceil((current + more) / 500) * 500);
     if (!(target > current)) return { ...result, ask: { status: 'at_max', daily_cap_dd: current, next: `The fleetgate daily consent is already at DemiPass's most (${current} DD): the step waits for tomorrow's allowance.` } };
-    const c = await consentAtLeast(api, { service: SERVICE, cap: target, explicit: true });
     checkAlive();
-    if (c.pending) {
-      const a = { wallet, subject, approval_id: c.pending.approval_id, daily_cap_dd: target, status: 'asked', at: new Date().toISOString() };
+    let r;
+    try { r = await api.consent({ service: SERVICE, dailyCapDd: target }); }
+    catch (e) {
+      if (!e.pending) throw e;
+      const a = { wallet, subject, approval_id: e.body.approval_id, daily_cap_dd: target, status: 'asked', at: new Date().toISOString() };
       asks.set(key, a); pendingCaps.set(Number(a.approval_id), target);
       return { ...result, ask: askView(a, { from_dd: current, next: `Asked the owner to raise the fleetgate daily consent from ${current} to ${target} DD/day: one approval in the DemiPass app (approval ${a.approval_id}). Nothing for you to do: keep following; the work resumes by itself once it is approved.` }) };
     }
-    const a = { wallet, subject, daily_cap_dd: (c.consent && c.consent.daily_cap_dd) || target, status: 'raised', at: new Date().toISOString() };
-    asks.set(key, a); consentSeen = c.consent || consentSeen;
+    const a = { wallet, subject, daily_cap_dd: r.daily_cap_dd || target, status: 'raised', at: new Date().toISOString(), ended: Date.now() };
+    asks.set(key, a); consentSeen = { id: r.consent_id, service: r.service, daily_cap_dd: r.daily_cap_dd, status: 'active' };
     return { ...result, ask: askView(a, { from_dd: current, next: 'Raised. The work resumes by itself within 5 minutes.' }) };
   } catch (e) {
     if (e && e.name === 'TimeoutError') throw e;
@@ -564,7 +575,7 @@ async function status() {
     onboarded: Boolean(live() && ready.ok), admission: admissionSeen, ...(ready.ok ? {} : { readiness: ready }),
     token_id: live() ? held.token_id : null, expires_at: live() ? held.expires_at : null,
     consent: consentSeen ? { id: consentSeen.id, daily_cap_dd: consentSeen.daily_cap_dd } : null,
-    ...((() => { const me = sessionSub(); const mine = [...asks.values()].filter(a => a.wallet === me); return mine.length ? { payment_asks: mine.map(a => ({ subject: a.subject, ...askView(a), at: a.at })) } : {}; })()),
+    ...((() => { const me = sessionSub(); const mine = [...new Map([...asks.entries()].filter(([, a]) => a.wallet === me)).entries()]; return mine.length ? { payment_asks: mine.map(([k, a]) => ({ subject: k.slice(k.indexOf('|') + 1), ...askView(a), at: a.at })) } : {}; })()),
     // Spend only as this very call's admission check verified it, and only if the held token still belongs to the
     // session's wallet once that check returns: never a cached figure (Codex connector P2 on #27), never across a switch
     // made while the check was in flight (#27 independent review, 3).
