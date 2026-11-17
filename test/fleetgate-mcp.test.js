@@ -820,3 +820,15 @@ test('an amount the door sends that is not a positive number is not trusted: the
   assert.strictEqual(r.ask.status, 'asked'); assert.strictEqual(r.ask.daily_cap_dd, 7000, 'current 5000 + needed 1589, to 500');
   state.consents = saved; mcp._reset();
 });
+
+
+test('a raise keeps the consent\'s Conduit opt-in, filed and redeemed alike (dustforge#131 review 2)', async () => {
+  mcp._reset(); const saved = state.consents; state.consents = [{ id: 9, service: 'fleetgate', daily_cap_dd: 5000, on_request_cap_dd: 500, status: 'active' }]; state.raise = null;
+  const n = state.consentPosts.length;
+  let r = await call('fleetgate_follow', { review_id: 'review-waiting-21' }); assert.strictEqual(r.ask.status, 'asked');
+  state.raise = 'approved';
+  r = await call('fleetgate_follow', { review_id: 'review-waiting-21' }); assert.strictEqual(r.ask.status, 'raised');
+  const posts = state.consentPosts.slice(n).filter(b => b.daily_cap_dd === 7000);
+  assert.strictEqual(posts.length, 2, 'filed, then redeemed'); assert.ok(posts.every(b => b.on_request_cap_dd === 500), JSON.stringify(posts));
+  state.consents = saved; state.raise = null; mcp._reset();
+});

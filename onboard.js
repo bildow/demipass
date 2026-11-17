@@ -122,7 +122,10 @@ function registerMcp({ slug, file, mcpConfig = DEFAULT_MCP_CONFIG, did }) {
 async function consentAtLeast(dp, { service, cap, explicit, approvalId }) {
   const c = await dp.ensureConsent({ service, dailyCapDd: cap, approvalId });
   if (c.pending || !explicit || c.consent.daily_cap_dd >= cap) return c;
-  try { const r = await dp.consent({ service, dailyCapDd: cap, approvalId }); return { consent: { id: r.consent_id, service: r.service, daily_cap_dd: r.daily_cap_dd, status: 'active' }, existing: false }; }
+  // A raise keeps the consent's Conduit opt-in: filed without on_request_cap_dd it would end the requests it covers
+  // (dustforge#131 review 2).
+  const keep = Number.isInteger(c.consent.on_request_cap_dd) && c.consent.on_request_cap_dd > 0 ? c.consent.on_request_cap_dd : undefined;
+  try { const r = await dp.consent({ service, dailyCapDd: cap, approvalId, onRequestCapDd: keep }); return { consent: { id: r.consent_id, service: r.service, daily_cap_dd: r.daily_cap_dd, status: 'active' }, existing: false }; }
   catch (e) {
     if (!e.pending) throw e;
     return { pending: { approval_id: e.body.approval_id, expires_at: e.body.expires_at || null, daily_cap_dd: cap, replaces: c.consent.id } };

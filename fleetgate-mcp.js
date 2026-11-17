@@ -168,7 +168,7 @@ async function payAsk(result, subject) {
       asks.set(key, pend);
       checkAlive();
       let r;
-      try { r = await api.consent({ service: SERVICE, dailyCapDd: pend.daily_cap_dd, approvalId: pend.approval_id }); }
+      try { r = await api.consent({ service: SERVICE, dailyCapDd: pend.daily_cap_dd, approvalId: pend.approval_id, onRequestCapDd: pend.on_request_cap_dd }); }
       catch (e) {
         if (e.pending) return { ...result, ask: askView(pend, { next: `Waiting for the owner to approve "let a wallet pay fleetgate" at ${pend.daily_cap_dd} DD/day in the DemiPass app (approval ${pend.approval_id}). Nothing for you to do: keep following; the work resumes by itself once it is approved.` }) };
         if (e.status === 403 || e.status === 410) {
@@ -199,10 +199,12 @@ async function payAsk(result, subject) {
     if (!(target > current)) return { ...result, ask: { status: 'at_max', daily_cap_dd: current, next: `The fleetgate daily consent is already at DemiPass's most (${current} DD): the step waits for tomorrow's allowance.` } };
     checkAlive();
     let r;
-    try { r = await api.consent({ service: SERVICE, dailyCapDd: target }); }
+    // The raise keeps the consent's Conduit opt-in (dustforge#131 review 2): without it an approved raise would end it.
+    const keepOptIn = active && Number.isInteger(active.on_request_cap_dd) && active.on_request_cap_dd > 0 ? active.on_request_cap_dd : undefined;
+    try { r = await api.consent({ service: SERVICE, dailyCapDd: target, onRequestCapDd: keepOptIn }); }
     catch (e) {
       if (!e.pending) throw e;
-      const a = { wallet, subject, approval_id: e.body.approval_id, daily_cap_dd: target, status: 'asked', at: new Date().toISOString() };
+      const a = { wallet, subject, approval_id: e.body.approval_id, daily_cap_dd: target, ...(keepOptIn ? { on_request_cap_dd: keepOptIn } : {}), status: 'asked', at: new Date().toISOString() };
       asks.set(key, a); pendingCaps.set(Number(a.approval_id), target);
       return { ...result, ask: askView(a, { from_dd: current, next: `Asked the owner to raise the fleetgate daily consent from ${current} to ${target} DD/day: one approval in the DemiPass app (approval ${a.approval_id}). Nothing for you to do: keep following; the work resumes by itself once it is approved.` }) };
     }
