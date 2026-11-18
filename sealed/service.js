@@ -92,7 +92,11 @@ async function main() {
     (body) =>
       cfg.role === "guardian"
         ? service.release(body)
-        : service.release(body.request, body.payer_token),
+        : body.operation === "dispute"
+          ? service.dispute(body.request, body.payer_token, body.complaint)
+          : (body.operation === undefined || body.operation === "release")
+            ? service.release(body.request, body.payer_token)
+            : Promise.reject(Error("unknown coordinator operation")),
     { token: cfg.transport_token, port: cfg.port || 0, fixture: true },
   );
   console.log(
