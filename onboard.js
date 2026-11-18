@@ -25,6 +25,7 @@
  */
 const fs = require('fs');
 const os = require('os');
+const { execFileSync } = require('child_process');
 const path = require('path');
 const { services } = require('./services.js');
 
@@ -132,7 +133,7 @@ async function consentAtLeast(dp, { service, cap, explicit, approvalId }) {
   }
 }
 
-async function onboardService({ service, capDd, approvalId, wait = true, waitMs = 15 * 60 * 1000, mcpConfig = DEFAULT_MCP_CONFIG, register = true, log = () => {} } = {}) {
+async function onboardService({ service, capDd, approvalId, wait = true, waitMs = 15 * 60 * 1000, mcpConfig = DEFAULT_MCP_CONFIG, register = true, rulesPermission = true, log = () => {} } = {}) {
   const slug = String(service || '').toLowerCase();
   if (!SLUG_RE.test(slug)) return { ok: false, error: 'service: a registered service slug (demipass-onboard --list)' };
   let t;
@@ -140,6 +141,12 @@ async function onboardService({ service, capDd, approvalId, wait = true, waitMs 
   catch (e) { return { ok: false, error: e.status === 404 ? `no service "${slug}" (demipass-onboard --list)` : e.message }; }
   const token = sessionTokenAny(mcpConfig);
   if (!token) return { ok: false, error: 'no DemiPass session on this machine: sign in first (demipass_login, or set DEMIPASS_TOKEN)' };
+  // The owner's permission to write agent instruction files comes before any pane or agent is attached (Aaron
+  // 2026-11-18: "this must be enabled to use this feature"). The app asks for it the first time Fleet is opened.
+  if (rulesPermission) {
+    const perm = await paneRulesPermission(token);
+    if (!perm.enabled) return { ok: false, status: 'needs_permission', error: `"Write agent instruction files" is not enabled for ${perm.person || 'this wallet'}: DemiPass writes one block of rules into AGENTS.md and CLAUDE.md of the projects you onboard panes and agents into, and must be allowed to before a pane or agent is onboarded. ${perm.next}` };
+  }
   const dp = services({ token, baseUrl: API });
 
   // One call must fit the daily consent: default to 5 of the dearest open action, at least 300 and at most 10,000 DD
@@ -200,13 +207,27 @@ const PANE_RULES = `DemiPass pane rules (v${PANE_RULES_VERSION}):
 - A spend, cost, funding, consent or access question is never asked in chat. File the DemiPass request that carries it and follow it: a multi-step spend → demipass_spend_ask (one card with every step and the total); a service's payment refused as insufficient → its fund ask (fleetgate_follow files it); a consent → the consent call; an agent wallet → the fleet's token request (the card shows its cost); a secret → demipass_use / demipass_onboard. The owner's approval on their phone IS the confirmation. Ask in chat only when no request type fits, and say which you tried.
 - Park on a 202 and follow it (approval_id); do not retry in a loop and do not re-ask. A pending card is the owner's to answer; the work resumes by itself once it is approved or funded.
 - Never print a token, password or secret value, and never type one into chat.`;
+const PANE_RULES_SHA256 = require('crypto').createHash('sha256').update(PANE_RULES).digest('hex');   // fixed in the package, changed by PR only
 const PANE_RULES_BEGIN = '<!-- demipass-pane-rules:begin -->', PANE_RULES_END = '<!-- demipass-pane-rules:end -->';
-function paneRulesBlock() { return `${PANE_RULES_BEGIN}\n## DemiPass\n\n${PANE_RULES}\n${PANE_RULES_END}\n`; }
+function paneRulesBlock() { return `${PANE_RULES_BEGIN}\n## DemiPass\n\n${PANE_RULES}\n\n(demipass pane rules v${PANE_RULES_VERSION}, sha256 ${PANE_RULES_SHA256.slice(0, 16)}; written by demipass-onboard with the owner's permission "Write agent instruction files")\n${PANE_RULES_END}\n`; }
+// Is <file> tracked by git in <dir>? A tracked instruction file is someone's tree (Brain's, a shared repo's): written
+// only when asked (tracked: true). No git, or not a repository: not tracked.
+function gitTracked(dir, file) {
+  try { execFileSync('git', ['-C', dir, 'ls-files', '--error-unmatch', '--', file], { stdio: ['ignore', 'ignore', 'ignore'] }); return true; } catch (_) { return false; }
+}
+// The owner's permission (dustforge wallet_settings "Write agent instruction files"), read with the pane's session:
+// → {enabled, next}. Without a session nothing can be checked: not enabled.
+async function paneRulesPermission(token) {
+  if (!token) return { enabled: false, next: 'no DemiPass session on this machine' };
+  const r = await require('./http-json').requestJson('GET', `${API}/api/identity/pane-rules`, { headers: { accept: 'application/json', authorization: 'Bearer ' + token }, timeoutMs: 15000 });
+  if (!r.ok) return { enabled: false, next: `could not read the permission (HTTP ${r.status})`, status: r.status };
+  return { enabled: !!(r.data && r.data.enabled), next: (r.data && r.data.next) || '', person: r.data && r.data.person };
+}
 // Writes the block into <dir>/AGENTS.md and <dir>/CLAUDE.md (creating a file that is missing). Returns what changed.
 // Never into the home directory (Claude Code loads ~/CLAUDE.md for every session: a package must not put rules there;
 // #38 review), never through a symlink (the target is written once, where it lives), never over a directory; a
 // failed write leaves no temp file; an existing file keeps its mode.
-function installPaneRules(dir = process.cwd(), { files = ['AGENTS.md', 'CLAUDE.md'] } = {}) {
+function installPaneRules(dir = process.cwd(), { files = ['AGENTS.md', 'CLAUDE.md'], tracked = false } = {}) {
   const out = [];
   let home = ''; try { home = fs.realpathSync(os.homedir()); } catch (_) {}
   let real = dir; try { real = fs.realpathSync(dir); } catch (_) {}
@@ -222,6 +243,7 @@ function installPaneRules(dir = process.cwd(), { files = ['AGENTS.md', 'CLAUDE.m
       if (path.dirname(p) !== real) { out.push({ file: p, skipped: 'a symlink out of the project' }); continue; }
     }
     if (st && !st.isFile()) { out.push({ file: p, skipped: 'not a regular file' }); continue; }
+    if (st && !tracked && gitTracked(real, path.basename(p))) { out.push({ file: p, skipped: 'tracked by git (a shared tree); pass --rules-tracked to write it' }); continue; }
     if (seen.has(p)) { out.push({ file: p, changed: false, same_as: 'an earlier file' }); continue; }
     seen.add(p);
     let cur = ''; if (st) cur = fs.readFileSync(p, 'utf8');
@@ -234,12 +256,18 @@ function installPaneRules(dir = process.cwd(), { files = ['AGENTS.md', 'CLAUDE.m
     const tmp = p + '.tmp-' + process.pid;
     try { fs.writeFileSync(tmp, next, { mode: 0o644 }); if (st) fs.chmodSync(tmp, st.mode & 0o777); fs.renameSync(tmp, p); }
     catch (e) { try { fs.unlinkSync(tmp); } catch (_) {} throw e; }
-    out.push({ file: p, changed: true, created: !st });
+    out.push({ file: p, changed: true, created: !st, lines: block.split('\n').length - 1 });
   }
   return out;
 }
+// The permission first, then the files: what demipass-onboard runs after attaching a server, and `--rules`.
+async function installPaneRulesWithPermission(dir, token, opts = {}) {
+  const perm = await paneRulesPermission(token);
+  if (!perm.enabled) return { written: false, permission: perm, next: perm.next || 'Enable "Write agent instruction files" in the DemiPass app (Settings → Agents).' };
+  return { written: true, version: PANE_RULES_VERSION, sha256: PANE_RULES_SHA256, files: installPaneRules(dir, opts), block: paneRulesBlock() };
+}
 
-module.exports = { onboardService, listServices, resolveMcpServer, registerMcp, sessionToken, consentAtLeast, installPaneRules, PANE_RULES, PANE_RULES_VERSION };
+module.exports = { onboardService, listServices, resolveMcpServer, registerMcp, sessionToken, consentAtLeast, installPaneRules, installPaneRulesWithPermission, paneRulesPermission, gitTracked, PANE_RULES, PANE_RULES_VERSION, PANE_RULES_SHA256 };
 
 if (require.main === module) {
   const a = process.argv.slice(2);
@@ -247,11 +275,13 @@ if (require.main === module) {
   (async () => {
     if (a[0] === '--list' || !a[0]) { console.log(JSON.stringify(await listServices(), null, 2)); return; }
     // demipass-onboard --rules [dir]: install the pane rules into that project's AGENTS.md and CLAUDE.md, nothing else.
-    if (a[0] === '--rules') { console.log(JSON.stringify(installPaneRules(a[1] || process.cwd()), null, 2)); return; }
+    if (a[0] === '--rules') { const d = a[1] && !a[1].startsWith('--') ? a[1] : process.cwd();
+      const r = await installPaneRulesWithPermission(d, sessionTokenAny(opt('--mcp-config') || DEFAULT_MCP_CONFIG), { tracked: a.includes('--rules-tracked') });
+      console.log(JSON.stringify(r, null, 2)); process.exit(r.written ? 0 : 3); }
     const r = await onboardService({ service: a[0], capDd: opt('--cap') ? Number(opt('--cap')) : undefined, approvalId: opt('--approval') ? Number(opt('--approval')) : undefined,
       wait: !a.includes('--no-wait'), mcpConfig: opt('--mcp-config') || DEFAULT_MCP_CONFIG, log: m => console.error(m) });
     // An onboarding that attached a server also installs the pane rules into the current project (--no-rules skips).
-    if (r.ok && !a.includes('--no-rules')) { try { r.pane_rules = installPaneRules(process.cwd()); } catch (e) { r.pane_rules_error = e.message; } }
+    if (r.ok && !a.includes('--no-rules')) { try { r.pane_rules = await installPaneRulesWithPermission(process.cwd(), sessionTokenAny(opt('--mcp-config') || DEFAULT_MCP_CONFIG), { tracked: a.includes('--rules-tracked') }); } catch (e) { r.pane_rules_error = e.message; } }
     console.log(JSON.stringify(r, null, 2));
     process.exit(r.ok ? 0 : (r.status === 'approval_pending' ? 3 : 1));
   })().catch(e => { console.error('demipass-onboard:', e.message); process.exit(1); });

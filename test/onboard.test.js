@@ -33,6 +33,7 @@ const srv = http.createServer((req, res) => {
     }
     if (req.headers.authorization !== 'Bearer ' + SESSION) return j(401, { error: 'bad session' });
     if(req.url==='/api/services/token' && req.method==='POST')return j(201,{token:'service-admission-probe',token_id:'probe',expires_at:new Date(Date.now()+300000).toISOString()});
+    if (req.method === 'GET' && req.url === '/api/identity/pane-rules') return j(200, { ok: true, enabled: st.rulesEnabled !== false, person: 'you', ...(st.rulesEnabled === false ? { next: 'Enable "Write agent instruction files" in the DemiPass app (Settings → Agents).' } : {}) });
     if (req.method === 'GET' && req.url === '/api/services/consents') return j(200, { ok: true, mine: st.consents });
     if (req.method === 'POST' && req.url === '/api/services/consent') {
       st.posts.push(body);
@@ -240,4 +241,36 @@ test('installPaneRules: never the home directory, never through a symlink twice,
   assert.ok(r2.find(x => /CLAUDE\.md$/.test(x.file)).skipped && fs.existsSync(path.join(d2, 'AGENTS.md')));
   assert.ok(!fs.readdirSync(d2).some(f => f.includes('.tmp-')), 'no temp file left');
   fs.rmSync(dir, { recursive: true, force: true }); fs.rmSync(d2, { recursive: true, force: true });
+});
+
+
+test('onboarding refuses to attach a pane or agent until "Write agent instruction files" is enabled; --rules checks it too; tracked files are skipped; the block carries the hash', async () => {
+  const { onboardService, installPaneRulesWithPermission, installPaneRules, PANE_RULES_SHA256 } = require('../onboard.js');
+  const cfg = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'dp-perm-')), 'mcp.json');
+  st.rulesEnabled = false; st.consents = [{ id: 1, service: 'fleetgate', daily_cap_dd: 5000, status: 'active' }];
+  let r = await onboardService({ service: 'fleetgate', wait: false, mcpConfig: cfg, log: () => {} });
+  assert.strictEqual(r.ok, false); assert.strictEqual(r.status, 'needs_permission'); assert.match(r.error, /Write agent instruction files/);
+  assert.ok(!fs.existsSync(cfg), 'nothing attached without the permission');
+  r = await installPaneRulesWithPermission(fs.mkdtempSync(path.join(os.tmpdir(), 'dp-perm2-')), SESSION);
+  assert.strictEqual(r.written, false); assert.match(r.next, /DemiPass app/);
+  r = await installPaneRulesWithPermission(fs.mkdtempSync(path.join(os.tmpdir(), 'dp-perm3-')), null);
+  assert.strictEqual(r.written, false, 'no session: not enabled');
+  st.rulesEnabled = true;
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'dp-perm4-'));
+  r = await installPaneRulesWithPermission(d, SESSION);
+  assert.strictEqual(r.written, true); assert.strictEqual(r.sha256, PANE_RULES_SHA256);
+  const a = fs.readFileSync(path.join(d, 'AGENTS.md'), 'utf8');
+  assert.ok(a.includes('sha256 ' + PANE_RULES_SHA256.slice(0, 16)) && a.includes('with the owner\'s permission'), 'the block names its version and hash');
+  // a git-tracked instruction file (someone's tree, e.g. Brain's) is skipped unless asked for
+  const g = fs.mkdtempSync(path.join(os.tmpdir(), 'dp-perm5-'));
+  const { execFileSync } = require('child_process');
+  execFileSync('git', ['-C', g, 'init', '-q']); fs.writeFileSync(path.join(g, 'CLAUDE.md'), 'tracked tree\n'); execFileSync('git', ['-C', g, 'add', 'CLAUDE.md']);
+  let rr = installPaneRules(g);
+  assert.ok(rr.find(x => /CLAUDE\.md$/.test(x.file) && /tracked by git/.test(x.skipped || '')), JSON.stringify(rr));
+  assert.strictEqual(fs.readFileSync(path.join(g, 'CLAUDE.md'), 'utf8'), 'tracked tree\n');
+  assert.ok(fs.existsSync(path.join(g, 'AGENTS.md')), 'an untracked file is still written');
+  rr = installPaneRules(g, { tracked: true });
+  assert.ok(rr.find(x => /CLAUDE\.md$/.test(x.file) && x.changed), 'asked for: written');
+  for (const x of [d, g, path.dirname(cfg)]) fs.rmSync(x, { recursive: true, force: true });
+  delete st.rulesEnabled;
 });
