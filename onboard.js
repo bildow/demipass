@@ -213,9 +213,14 @@ function installPaneRules(dir = process.cwd(), { files = ['AGENTS.md', 'CLAUDE.m
   if (home && real === home) return [{ dir, skipped: 'the home directory: rules go into a project, not into every session' }];
   const seen = new Set();
   for (const name of files) {
-    let p = path.join(dir, name);
+    let p = path.join(real, name);
     let st = null; try { st = fs.lstatSync(p); } catch (_) {}
-    if (st && st.isSymbolicLink()) { try { p = fs.realpathSync(p); st = fs.lstatSync(p); } catch (_) { out.push({ file: p, skipped: 'a dangling symlink' }); continue; } }
+    if (st && st.isSymbolicLink()) {
+      try { p = fs.realpathSync(p); st = fs.lstatSync(p); } catch (_) { out.push({ file: p, skipped: 'a dangling symlink' }); continue; }
+      // A symlink out of the project (CLAUDE.md -> ~/CLAUDE.md is common) is never followed: nothing is written
+      // outside `dir` (#38 re-review).
+      if (path.dirname(p) !== real) { out.push({ file: p, skipped: 'a symlink out of the project' }); continue; }
+    }
     if (st && !st.isFile()) { out.push({ file: p, skipped: 'not a regular file' }); continue; }
     if (seen.has(p)) { out.push({ file: p, changed: false, same_as: 'an earlier file' }); continue; }
     seen.add(p);
@@ -227,7 +232,7 @@ function installPaneRules(dir = process.cwd(), { files = ['AGENTS.md', 'CLAUDE.m
     else next = (cur ? cur.replace(/\s*$/, '\n\n') : '') + block;
     if (next === cur) { out.push({ file: p, changed: false }); continue; }
     const tmp = p + '.tmp-' + process.pid;
-    try { fs.writeFileSync(tmp, next, { mode: st ? (st.mode & 0o777) : 0o644 }); fs.renameSync(tmp, p); }
+    try { fs.writeFileSync(tmp, next, { mode: 0o644 }); if (st) fs.chmodSync(tmp, st.mode & 0o777); fs.renameSync(tmp, p); }
     catch (e) { try { fs.unlinkSync(tmp); } catch (_) {} throw e; }
     out.push({ file: p, changed: true, created: !st });
   }

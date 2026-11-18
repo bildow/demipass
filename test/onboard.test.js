@@ -226,6 +226,14 @@ test('installPaneRules: never the home directory, never through a symlink twice,
   const c = fs.readFileSync(path.join(dir, 'CLAUDE.md'), 'utf8');
   assert.strictEqual((c.match(/demipass-pane-rules:begin/g) || []).length, 1, 'the shared target is written once');
   assert.ok(r.some(x => x.same_as) && c.startsWith('shared\n') && c.includes(PANE_RULES));
+  const d3 = fs.mkdtempSync(path.join(os.tmpdir(), 'dp-rules4-')), outside = path.join(d3, 'elsewhere.md');
+  fs.writeFileSync(outside, 'home file\n'); const d4 = fs.mkdtempSync(path.join(os.tmpdir(), 'dp-rules5-'));
+  fs.symlinkSync(outside, path.join(d4, 'CLAUDE.md'));
+  const r3 = installPaneRules(d4);
+  assert.ok(r3.find(x => x.skipped === 'a symlink out of the project'), JSON.stringify(r3));
+  assert.strictEqual(fs.readFileSync(outside, 'utf8'), 'home file\n', 'a symlink out of the project is not followed');
+  assert.ok(fs.existsSync(path.join(d4, 'AGENTS.md')));
+  fs.rmSync(d3, { recursive: true, force: true }); fs.rmSync(d4, { recursive: true, force: true });
   const d2 = fs.mkdtempSync(path.join(os.tmpdir(), 'dp-rules3-'));
   fs.mkdirSync(path.join(d2, 'CLAUDE.md'));
   const r2 = installPaneRules(d2);
