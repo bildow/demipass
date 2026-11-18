@@ -166,6 +166,7 @@ async function payAsk(result, subject) {
 async function payAskInner(result, subject) {
   const p = result && result.payment;
   if (!p || !p.ask || !p.resumable) return result;
+  if (p.ask.kind === 'fund') return fundAsk(result, subject, p);
   if (p.ask.kind !== 'consent') return { ...result, ask: { status: 'yours', kind: p.ask.kind, next: p.next } };
   if (!AUTO_ASK) return { ...result, ask: { status: 'off', next: `${p.next} (FLEETGATE_AUTO_ASK=0: file it yourself with fleetgate_onboard {daily_cap_dd}).` } };
   const session = sessionToken(), wallet = subOf(session);
@@ -243,6 +244,55 @@ async function payAskInner(result, subject) {
   } catch (e) {
     if (e && e.name === 'TimeoutError') throw e;
     return { ...result, ask: { status: 'error', error: String((e && e.message) || e).slice(0, 200), next: p.next } };
+  }
+}
+
+// A `fund` refusal (the paying wallet is short, dustforge#131's raise): file ONE fund ask on that wallet
+// (POST /api/billing/fund-asks, dustforge#133), a card the owner sees in the DemiPass app and on the phone, which closes
+// by itself once the balance covers the need. Before this the pane was handed a sentence and DemiPass held nothing
+// (Aaron 2026-11-18: "The app doesn't hold the request anywhere"). One filing per refusal episode (wallet + subject) per
+// process; later follows read its status instead of filing again. It moves no DD: the owner funds the wallet.
+const fundAsks = new Map();   // `${wallet}|${subject}` → { notice_id, status }
+const FUND_SUBJECT_RE = /[^A-Za-z0-9._#@+-]/g;   // what DemiPass accepts in a subject (no ':' or '/': never a link)
+async function fundAsk(result, subject, p) {
+  if (!AUTO_ASK) return { ...result, ask: { status: 'off', kind: 'fund', next: `${p.next} (FLEETGATE_AUTO_ASK=0: nothing was filed.)` } };
+  const session = sessionToken(), wallet = subOf(session);
+  if (!session || !wallet) return { ...result, ask: { status: 'yours', kind: 'fund', next: p.next } };
+  const key = `${wallet}|${subject}`, mine = fundAsks.get(key);
+  const say = (a, next) => ({ ...result, ask: { status: a.status, kind: 'fund', ...(a.notice_id ? { notice_id: a.notice_id } : {}), next } });
+  try {
+    if (mine && mine.notice_id) {
+      checkAlive();
+      const r = await http('GET', `${DEMIPASS_URL}/api/billing/fund-asks/${mine.notice_id}`, { auth: session });
+      const st = r.status === 200 && r.data && r.data.fund_ask ? r.data.fund_ask.status : null;
+      if (st) mine.status = st === 'open' ? 'asked' : st;
+      if (mine.status === 'asked') return say(mine, `Waiting for the owner to fund the wallet (${r.data.fund_ask.short_dd} DD short; card ${mine.notice_id} in the DemiPass app). Nothing for you to do: keep following; the work resumes by itself once it is funded.`);
+      if (mine.status === 'covered') return say(mine, 'The wallet now covers it. The work resumes by itself within minutes; nothing to file.');
+      return say(mine, `The owner ${mine.status === 'dismissed' ? 'dismissed' : 'let lapse'} the fund ask (card ${mine.notice_id}); it is not filed again. ${p.next}`);
+    }
+    // One in flight at a time; a filing whose answer never came is retried after 30 s (DemiPass keeps one card per work
+    // key, so a second POST updates that card, never doubles it).
+    if (mine && mine.status === 'filing' && Date.now() - mine.started < 30e3) return say(mine, 'A fund ask is being filed; nothing more is filed meanwhile. Keep following.');
+    // Settled without a card to follow (the owner dismissed asks, or the wallet already covered it): never filed again.
+    if (mine && mine.status !== 'filing') return say(mine, mine.status === 'covered' ? 'The wallet covers it. The work resumes by itself within minutes; nothing to file.' : `The owner dismissed fund asks for this wallet within the last day; it is not filed again. ${p.next}`);
+    const need = posInt(p.needed_dd);
+    if (!need) return { ...result, ask: { status: 'yours', kind: 'fund', next: p.next } };
+    const a = { status: 'filing', started: Date.now() }; fundAsks.set(key, a);
+    const body = { need_dd: need, service: SERVICE, subject: String(subject).replace(FUND_SUBJECT_RE, '-').replace(/^[^A-Za-z0-9]+/, '').slice(0, 80) || 'work',
+      ...(p.lapses_at ? { lapses_at: p.lapses_at } : {}), from: 'fleetgate pane' };
+    checkAlive();
+    const r = await http('POST', `${DEMIPASS_URL}/api/billing/fund-asks`, { auth: session, body });
+    if (r.status === 202 && r.data && r.data.notice_id) {
+      Object.assign(a, { status: 'asked', notice_id: r.data.notice_id });
+      return say(a, `Asked the owner to fund the wallet: ${r.data.short_dd} DD short (card ${a.notice_id} in the DemiPass app, and a phone notification). Nothing for you to do: keep following; the work resumes by itself once it is funded.`);
+    }
+    if (r.status === 200 && r.data && r.data.covered) { a.status = 'covered'; return say(a, 'The wallet already covers it. The work resumes by itself within minutes.'); }
+    if (r.status === 409 && r.data && r.data.dismissed) { a.status = 'dismissed'; return say(a, `The owner dismissed a fund ask for this work within the last day; it is not filed again. ${p.next}`); }
+    fundAsks.delete(key);   // nothing was filed (an older DemiPass without the route, a cap): say the next step, as before
+    return { ...result, ask: { status: 'yours', kind: 'fund', next: p.next, ...(r.data && r.data.error ? { not_filed: String(r.data.error).slice(0, 200) } : {}) } };
+  } catch (e) {
+    if (e && e.name === 'TimeoutError') throw e;
+    return { ...result, ask: { status: 'error', kind: 'fund', error: String((e && e.message) || e).slice(0, 200), next: p.next } };
   }
 }
 
@@ -704,7 +754,7 @@ const TOOLS = [
       repo: { type: 'string', description: 'Repo name under atlas/ (e.g. boltcluster)' },
       paths: { type: 'array', items: { type: 'string' }, description: 'The repository paths you would submit (1-20)' } } } },
   { name: 'fleetgate_follow',
-    description: 'FLEETGATE: free: where your submission or review stands. When the payer can\'t pay yet (the daily consent used up), the answer says so in payment {refused, needed_dd, next} and this tool files ONE raise of your fleetgate daily consent for the owner to approve in the DemiPass app (ask {status: asked|raised|declined|expired}); the work waits at the door and resumes by itself once approved: nothing to work out, just keep following. where your submission stands. The release controller\'s own rules evaluated now on the PR\'s exact head: every check, the verdict, CI, each reviewer seat (on the head or not; findings when changes were requested), and next {who, what}: ci, you, operator, closer, release-controller or nobody. Only this wallet\'s own submissions are visible. A submission is never amended: a fix is a new submission_id.',
+    description: 'FLEETGATE: free: where your submission or review stands. When the payer can\'t pay yet (the daily consent used up), the answer says so in payment {refused, needed_dd, next} and this tool files ONE raise of your fleetgate daily consent for the owner to approve in the DemiPass app (ask {status: asked|raised|declined|expired}); when the paying wallet is short of funds it files ONE fund ask instead, a card the owner funds in the app (ask {kind: fund, status: asked|covered|dismissed|lapsed}); the work waits at the door and resumes by itself once approved: nothing to work out, just keep following. where your submission stands. The release controller\'s own rules evaluated now on the PR\'s exact head: every check, the verdict, CI, each reviewer seat (on the head or not; findings when changes were requested), and next {who, what}: ci, you, operator, closer, release-controller or nobody. Only this wallet\'s own submissions are visible. A submission is never amended: a fix is a new submission_id.',
     inputSchema: { type: 'object', properties: {
       repo: { type: 'string', description: 'The repo under atlas/ you submitted to' },
       submission_id: { type: 'string', description: 'The submission_id fleetgate_submit returned' },
@@ -751,7 +801,7 @@ async function handleMessage(msg) {
   return { jsonrpc: '2.0', id, error: { code: -32601, message: `Method not found: ${method}` } };
 }
 
-module.exports = { handleMessage, _gitEnv: gitEnv, _reset: () => { held = null; consentSeen = null; doorCached = null; pendingCaps.clear(); asks.clear(); } };
+module.exports = { handleMessage, _gitEnv: gitEnv, _reset: () => { held = null; consentSeen = null; doorCached = null; pendingCaps.clear(); asks.clear(); fundAsks.clear(); } };
 
 if (require.main === module) {
   // Messages are answered in order through one queue; stdin closing waits for the queue (a call in flight is answered).
