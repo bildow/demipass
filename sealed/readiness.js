@@ -12,9 +12,12 @@ const LIMITS = [
   "Fixture results cannot establish production deployment or model receipt/read behavior.",
 ];
 const LIVE_GATES = ["independent_custodian_selection", "live_service_implementation_and_review",
-  "live_mcp_release_integration", "installed_source_and_config_proof", "independent_live_acceptance"];
+  "live_mcp_release_integration", "installed_source_and_config_proof", "independent_live_acceptance",
+  "brain_inbound_policy_and_tests"];
 function result(now) {
   return { format: FORMAT, status: "hold", checked_at: now, live_guardian_release: false,
+    brain_inbound: { state: "hold", enabled: false, reason: "missing_verified_inbound_policy_and_tests",
+      tome_commit: null, server_enforcement: "not_verified" },
     checks: [], participants: [], deployment_blockers: [...LIVE_GATES], limits: [...LIMITS] };
 }
 function sourceDigest(root = path.resolve(__dirname, "..")) {

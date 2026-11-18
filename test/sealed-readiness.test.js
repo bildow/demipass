@@ -16,12 +16,15 @@ async function sample(){
 test("pinned Brain/Claude/Codex and current signed evidence produce inspection only, with no mutation",async()=>{
  const f=await sample(),before=JSON.stringify(f.config),got=r.inspect(f);
  assert.equal(got.status,"fixture_evidence_current_live_disabled");assert.equal(got.live_guardian_release,false);
+ assert.deepEqual(got.brain_inbound,{state:"hold",enabled:false,reason:"missing_verified_inbound_policy_and_tests",tome_commit:null,server_enforcement:"not_verified"});
+ assert(got.deployment_blockers.includes("brain_inbound_policy_and_tests"));
  assert.deepEqual(got.participants.map(x=>x.role),r.ROLES);assert(got.deployment_blockers.includes("live_mcp_release_integration"));
  assert.equal(JSON.stringify(f.config),before);assert.equal(f.config.previous,null);
  assert.equal(got.digest_format,"sha256-canonical-json-v1");assert.equal(got.config_canonical_sha256,p.hash(f.config));assert.equal(got.evidence_canonical_sha256,p.hash(f.evidence));
 });
 test("missing setup lists missing custody without creating identity or adopting applicants' pins",()=>{
  const got=r.inspect({config:null,evidence:null,now:10});assert.equal(got.status,"hold");assert.equal(got.live_guardian_release,false);
+ assert.equal(got.brain_inbound.enabled,false);assert.equal(got.brain_inbound.state,"hold");
  const cfg={format:r.FORMAT,participants:r.ROLES.map(role=>({role,mailbox:role,public_key:null})),source_sha256:null,policy:null,trusted:[],previous:null};
  const out=r.inspect({config:cfg,evidence:{trusted:"untrusted"},now:10});assert.equal(out.status,"hold");assert(out.checks.some(x=>x.id==="guardian_evidence"&&x.state==="missing"));
 });
@@ -43,6 +46,22 @@ test("participant signing keys cannot be reused as guardian or enrollment author
  issuer.config.trusted[0].issuer_key=issuer.config.participants[0].public_key.sign;
  assert.equal(r.inspect(guardian).status,"hold");assert.equal(r.inspect(issuer).status,"hold");
 });
+test("valid signatures cannot reuse guardian signing, approval or KEM bytes as an issuer",async t=>{
+ for(const kind of ["sign","approval","kem"])await t.test(kind,async()=>{
+  const f=await sample(),id=await p.identity("reused-authority"),g=f.config.policy.guardians[0];
+  if(kind==="sign")g.publicKey.sign=id.publicKey.sign;
+  if(kind==="approval")g.approvalKey=id.publicKey.sign;
+  if(kind==="kem")g.publicKey.kem=id.publicKey.sign.x;
+  const status=await statusFixture(f.config.policy,f.now);f.config.trusted=status.trusted;f.evidence=status.packet();
+  f.config.trusted[0].issuer_key=id.publicKey.sign;
+  for(const rows of [f.evidence.evidence,f.evidence.snapshots]){
+   const {signature,...body}=rows[0];rows[0]={...body,signature:p.sign(body,id.signPrivate)};
+   assert(p.verify(body,rows[0].signature,f.config.trusted[0].issuer_key));
+  }
+  assert.throws(()=>require("../sealed/enrollment").verifyEnrollment({policy:f.config.policy,trusted:f.config.trusted,evidence:f.evidence.evidence,now:f.now}),/shared or self-issued enrollment authority/);
+  assert.equal(r.inspect(f).status,"hold");
+ });
+});
 function mcp(home,name,args={},extra={}){
  const request={jsonrpc:"2.0",id:1,method:"tools/call",params:{name,arguments:args}};
  const run=spawnSync(process.execPath,[path.resolve(__dirname,"../mcp-server.js")],{input:JSON.stringify(request)+"\n",encoding:"utf8",timeout:10000,env:{PATH:process.env.PATH,HOME:home,...extra}});
@@ -51,6 +70,7 @@ function mcp(home,name,args={},extra={}){
 test("actual MCP readiness is no-argument, read-only, offline and sanitizes malformed private contents",async t=>{
  const root=directory(t),before=fs.readdirSync(root);const empty=mcp(root,"conduit_sealed_readiness");assert.equal(empty.value.status,"hold");assert.deepEqual(fs.readdirSync(root),before);
  const attack=mcp(root,"conduit_sealed_readiness",{config:"/etc/passwd",now:1,enable_live:true});assert(attack.reply.error||attack.reply.result.isError);
+ const forged=mcp(root,"conduit_sealed_readiness",{brain_inbound:{enabled:true,tome_commit:"a".repeat(40)}});assert(forged.reply.error||forged.reply.result.isError);
  const f=await sample(),config=path.join(root,"config.json"),evidence=path.join(root,"evidence.json");
  fs.writeFileSync(config,JSON.stringify(f.config),{mode:0o600});fs.writeFileSync(evidence,JSON.stringify(f.evidence),{mode:0o600});
  const env={DEMIPASS_SEALED_READINESS_CONFIG:config,DEMIPASS_SEALED_READINESS_EVIDENCE:evidence};

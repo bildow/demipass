@@ -15,6 +15,7 @@ performed. Aaron retains actual custodian selection and final enablement.
 | A1 | Typed read-only readiness through SDK, CLI and MCP | Implemented here; independent source review required |
 | A2 | Brain, Claude and Codex endpoint interoperability and refusal controls | Implemented local MCP fixture tests; not actual model sessions |
 | A3 | Custodian/issuer/endpoint selection and independent control evidence | Aaron; distinct labels/signatures alone never close it |
+| B0 | Brain inbound policy and tests in Tome; server refusal while missing | Operator-required hold; readiness records it, server enforcement not yet verified |
 | B1 | Production service and MCP guarded-request implementation | Still unbuilt; fixture-only runners remain explicitly disabled for live work |
 | B2 | Per-custodian installation, source/config receipts, restore/rollback | After A3 and independently accepted B1; not installed |
 | C1 | Preserved real encrypted transport/release/ack and failure matrix | After B2; current six-peer-path tests are local direct-mode fixtures |
@@ -117,6 +118,23 @@ limits. CLI exit0 means the inspected evidence is current; exit2 means hold. It
 never means permission to start a live service. Production service implementation,
 guarded MCP integration and actual deployment/acceptance are deliberately listed
 as open, not hidden behind an apparently green readiness label.
+
+Aaron's 2026-11-18 requirement holds Brain inbound until its policy and tests are
+in Tome. Every readiness result therefore also includes `brain_inbound` with
+`state: hold`, `enabled: false`, a missing-evidence reason, `tome_commit: null`
+and `server_enforcement: not_verified`. No argument, environment flag or provided
+hash enables Brain in this implementation. This is a readiness refusal, not proof
+that an existing relay was reconfigured. The production server must enforce the
+hold before Brain's Wave6 route is activated, including direct, thread, forwarding
+and recovery paths. A future enabling change must cite and verify the exact Tome
+commit containing the inbound policy and tests; a bare hash or this hold ruling
+does not satisfy that requirement. Crypto fixture success cannot open the route.
+
+The hold is on Brain inbound. Of the six local directed-pair fixtures,
+Claude-to-Brain and Codex-to-Brain require server refusals in production; four
+directions remain eligible under their other gates if Brain outbound is enabled.
+The existing six-pair crypto test is not a production admission test. No test or
+policy for Brain's real memory ingestion is claimed here, and none is installed.
 
 ## Tests and remaining acceptance
 
