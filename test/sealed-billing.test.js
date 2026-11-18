@@ -128,3 +128,29 @@ test('dispute pricing independence does not bypass payer authentication or recip
   assert.deepEqual(fs.readFileSync(f.coordinator.journal.file),before);assert.equal(f.server.state.charges,1);
  });
 });
+test('paid dispute accepts an expired original grant but never an unpaid one',async t=>{
+ const f=await httpFixture(t),c=complaint(f);
+ await f.coordinator.release(f.req,token);
+ const unpaid=await f.message();
+ f.time=f.req.grant.body.expires_at+1;
+ assert(f.time>f.req.grant.body.expires_at);
+ const row=await f.coordinator.dispute(f.req,token,c);
+ assert.equal(row.status,'manual_review_required');assert.equal(row.refund,'not_issued');
+ const otherBody={...c.body,envelope_hash:p.hash(unpaid.envelope),grant_hash:p.hash(unpaid.grant.body)};
+ const other={body:otherBody,signature:p.sign(otherBody,f.recipient.signPrivate)};
+ await assert.rejects(f.coordinator.dispute(unpaid,token,other),/paid original/);
+ assert.equal(f.server.state.charges,1);
+});
+test('reordered and whitespace-varied signed complaint replays after journal restart without a second row',async t=>{
+ const f=await httpFixture(t),c=complaint(f);
+ await f.coordinator.release(f.req,token);
+ const first=await f.coordinator.dispute(f.req,token,c);
+ const file=f.coordinator.journal.file,before=fs.readFileSync(file);
+ f.coordinator.journal.close();
+ const journal=new Journal(file);t.after(()=>journal.close());f.coordinator.journal=journal;
+ const rebuilt=JSON.parse(JSON.stringify({signature:c.signature,body:Object.fromEntries(Object.entries(c.body).reverse())},null,4));
+ assert.notEqual(JSON.stringify(rebuilt),JSON.stringify(c));assert.notEqual(rebuilt,c);
+ const replay=await f.coordinator.dispute(f.req,token,rebuilt);
+ assert.equal(replay.dispute_id,first.dispute_id);assert.equal(replay.replayed,true);
+ assert.deepEqual(fs.readFileSync(file),before);assert.equal(f.server.state.charges,1);
+});
