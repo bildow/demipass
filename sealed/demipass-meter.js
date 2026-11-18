@@ -45,6 +45,12 @@ class DemiPassMeter {
       action.max_cost_dd !== 2
     )
       throw Error("release must be published at exactly 2 DD with zero margin and atomic charge contract");
+    return this.identifyDispute(token, binding);
+  }
+  // Existing paid complaints require current authenticated identity, not today's
+  // price/charge contract or eligibility to buy a second release. Verification
+  // still enforces the tenant, active token/wallet and release-action authority.
+  async identifyDispute(token, binding) {
     const who = await this.call("/api/services/verify", {
       token,
       action: "release",

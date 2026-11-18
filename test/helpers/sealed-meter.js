@@ -32,6 +32,9 @@ async function meterFixture() {
     badReceipt: false,
     charges: 0,
     verifyOk: true,
+    wallet: "fixture-wallet",
+    metadataUnavailable: false,
+    budgetExhausted: false,
     ledger: new Map(),
   };
   const signed = (charge) => {
@@ -67,6 +70,8 @@ async function meterFixture() {
       const b = raw ? JSON.parse(raw) : {},
         url = new URL(req.url, "http://localhost");
       state.requests.push({path:url.pathname, body:b});
+      if (url.pathname === "/api/services/conduit-keys" && state.metadataUnavailable)
+        return send(503, {error: "fixture metadata unavailable"});
       if (url.pathname === "/api/services/conduit-keys")
         return send(200, {
           charge_contract: state.contract ? {version:1,max_total_dd:true,signed_lookup:true} : undefined,
@@ -80,7 +85,7 @@ async function meterFixture() {
         return b.token === "fixture-payer-token"
           ? send(200, {
               ok: state.verifyOk,
-              wallet: "fixture-wallet",
+              wallet: state.wallet,
               token_id: "fixture-token-id",
               action: "release",
             })
@@ -97,6 +102,7 @@ async function meterFixture() {
               },
         );
       if (url.pathname === "/api/services/charge") {
+        if (state.budgetExhausted) return send(402, {refused: "daily_cap"});
         if (
           b.action !== "release" ||
           b.cost_dd !== 2 ||

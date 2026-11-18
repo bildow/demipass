@@ -52,6 +52,14 @@ grant_hash and reason (decryption_failed/package_unavailable/billing_mismatch).
 It authenticates the wallet and original paid grant, persists before responding,
 and returns `manual_review_required`, `refund: not_issued`. Duplicate identical
 complaints replay the same record. No plaintext, raw key or extra share is added.
+Disputes use the gateway's token verification without fetching the current price
+or charge contract and without a payment precheck or debit. Price changes, an
+exhausted budget, or unavailable public pricing metadata cannot block an already
+paid complaint. Current token/wallet and release-action authority, recipient
+signature, and the original paid record remain mandatory. Unavailable identity
+verification, a revoked token or retired service/action still holds; the operator
+must offer a separate manual intake for that case. This is not offline identity
+verification or a bypass of revocation/consent.
 The fixture coordinator accepts this via `/release` with `operation: dispute`;
 unknown operations refuse. This is local intake, not external notification.
 

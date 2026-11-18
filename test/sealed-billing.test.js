@@ -86,3 +86,43 @@ test('unreadable charge lookup never falls through to another debit',async t=>{
  const f=await httpFixture(t);f.server.state.badLookup=true;
  await assert.rejects(f.coordinator.release(f.req,token),/lookup/);assert.equal(f.server.state.charges,0);
 });
+test('paid dispute authenticates without current pricing, metadata or another charge allowance',async t=>{
+ for(const mode of ['price_changed','old_contract','metadata_unavailable','budget_exhausted'])await t.test(mode,async t=>{
+  const f=await httpFixture(t),c=complaint(f);
+  await f.coordinator.release(f.req,token);
+  if(mode==='price_changed')f.server.state.margin=20;
+  if(mode==='old_contract')f.server.state.contract=false;
+  if(mode==='metadata_unavailable')f.server.state.metadataUnavailable=true;
+  if(mode==='budget_exhausted')f.server.state.budgetExhausted=true;
+  f.coordinator.meter.precheck=async()=>{throw Error('dispute must not precheck a new payment');};
+  f.coordinator.guardians=Object.fromEntries(f.policy.guardians.map(g=>[g.id,()=>{throw Error('dispute must not request shares');}]));
+  const before=f.server.state.requests.length;
+  const row=await f.coordinator.dispute(f.req,token,c);
+  assert.equal(row.status,'manual_review_required');assert.equal(row.refund,'not_issued');
+  assert.deepEqual(f.server.state.requests.slice(before).map(r=>r.path),['/api/services/verify']);
+  assert.equal(f.server.state.charges,1);
+  const file=f.coordinator.journal.file;f.coordinator.journal.close();
+  const journal=new Journal(file);t.after(()=>journal.close());f.coordinator.journal=journal;
+  assert.equal((await f.coordinator.dispute(f.req,token,c)).dispute_id,row.dispute_id);
+  assert.equal((await f.coordinator.dispute(f.req,token,c)).replayed,true);
+ });
+});
+test('dispute pricing independence does not bypass payer authentication or recipient proof',async t=>{
+ for(const mode of ['revoked','unknown_token','wrong_payer','forged_complaint','forged_grant','verify_unavailable'])await t.test(mode,async t=>{
+  const f=await httpFixture(t);await f.coordinator.release(f.req,token);
+  f.server.state.contract=false;
+  let caller=token,c=complaint(f),req=f.req;
+  if(mode==='revoked')f.server.state.verifyOk=false;
+  if(mode==='unknown_token')caller='invalid-token';
+  if(mode==='wrong_payer')f.server.state.wallet='different-authenticated-wallet';
+  if(mode==='forged_complaint')c={...c,signature:'forged'};
+  if(mode==='forged_grant')req={...req,grant:{...req.grant,signature:'forged'}};
+  if(mode==='verify_unavailable'){
+   const call=f.coordinator.meter.call.bind(f.coordinator.meter);
+   f.coordinator.meter.call=async(path,...args)=>{if(path==='/api/services/verify')throw Error('verification unavailable');return call(path,...args);};
+  }
+  const before=fs.readFileSync(f.coordinator.journal.file);
+  await assert.rejects(f.coordinator.dispute(req,caller,c));
+  assert.deepEqual(fs.readFileSync(f.coordinator.journal.file),before);assert.equal(f.server.state.charges,1);
+ });
+});

@@ -228,7 +228,7 @@ class Coordinator {
     this.now = now;
     this.locks = new Map();
   }
-  async authorize(request, token) {
+  async authorize(request, token, {dispute = false} = {}) {
     const { envelope, capsule, grant } = request;
     const h = p.validateEnvelope(envelope, this.sender, this.recipient);
     p.validateCapsule(envelope, capsule);
@@ -241,7 +241,7 @@ class Coordinator {
       !p.verify(grant.body, grant.signature, this.recipient.sign)
     )
       throw Error("recipient proof missing");
-    const who = await this.meter.identify(token, {
+    const who = await this.meter[dispute ? "identifyDispute" : "identify"](token, {
       envelope_hash: p.hash(envelope),
       recipient_key: h.recipient_key,
       policy_hash: h.policy_hash,
@@ -281,9 +281,10 @@ class Coordinator {
     }
   }
   // A signed complaint is a durable request for review, NOT a refund or proof
-  // of faulty ciphertext. It neither returns shares nor invokes the meter.
+  // of faulty ciphertext. Identity is verified, but no price lookup, payment
+  // precheck, debit or share request is made.
   async dispute(request, token, complaint) {
-    const {key, who} = await this.authorize(request, token);
+    const {key, who} = await this.authorize(request, token, {dispute: true});
     p.fields(complaint, ["body", "signature"]);
     p.fields(complaint.body, ["version", "type", "envelope_hash", "grant_hash", "reason"]);
     const body = complaint.body;
