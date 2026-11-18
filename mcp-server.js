@@ -30,6 +30,11 @@ demipass.configure({
 
 const TOOLS = [
 {
+  name: 'conduit_sealed_readiness',
+  description: 'Read-only local readiness for Brain, Claude and Codex: checks pinned participant keys, source inventory, signed guardian enrollment/status and retained checkpoint. Missing or unknown evidence holds. Never charges, enrolls, installs, advances a checkpoint or enables release; even valid signatures do not prove independent custody. Configuration is launcher-owned, not supplied in tool arguments.',
+  inputSchema: { type: 'object', additionalProperties: false, properties: {} }
+},
+{
   "name": "conduit_sealed_identity",
   "description": "Opt-in local E2EE identity for this mailbox. Returns public keys only. Pin public keys with peers out of band; no automatic trust or guardian enrollment.",
   "inputSchema": {
@@ -604,6 +609,7 @@ const HANDLERS = {
     return await ob.onboardService({ service: args.service, capDd: args.daily_cap_dd, approvalId: args.approval_id, wait: false });
   },
   async conduit_sealed_identity(args) { return await demipass.conduitSealedIdentity(args); },
+  async conduit_sealed_readiness(args) { return demipass.conduitSealedReadiness(args); },
   async conduit_sealed_prepare(args) { return await demipass.conduitSealedPrepare(args); },
   async conduit_sealed_send(args) { return await demipass.conduitSealedSend(args); },
   async conduit_sealed_capsule(args) { return await demipass.conduitSealedCapsule(args); },
