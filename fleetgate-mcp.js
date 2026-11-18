@@ -34,7 +34,7 @@ const { execFileSync } = require('child_process');
 const { services } = require('./services.js');
 // This machine's live DemiPass session (DEMIPASS_TOKEN, else the demipass MCP entry, else the SDK login), read each
 // time it is needed: the MCP config entry holds no copy of it (#17 review M2).
-const { sessionToken, consentAtLeast } = require('./onboard.js');
+const { sessionToken, consentAtLeast, paneRulesPermission } = require('./onboard.js');
 const { fleetgateAdmission } = require('./fleetgate-admission.js');
 
 const DEMIPASS_URL = (process.env.DEMIPASS_URL || 'https://api.dustforge.com').replace(/\/$/, '');
@@ -85,6 +85,14 @@ async function onboard({ daily_cap_dd, approval_id } = {}, { fileConsent = true 
   const session = sessionToken();
   const api = dp(session), wallet = subOf(session);
   if (!session) return { ok: false, error: process.env.DEMIPASS_EXPECT_DID ? `no DemiPass session for ${process.env.DEMIPASS_EXPECT_DID} (the wallet this server was onboarded as) on this machine` : 'no DemiPass session on this machine: sign in first (demipass_login, or set DEMIPASS_TOKEN)' };
+  // The owner's "Write agent instruction files" permission comes before this wallet first uses Fleet (Aaron
+  // 2026-11-18; #40 review M2: this path does not go through demipass-onboard, so it checks for itself). The silent
+  // re-mint of a held token (fileConsent false) does not re-ask: that wallet already passed.
+  if (fileConsent) {
+    checkAlive();
+    const perm = await paneRulesPermission(session);
+    if (!perm.enabled) return { ok: false, status: 'needs_permission', error: `"Write agent instruction files" is not enabled for ${perm.person || 'this wallet'}; Fleet and pane onboarding need it. ${perm.next || 'Enable it in the DemiPass app (Settings → Agents).'}` };
+  }
   if (approval_id && !daily_cap_dd && pendingCaps.has(Number(approval_id))) daily_cap_dd = pendingCaps.get(Number(approval_id));
   let c;
   checkAlive();   // an expired call starts no DemiPass request (#30 independent review r4)
