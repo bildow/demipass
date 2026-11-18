@@ -18,6 +18,7 @@ test("pinned Brain/Claude/Codex and current signed evidence produce inspection o
  assert.equal(got.status,"fixture_evidence_current_live_disabled");assert.equal(got.live_guardian_release,false);
  assert.deepEqual(got.participants.map(x=>x.role),r.ROLES);assert(got.deployment_blockers.includes("live_mcp_release_integration"));
  assert.equal(JSON.stringify(f.config),before);assert.equal(f.config.previous,null);
+ assert.equal(got.digest_format,"sha256-canonical-json-v1");assert.equal(got.config_canonical_sha256,p.hash(f.config));assert.equal(got.evidence_canonical_sha256,p.hash(f.evidence));
 });
 test("missing setup lists missing custody without creating identity or adopting applicants' pins",()=>{
  const got=r.inspect({config:null,evidence:null,now:10});assert.equal(got.status,"hold");assert.equal(got.live_guardian_release,false);
@@ -54,8 +55,13 @@ test("actual MCP readiness is no-argument, read-only, offline and sanitizes malf
  fs.writeFileSync(config,JSON.stringify(f.config),{mode:0o600});fs.writeFileSync(evidence,JSON.stringify(f.evidence),{mode:0o600});
  const env={DEMIPASS_SEALED_READINESS_CONFIG:config,DEMIPASS_SEALED_READINESS_EVIDENCE:evidence};
  const cfgBytes=fs.readFileSync(config),evidenceBytes=fs.readFileSync(evidence);
- assert.equal(mcp(root,"conduit_sealed_readiness",{},env).value.status,"fixture_evidence_current_live_disabled");
+ const first=mcp(root,"conduit_sealed_readiness",{},env).value;assert.equal(first.status,"fixture_evidence_current_live_disabled");
  assert.deepEqual(fs.readFileSync(config),cfgBytes);assert.deepEqual(fs.readFileSync(evidence),evidenceBytes);
+ fs.writeFileSync(config,JSON.stringify(Object.fromEntries(Object.entries(f.config).reverse()),null,2));
+ fs.writeFileSync(evidence,JSON.stringify(Object.fromEntries(Object.entries(f.evidence).reverse()),null,2));
+ assert.notDeepEqual(fs.readFileSync(config),cfgBytes);assert.notDeepEqual(fs.readFileSync(evidence),evidenceBytes);
+ const formatted=mcp(root,"conduit_sealed_readiness",{},env).value;
+ assert.equal(formatted.digest_format,"sha256-canonical-json-v1");assert.equal(formatted.config_canonical_sha256,first.config_canonical_sha256);assert.equal(formatted.evidence_canonical_sha256,first.evidence_canonical_sha256);
  fs.writeFileSync(config,'{"private_key":"DO_NOT_ECHO_SECRET", broken');
  const bad=mcp(root,"conduit_sealed_readiness",{},env);assert.equal(bad.value.status,"hold");assert(!bad.raw.includes("DO_NOT_ECHO_SECRET"));
 });

@@ -83,8 +83,10 @@ assertion and must not be used to replace runtime checkpoint reconciliation.
 Evidence schema is exactly `{evidence:[...], snapshots:[...]}` from Waves 2/3.
 The existing signature, source binding, expiry, revocation, serial rollback,
 same-serial fork and sticky-revocation checks are reused. Observation returns a
-checkpoint hash but does not install or advance it. Config and evidence digests
-bind the report to the inspected bytes. Inspect again immediately before use;
+checkpoint hash but does not install or advance it. `config_canonical_sha256` and `evidence_canonical_sha256` bind the report to
+canonical parsed JSON values (`digest_format: sha256-canonical-json-v1`), not
+raw file bytes. Formatting and key-order changes intentionally have the same
+digest. The evidence digest is emitted only after successful validation. Inspect again immediately before use;
 this point-in-time report is not a persistent authorization.
 
 `source_sha256` pins the canonical hash of the actual local SDK runtime inventory:

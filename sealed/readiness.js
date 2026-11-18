@@ -69,7 +69,8 @@ function inspect({ config, evidence, actual_source_sha256, now = Date.now() }) {
     }
   } catch (_) { check("configuration", "invalid", "invalid_operator_configuration"); return out; }
   check("configuration", "valid", "typed_local_configuration");
-  out.config_sha256 = p.hash(config);
+  out.digest_format = "sha256-canonical-json-v1";
+  out.config_canonical_sha256 = p.hash(config);
   out.participants = config.participants.map(peer => ({ role: peer.role, mailbox: peer.mailbox,
     fingerprint: peer.public_key === null ? null : p.keyId(peer.public_key),
     key_state: peer.public_key === null ? "missing" : "locally_pinned_not_ownership_proof" }));
@@ -82,7 +83,7 @@ function inspect({ config, evidence, actual_source_sha256, now = Date.now() }) {
   try {
     p.fields(evidence, ["evidence", "snapshots"]);
     const evaluated = evaluate({ policy: config.policy, trusted: config.trusted, previous: config.previous, ...evidence, now });
-    out.policy_sha256 = p.hash(config.policy); out.evidence_sha256 = p.hash(evidence);
+    out.policy_sha256 = p.hash(config.policy); out.evidence_canonical_sha256 = p.hash(evidence);
     out.observed_checkpoint_sha256 = evaluated.checkpoint_hash;
     out.expires_at = evaluated.expires_at;
     check("guardian_evidence", evaluated.verdict === "evidence_current" ? "valid" : "invalid",
