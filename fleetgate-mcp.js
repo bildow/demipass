@@ -256,6 +256,7 @@ const fundAsks = new Map();   // `${wallet}|${subject}` → { notice_id, status 
 const FUND_SUBJECT_RE = /[^A-Za-z0-9_#+-]/g;   // what DemiPass accepts in a subject (nothing that reads as a link or address)
 const FUND_HOLD_MS = 24 * 3600e3;   // after the owner dismissed: as the consent path's NO_REASK_MS
 const FUND_RETRY_MS = 5 * 60e3;     // after DemiPass did not file one
+const FUND_COVERED_MS = 2 * 60e3;   // after DemiPass said the balance covers it
 async function fundAsk(result, subject, p) {
   if (!AUTO_ASK) return { ...result, ask: { status: 'off', kind: 'fund', next: `${p.next} (FLEETGATE_AUTO_ASK=0: nothing was filed.)` } };
   const session = sessionToken(), wallet = subOf(session);
@@ -280,10 +281,12 @@ async function fundAsk(result, subject, p) {
     } else if (mine && mine.until && t < mine.until) {
       // Settled for a while: the owner dismissed (24 h), or DemiPass did not file it (5 min) — not re-sent every follow.
       if (mine.status === 'not_filed') return { ...result, ask: { status: 'yours', kind: 'fund', next: p.next, not_filed: mine.why } };
-      return say(mine, `The owner dismissed fund asks for this wallet recently; none is filed again until ${new Date(mine.until).toISOString()}. ${p.next}`);
+      if (mine.status === 'covered') return { ...result, ask: { status: 'covered', kind: 'fund', next: 'The wallet covers it now. The work resumes by itself within minutes; nothing to file.' } };
+      return say(mine, `${mine.status === 'lapsed' ? 'The owner let the fund ask lapse' : 'The owner dismissed fund asks for this wallet recently'}; none is filed again until ${new Date(mine.until).toISOString()}. ${p.next}`);
     }
     const need = posInt(p.needed_dd);
     if (!need) return { ...result, ask: { status: 'yours', kind: 'fund', next: p.next } };
+    checkAlive();   // before the reservation: a call already out of time reserves nothing (#37 r3)
     const a = { status: 'filing', started: t }; fundAsks.set(key, a);
     const body = { need_dd: need, service: SERVICE, subject: String(subject).replace(FUND_SUBJECT_RE, '-').replace(/^[^A-Za-z0-9]+/, '').slice(0, 80) || 'work',
       ...(p.lapses_at ? { lapses_at: p.lapses_at } : {}), from: 'fleetgate pane' };
@@ -293,7 +296,8 @@ async function fundAsk(result, subject, p) {
       Object.assign(a, { status: 'asked', notice_id: r.data.notice_id });
       return say(a, `Asked the owner to fund the wallet: ${r.data.short_dd} DD short (card ${a.notice_id} in the DemiPass app, and a phone notification). Nothing for you to do: keep following; the work resumes by itself once it is funded.`);
     }
-    if (r.status === 200 && r.data && r.data.covered) { fundAsks.delete(key); return { ...result, ask: { status: 'covered', kind: 'fund', next: 'The wallet covers it now. The work resumes by itself within minutes; nothing to file.' } }; }
+    // Covered: held 2 minutes (the door resumes within minutes), then a refusal that persists asks again (#37 r3).
+    if (r.status === 200 && r.data && r.data.covered) { Object.assign(a, { status: 'covered', until: t + FUND_COVERED_MS }); return { ...result, ask: { status: 'covered', kind: 'fund', next: 'The wallet covers it now. The work resumes by itself within minutes; nothing to file.' } }; }
     if (r.status === 409 && r.data && r.data.dismissed) { Object.assign(a, { status: 'dismissed', until: t + FUND_HOLD_MS });
       return say(a, `The owner dismissed fund asks for this wallet recently; none is filed again today. ${p.next}`); }
     // Not filed (an older DemiPass without the route, a cap, an agent wallet): said, and not re-sent for 5 minutes.
@@ -811,7 +815,7 @@ async function handleMessage(msg) {
   return { jsonrpc: '2.0', id, error: { code: -32601, message: `Method not found: ${method}` } };
 }
 
-module.exports = { handleMessage, _gitEnv: gitEnv, _reset: () => { held = null; consentSeen = null; doorCached = null; pendingCaps.clear(); asks.clear(); fundAsks.clear(); } };
+module.exports = { handleMessage, _gitEnv: gitEnv, _fundAsks: fundAsks, _reset: () => { held = null; consentSeen = null; doorCached = null; pendingCaps.clear(); asks.clear(); fundAsks.clear(); } };
 
 if (require.main === module) {
   // Messages are answered in order through one queue; stdin closing waits for the queue (a call in flight is answered).

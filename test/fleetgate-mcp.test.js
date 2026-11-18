@@ -829,6 +829,9 @@ test('a wallet short of funds files ONE fund ask (a card in the app), then follo
   r = await call('fleetgate_follow', { review_id: 'review-fund-01' });
   assert.strictEqual(r.ask.status, 'covered'); assert.strictEqual(state.fundPosts.length, 2);
   // a later step of the same review is refused again: a new card is filed, not "covered" forever (#37 r2)
+  r = await call('fleetgate_follow', { review_id: 'review-fund-01' });
+  assert.strictEqual(r.ask.status, 'covered'); assert.strictEqual(state.fundPosts.length, 2, 'covered is held a moment, not re-asked on every follow');
+  { const k = [...mcp._fundAsks.keys()][0]; mcp._fundAsks.get(k).until = Date.now() - 1; }
   state.fundCoveredOnPost = false; state.fundStatus = 'open';
   r = await call('fleetgate_follow', { review_id: 'review-fund-01' });
   assert.strictEqual(r.ask.status, 'asked', JSON.stringify(r)); assert.strictEqual(state.fundPosts.length, 3);
