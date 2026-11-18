@@ -52,9 +52,11 @@ const dpSrv = http.createServer(async (req, res) => {
     return json(res, 201, { ok: true, token: 'svc-token-SECRET-aaaaaaaaaaaa-' + n, token_id: 'jti-' + n, service: b.service, cap_dd: b.cap_dd, expires_at: new Date(Date.now() + 3600e3).toISOString() });
   }
   // dustforge#133 fund asks: one card per work key; state.fundRoute=false plays an older DemiPass without the route
+  if (req.url.startsWith('/api/billing/fund-asks')) state.fundAny = (state.fundAny || 0) + 1;
   if (req.url.startsWith('/api/billing/fund-asks') && state.fundRoute !== false) {
     if (req.method === 'POST') { state.fundPosts = (state.fundPosts || []).concat([b]);
       if (state.fundDismissed) return json(res, 409, { error: 'dismissed', dismissed: true });
+      if (state.fundCoveredOnPost) return json(res, 200, { ok: true, covered: true, balance_dd: 2000, need_dd: b.need_dd });
       return json(res, 202, { ok: true, notice_id: 41, status: 'open', short_dd: b.need_dd - 1465 }); }
     if (req.method === 'GET' && req.url === '/api/billing/fund-asks/41') return json(res, 200, { ok: true, fund_ask: { notice_id: 41, status: state.fundStatus || 'open', short_dd: 124 } });
   }
@@ -804,9 +806,11 @@ test('a declined or expired raise is never filed again for that refusal', async 
 
 test('a wallet short of funds, older DemiPass without fund asks: the next step is the owner\'s (fund it); no consent is filed', async () => {
   mcp._reset(); const saved = state.consents; state.consents = [{ id: 9, service: 'fleetgate', daily_cap_dd: 5000, status: 'active' }]; state.fundRoute = false;
-  const n = state.consentPosts.length;
-  const r = await call('fleetgate_follow', { review_id: 'review-fund-01' });
+  const n = state.consentPosts.length, hits = state.fundAny || 0;
+  let r = await call('fleetgate_follow', { review_id: 'review-fund-01' });
   assert.strictEqual(r.ask.status, 'yours'); assert.strictEqual(r.ask.kind, 'fund'); assert.strictEqual(state.consentPosts.length, n);
+  r = await call('fleetgate_follow', { review_id: 'review-fund-01' });
+  assert.strictEqual(r.ask.status, 'yours'); assert.strictEqual((state.fundAny || 0) - hits, 1, 'not re-sent on every follow (5-minute hold)');
   state.consents = saved; state.fundRoute = undefined; mcp._reset();
 });
 
@@ -820,14 +824,19 @@ test('a wallet short of funds files ONE fund ask (a card in the app), then follo
   assert.strictEqual(state.consentPosts.length, n, 'no consent raise for a fund refusal');
   r = await call('fleetgate_follow', { review_id: 'review-fund-01' });
   assert.strictEqual(r.ask.status, 'asked'); assert.strictEqual(state.fundPosts.length, 1, 'a later follow reads the card, files nothing');
-  state.fundStatus = 'covered';
+  // funded: the card says covered; a follow that still meets the refusal asks DemiPass again, which files nothing
+  state.fundStatus = 'covered'; state.fundCoveredOnPost = true;
   r = await call('fleetgate_follow', { review_id: 'review-fund-01' });
-  assert.strictEqual(r.ask.status, 'covered'); assert.strictEqual(state.fundPosts.length, 1);
+  assert.strictEqual(r.ask.status, 'covered'); assert.strictEqual(state.fundPosts.length, 2);
+  // a later step of the same review is refused again: a new card is filed, not "covered" forever (#37 r2)
+  state.fundCoveredOnPost = false; state.fundStatus = 'open';
+  r = await call('fleetgate_follow', { review_id: 'review-fund-01' });
+  assert.strictEqual(r.ask.status, 'asked', JSON.stringify(r)); assert.strictEqual(state.fundPosts.length, 3);
   mcp._reset(); state.fundDismissed = true;
   r = await call('fleetgate_follow', { review_id: 'review-fund-01' });
-  assert.strictEqual(r.ask.status, 'dismissed'); assert.strictEqual(state.fundPosts.length, 2);
+  assert.strictEqual(r.ask.status, 'dismissed'); assert.strictEqual(state.fundPosts.length, 4);
   r = await call('fleetgate_follow', { review_id: 'review-fund-01' });
-  assert.strictEqual(state.fundPosts.length, 2, 'a dismissed ask is not filed again');
+  assert.strictEqual(state.fundPosts.length, 4, 'a dismissed ask is not filed again for a day');
   assert.ok(!JSON.stringify(r).includes('SECRET'), 'no token in the answer');
   state.fundDismissed = false; state.fundStatus = 'open'; mcp._reset();
 });

@@ -253,31 +253,38 @@ async function payAskInner(result, subject) {
 // (Aaron 2026-11-18: "The app doesn't hold the request anywhere"). One filing per refusal episode (wallet + subject) per
 // process; later follows read its status instead of filing again. It moves no DD: the owner funds the wallet.
 const fundAsks = new Map();   // `${wallet}|${subject}` → { notice_id, status }
-const FUND_SUBJECT_RE = /[^A-Za-z0-9._#@+-]/g;   // what DemiPass accepts in a subject (no ':' or '/': never a link)
+const FUND_SUBJECT_RE = /[^A-Za-z0-9_#+-]/g;   // what DemiPass accepts in a subject (nothing that reads as a link or address)
+const FUND_HOLD_MS = 24 * 3600e3;   // after the owner dismissed: as the consent path's NO_REASK_MS
+const FUND_RETRY_MS = 5 * 60e3;     // after DemiPass did not file one
 async function fundAsk(result, subject, p) {
   if (!AUTO_ASK) return { ...result, ask: { status: 'off', kind: 'fund', next: `${p.next} (FLEETGATE_AUTO_ASK=0: nothing was filed.)` } };
   const session = sessionToken(), wallet = subOf(session);
   if (!session || !wallet) return { ...result, ask: { status: 'yours', kind: 'fund', next: p.next } };
-  const key = `${wallet}|${subject}`, mine = fundAsks.get(key);
+  const key = `${wallet}|${subject}`, mine = fundAsks.get(key), t = Date.now();
   const say = (a, next) => ({ ...result, ask: { status: a.status, kind: 'fund', ...(a.notice_id ? { notice_id: a.notice_id } : {}), next } });
   try {
-    if (mine && mine.notice_id) {
+    // An open card: follow it. 'covered' is never kept: the door refusing again means a later step needs more, and a
+    // new filing is right (DemiPass answers "covered" and files nothing while the balance still covers it) (#37 r2).
+    if (mine && mine.status === 'asked' && mine.notice_id) {
       checkAlive();
       const r = await http('GET', `${DEMIPASS_URL}/api/billing/fund-asks/${mine.notice_id}`, { auth: session });
-      const st = r.status === 200 && r.data && r.data.fund_ask ? r.data.fund_ask.status : null;
-      if (st) mine.status = st === 'open' ? 'asked' : st;
-      if (mine.status === 'asked') return say(mine, `Waiting for the owner to fund the wallet (${r.data.fund_ask.short_dd} DD short; card ${mine.notice_id} in the DemiPass app). Nothing for you to do: keep following; the work resumes by itself once it is funded.`);
-      if (mine.status === 'covered') return say(mine, 'The wallet now covers it. The work resumes by itself within minutes; nothing to file.');
-      return say(mine, `The owner ${mine.status === 'dismissed' ? 'dismissed' : 'let lapse'} the fund ask (card ${mine.notice_id}); it is not filed again. ${p.next}`);
+      const fa = r.status === 200 && r.data && r.data.fund_ask ? r.data.fund_ask : null;
+      if (!fa) return say(mine, `Waiting for the owner to fund the wallet (card ${mine.notice_id} in the DemiPass app; its status could not be read just now). Keep following.`);
+      if (fa.status === 'open') return say(mine, `Waiting for the owner to fund the wallet (${fa.short_dd} DD short; card ${mine.notice_id} in the DemiPass app). Nothing for you to do: keep following; the work resumes by itself once it is funded.`);
+      if (fa.status === 'dismissed' || fa.status === 'lapsed') { Object.assign(mine, { status: fa.status, until: t + FUND_HOLD_MS });
+        return say(mine, `The owner ${fa.status === 'dismissed' ? 'dismissed' : 'let lapse'} the fund ask (card ${mine.notice_id}); it is not filed again today. ${p.next}`); }
+      fundAsks.delete(key);   // covered (or superseded): this refusal is a new need; file below
+    } else if (mine && mine.status === 'filing' && t - mine.started < 30e3) {
+      // One in flight at a time; a filing whose answer never came is retried after 30 s (one card per work key).
+      return say(mine, 'A fund ask is being filed; nothing more is filed meanwhile. Keep following.');
+    } else if (mine && mine.until && t < mine.until) {
+      // Settled for a while: the owner dismissed (24 h), or DemiPass did not file it (5 min) — not re-sent every follow.
+      if (mine.status === 'not_filed') return { ...result, ask: { status: 'yours', kind: 'fund', next: p.next, not_filed: mine.why } };
+      return say(mine, `The owner dismissed fund asks for this wallet recently; none is filed again until ${new Date(mine.until).toISOString()}. ${p.next}`);
     }
-    // One in flight at a time; a filing whose answer never came is retried after 30 s (DemiPass keeps one card per work
-    // key, so a second POST updates that card, never doubles it).
-    if (mine && mine.status === 'filing' && Date.now() - mine.started < 30e3) return say(mine, 'A fund ask is being filed; nothing more is filed meanwhile. Keep following.');
-    // Settled without a card to follow (the owner dismissed asks, or the wallet already covered it): never filed again.
-    if (mine && mine.status !== 'filing') return say(mine, mine.status === 'covered' ? 'The wallet covers it. The work resumes by itself within minutes; nothing to file.' : `The owner dismissed fund asks for this wallet within the last day; it is not filed again. ${p.next}`);
     const need = posInt(p.needed_dd);
     if (!need) return { ...result, ask: { status: 'yours', kind: 'fund', next: p.next } };
-    const a = { status: 'filing', started: Date.now() }; fundAsks.set(key, a);
+    const a = { status: 'filing', started: t }; fundAsks.set(key, a);
     const body = { need_dd: need, service: SERVICE, subject: String(subject).replace(FUND_SUBJECT_RE, '-').replace(/^[^A-Za-z0-9]+/, '').slice(0, 80) || 'work',
       ...(p.lapses_at ? { lapses_at: p.lapses_at } : {}), from: 'fleetgate pane' };
     checkAlive();
@@ -286,10 +293,13 @@ async function fundAsk(result, subject, p) {
       Object.assign(a, { status: 'asked', notice_id: r.data.notice_id });
       return say(a, `Asked the owner to fund the wallet: ${r.data.short_dd} DD short (card ${a.notice_id} in the DemiPass app, and a phone notification). Nothing for you to do: keep following; the work resumes by itself once it is funded.`);
     }
-    if (r.status === 200 && r.data && r.data.covered) { a.status = 'covered'; return say(a, 'The wallet already covers it. The work resumes by itself within minutes.'); }
-    if (r.status === 409 && r.data && r.data.dismissed) { a.status = 'dismissed'; return say(a, `The owner dismissed a fund ask for this work within the last day; it is not filed again. ${p.next}`); }
-    fundAsks.delete(key);   // nothing was filed (an older DemiPass without the route, a cap): say the next step, as before
-    return { ...result, ask: { status: 'yours', kind: 'fund', next: p.next, ...(r.data && r.data.error ? { not_filed: String(r.data.error).slice(0, 200) } : {}) } };
+    if (r.status === 200 && r.data && r.data.covered) { fundAsks.delete(key); return { ...result, ask: { status: 'covered', kind: 'fund', next: 'The wallet covers it now. The work resumes by itself within minutes; nothing to file.' } }; }
+    if (r.status === 409 && r.data && r.data.dismissed) { Object.assign(a, { status: 'dismissed', until: t + FUND_HOLD_MS });
+      return say(a, `The owner dismissed fund asks for this wallet recently; none is filed again today. ${p.next}`); }
+    // Not filed (an older DemiPass without the route, a cap, an agent wallet): said, and not re-sent for 5 minutes.
+    const why = String((r.data && r.data.error) || `HTTP ${r.status}`).slice(0, 200);
+    Object.assign(a, { status: 'not_filed', why, until: t + FUND_RETRY_MS });
+    return { ...result, ask: { status: 'yours', kind: 'fund', next: p.next, not_filed: why } };
   } catch (e) {
     if (e && e.name === 'TimeoutError') throw e;
     return { ...result, ask: { status: 'error', kind: 'fund', error: String((e && e.message) || e).slice(0, 200), next: p.next } };
