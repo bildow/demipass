@@ -179,3 +179,38 @@ test('generic onboarding checks live admission for an already-consented wallet a
  st.refuseAdmission=false;r=await ob.onboardService({service:'fleetgate',mcpConfig:cfg,wait:false});
  assert.strictEqual(r.ok,true);assert.strictEqual(r.admission.protocol,1);assert.strictEqual(st.posts.length,before);
 });
+
+// ── the pane rules (Aaron 2026-11-18): one marked block in AGENTS.md and CLAUDE.md, replaced in place, never doubled ─
+test('installPaneRules writes one marked block into AGENTS.md and CLAUDE.md, keeps what was there, and is idempotent', () => {
+  const { installPaneRules, PANE_RULES } = require('../onboard.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dp-rules-'));
+  fs.writeFileSync(path.join(dir, 'CLAUDE.md'), '# My project\n\nKeep this line.\n');
+  let r = installPaneRules(dir);
+  assert.deepStrictEqual(r.map(x => [path.basename(x.file), x.changed, !!x.created]), [['AGENTS.md', true, true], ['CLAUDE.md', true, false]]);
+  const claude = fs.readFileSync(path.join(dir, 'CLAUDE.md'), 'utf8'), agents = fs.readFileSync(path.join(dir, 'AGENTS.md'), 'utf8');
+  assert.ok(claude.startsWith('# My project\n\nKeep this line.\n'), 'existing text kept');
+  assert.ok(claude.includes(PANE_RULES) && agents.includes(PANE_RULES));
+  assert.strictEqual((claude.match(/demipass-pane-rules:begin/g) || []).length, 1);
+  r = installPaneRules(dir);
+  assert.ok(r.every(x => x.changed === false), 'a second run changes nothing');
+  assert.strictEqual(fs.readFileSync(path.join(dir, 'CLAUDE.md'), 'utf8'), claude);
+  // an older block (another version's text) is replaced in place, text after it kept
+  fs.writeFileSync(path.join(dir, 'AGENTS.md'), 'before\n<!-- demipass-pane-rules:begin -->\nold rules\n<!-- demipass-pane-rules:end -->\nafter\n');
+  r = installPaneRules(dir, { files: ['AGENTS.md'] });
+  const a2 = fs.readFileSync(path.join(dir, 'AGENTS.md'), 'utf8');
+  assert.ok(r[0].changed && a2.startsWith('before\n') && a2.endsWith('after\n') && !a2.includes('old rules') && a2.includes(PANE_RULES));
+  assert.strictEqual((a2.match(/demipass-pane-rules:begin/g) || []).length, 1);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('the demipass MCP server sends the pane rules as its instructions at initialize', async () => {
+  const { spawn } = require('child_process');
+  const p = spawn(process.execPath, [path.join(__dirname, '..', 'mcp-server.js')], { env: { ...process.env, DEMIPASS_TOKEN: SESSION, DEMIPASS_URL: 'http://127.0.0.1:9' }, stdio: ['pipe', 'pipe', 'pipe'] });
+  let out = ''; p.stdout.on('data', d => { out += d; });
+  p.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }) + '\n');
+  await new Promise(ok => { const t = setInterval(() => { if (out.includes('\n')) { clearInterval(t); ok(); } }, 20); setTimeout(() => { clearInterval(t); ok(); }, 5000); });
+  p.kill();
+  const r = JSON.parse(out.split('\n')[0]);
+  assert.ok(String(r.result.instructions).includes('never asked in chat'), JSON.stringify(r).slice(0, 300));
+  assert.ok(!JSON.stringify(r).includes(SESSION), 'no session in the reply');
+});
