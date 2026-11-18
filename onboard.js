@@ -203,19 +203,33 @@ const PANE_RULES = `DemiPass pane rules (v${PANE_RULES_VERSION}):
 const PANE_RULES_BEGIN = '<!-- demipass-pane-rules:begin -->', PANE_RULES_END = '<!-- demipass-pane-rules:end -->';
 function paneRulesBlock() { return `${PANE_RULES_BEGIN}\n## DemiPass\n\n${PANE_RULES}\n${PANE_RULES_END}\n`; }
 // Writes the block into <dir>/AGENTS.md and <dir>/CLAUDE.md (creating a file that is missing). Returns what changed.
+// Never into the home directory (Claude Code loads ~/CLAUDE.md for every session: a package must not put rules there;
+// #38 review), never through a symlink (the target is written once, where it lives), never over a directory; a
+// failed write leaves no temp file; an existing file keeps its mode.
 function installPaneRules(dir = process.cwd(), { files = ['AGENTS.md', 'CLAUDE.md'] } = {}) {
   const out = [];
+  let home = ''; try { home = fs.realpathSync(os.homedir()); } catch (_) {}
+  let real = dir; try { real = fs.realpathSync(dir); } catch (_) {}
+  if (home && real === home) return [{ dir, skipped: 'the home directory: rules go into a project, not into every session' }];
+  const seen = new Set();
   for (const name of files) {
-    const p = path.join(dir, name);
-    let cur = ''; try { cur = fs.readFileSync(p, 'utf8'); } catch (_) {}
+    let p = path.join(dir, name);
+    let st = null; try { st = fs.lstatSync(p); } catch (_) {}
+    if (st && st.isSymbolicLink()) { try { p = fs.realpathSync(p); st = fs.lstatSync(p); } catch (_) { out.push({ file: p, skipped: 'a dangling symlink' }); continue; } }
+    if (st && !st.isFile()) { out.push({ file: p, skipped: 'not a regular file' }); continue; }
+    if (seen.has(p)) { out.push({ file: p, changed: false, same_as: 'an earlier file' }); continue; }
+    seen.add(p);
+    let cur = ''; if (st) cur = fs.readFileSync(p, 'utf8');
     const block = paneRulesBlock();
-    const i = cur.indexOf(PANE_RULES_BEGIN), j = cur.indexOf(PANE_RULES_END);
+    const i = cur.indexOf(PANE_RULES_BEGIN), j = cur.indexOf(PANE_RULES_END, i < 0 ? 0 : i);
     let next;
     if (i >= 0 && j > i) next = cur.slice(0, i) + block + cur.slice(j + PANE_RULES_END.length).replace(/^\n/, '');
     else next = (cur ? cur.replace(/\s*$/, '\n\n') : '') + block;
     if (next === cur) { out.push({ file: p, changed: false }); continue; }
-    const tmp = p + '.tmp-' + process.pid; fs.writeFileSync(tmp, next); fs.renameSync(tmp, p);
-    out.push({ file: p, changed: true, created: !cur });
+    const tmp = p + '.tmp-' + process.pid;
+    try { fs.writeFileSync(tmp, next, { mode: st ? (st.mode & 0o777) : 0o644 }); fs.renameSync(tmp, p); }
+    catch (e) { try { fs.unlinkSync(tmp); } catch (_) {} throw e; }
+    out.push({ file: p, changed: true, created: !st });
   }
   return out;
 }

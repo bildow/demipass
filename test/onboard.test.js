@@ -214,3 +214,22 @@ test('the demipass MCP server sends the pane rules as its instructions at initia
   assert.ok(String(r.result.instructions).includes('never asked in chat'), JSON.stringify(r).slice(0, 300));
   assert.ok(!JSON.stringify(r).includes(SESSION), 'no session in the reply');
 });
+
+test('installPaneRules: never the home directory, never through a symlink twice, never over a directory, no temp file left', () => {
+  const { installPaneRules, PANE_RULES } = require('../onboard.js');
+  const r0 = installPaneRules(os.homedir());
+  assert.ok(r0.length === 1 && r0[0].skipped && !fs.existsSync(path.join(os.homedir(), 'AGENTS.md.tmp-' + process.pid)), 'home is skipped');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dp-rules2-'));
+  fs.writeFileSync(path.join(dir, 'CLAUDE.md'), 'shared\n'); fs.symlinkSync('CLAUDE.md', path.join(dir, 'AGENTS.md'));
+  const r = installPaneRules(dir);
+  assert.ok(fs.lstatSync(path.join(dir, 'AGENTS.md')).isSymbolicLink(), 'the symlink survives');
+  const c = fs.readFileSync(path.join(dir, 'CLAUDE.md'), 'utf8');
+  assert.strictEqual((c.match(/demipass-pane-rules:begin/g) || []).length, 1, 'the shared target is written once');
+  assert.ok(r.some(x => x.same_as) && c.startsWith('shared\n') && c.includes(PANE_RULES));
+  const d2 = fs.mkdtempSync(path.join(os.tmpdir(), 'dp-rules3-'));
+  fs.mkdirSync(path.join(d2, 'CLAUDE.md'));
+  const r2 = installPaneRules(d2);
+  assert.ok(r2.find(x => /CLAUDE\.md$/.test(x.file)).skipped && fs.existsSync(path.join(d2, 'AGENTS.md')));
+  assert.ok(!fs.readdirSync(d2).some(f => f.includes('.tmp-')), 'no temp file left');
+  fs.rmSync(dir, { recursive: true, force: true }); fs.rmSync(d2, { recursive: true, force: true });
+});
