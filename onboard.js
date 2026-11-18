@@ -190,15 +190,68 @@ async function listServices() {
     prices: Object.fromEntries((t.actions || []).filter(a => a.open).map(a => [a.action, a.price_dd])) }));
 }
 
-module.exports = { onboardService, listServices, resolveMcpServer, registerMcp, sessionToken, consentAtLeast };
+// ── The pane rules (Aaron 2026-11-18) ───────────────────────────────────────────────────────────────────────────────
+// Every agent pane on DemiPass gets the same standing rule, so a money question never dies in chat: it is filed as the
+// request that carries it and answered on the owner's phone. The demipass MCP server sends it as its `instructions`
+// at session start (Claude Code shows those); installPaneRules writes the same text into AGENTS.md (Codex) and
+// CLAUDE.md (Claude Code) of a project as one marked block, replaced in place when the text changes, never doubled.
+const PANE_RULES_VERSION = 1;
+const PANE_RULES = `DemiPass pane rules (v${PANE_RULES_VERSION}):
+- A spend, cost, funding, consent or access question is never asked in chat. File the DemiPass request that carries it and follow it: a multi-step spend → demipass_spend_ask (one card with every step and the total); a service's payment refused as insufficient → its fund ask (fleetgate_follow files it); a consent → the consent call; an agent wallet → the fleet's token request (the card shows its cost); a secret → demipass_use / demipass_onboard. The owner's approval on their phone IS the confirmation. Ask in chat only when no request type fits, and say which you tried.
+- Park on a 202 and follow it (approval_id); do not retry in a loop and do not re-ask. A pending card is the owner's to answer; the work resumes by itself once it is approved or funded.
+- Never print a token, password or secret value, and never type one into chat.`;
+const PANE_RULES_BEGIN = '<!-- demipass-pane-rules:begin -->', PANE_RULES_END = '<!-- demipass-pane-rules:end -->';
+function paneRulesBlock() { return `${PANE_RULES_BEGIN}\n## DemiPass\n\n${PANE_RULES}\n${PANE_RULES_END}\n`; }
+// Writes the block into <dir>/AGENTS.md and <dir>/CLAUDE.md (creating a file that is missing). Returns what changed.
+// Never into the home directory (Claude Code loads ~/CLAUDE.md for every session: a package must not put rules there;
+// #38 review), never through a symlink (the target is written once, where it lives), never over a directory; a
+// failed write leaves no temp file; an existing file keeps its mode.
+function installPaneRules(dir = process.cwd(), { files = ['AGENTS.md', 'CLAUDE.md'] } = {}) {
+  const out = [];
+  let home = ''; try { home = fs.realpathSync(os.homedir()); } catch (_) {}
+  let real = dir; try { real = fs.realpathSync(dir); } catch (_) {}
+  if (home && real === home) return [{ dir, skipped: 'the home directory: rules go into a project, not into every session' }];
+  const seen = new Set();
+  for (const name of files) {
+    let p = path.join(real, name);
+    let st = null; try { st = fs.lstatSync(p); } catch (_) {}
+    if (st && st.isSymbolicLink()) {
+      try { p = fs.realpathSync(p); st = fs.lstatSync(p); } catch (_) { out.push({ file: p, skipped: 'a dangling symlink' }); continue; }
+      // A symlink out of the project (CLAUDE.md -> ~/CLAUDE.md is common) is never followed: nothing is written
+      // outside `dir` (#38 re-review).
+      if (path.dirname(p) !== real) { out.push({ file: p, skipped: 'a symlink out of the project' }); continue; }
+    }
+    if (st && !st.isFile()) { out.push({ file: p, skipped: 'not a regular file' }); continue; }
+    if (seen.has(p)) { out.push({ file: p, changed: false, same_as: 'an earlier file' }); continue; }
+    seen.add(p);
+    let cur = ''; if (st) cur = fs.readFileSync(p, 'utf8');
+    const block = paneRulesBlock();
+    const i = cur.indexOf(PANE_RULES_BEGIN), j = cur.indexOf(PANE_RULES_END, i < 0 ? 0 : i);
+    let next;
+    if (i >= 0 && j > i) next = cur.slice(0, i) + block + cur.slice(j + PANE_RULES_END.length).replace(/^\n/, '');
+    else next = (cur ? cur.replace(/\s*$/, '\n\n') : '') + block;
+    if (next === cur) { out.push({ file: p, changed: false }); continue; }
+    const tmp = p + '.tmp-' + process.pid;
+    try { fs.writeFileSync(tmp, next, { mode: 0o644 }); if (st) fs.chmodSync(tmp, st.mode & 0o777); fs.renameSync(tmp, p); }
+    catch (e) { try { fs.unlinkSync(tmp); } catch (_) {} throw e; }
+    out.push({ file: p, changed: true, created: !st });
+  }
+  return out;
+}
+
+module.exports = { onboardService, listServices, resolveMcpServer, registerMcp, sessionToken, consentAtLeast, installPaneRules, PANE_RULES, PANE_RULES_VERSION };
 
 if (require.main === module) {
   const a = process.argv.slice(2);
   const opt = (n) => { const i = a.indexOf(n); return i >= 0 ? a[i + 1] : undefined; };
   (async () => {
     if (a[0] === '--list' || !a[0]) { console.log(JSON.stringify(await listServices(), null, 2)); return; }
+    // demipass-onboard --rules [dir]: install the pane rules into that project's AGENTS.md and CLAUDE.md, nothing else.
+    if (a[0] === '--rules') { console.log(JSON.stringify(installPaneRules(a[1] || process.cwd()), null, 2)); return; }
     const r = await onboardService({ service: a[0], capDd: opt('--cap') ? Number(opt('--cap')) : undefined, approvalId: opt('--approval') ? Number(opt('--approval')) : undefined,
       wait: !a.includes('--no-wait'), mcpConfig: opt('--mcp-config') || DEFAULT_MCP_CONFIG, log: m => console.error(m) });
+    // An onboarding that attached a server also installs the pane rules into the current project (--no-rules skips).
+    if (r.ok && !a.includes('--no-rules')) { try { r.pane_rules = installPaneRules(process.cwd()); } catch (e) { r.pane_rules_error = e.message; } }
     console.log(JSON.stringify(r, null, 2));
     process.exit(r.ok ? 0 : (r.status === 'approval_pending' ? 3 : 1));
   })().catch(e => { console.error('demipass-onboard:', e.message); process.exit(1); });

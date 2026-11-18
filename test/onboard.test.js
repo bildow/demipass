@@ -179,3 +179,65 @@ test('generic onboarding checks live admission for an already-consented wallet a
  st.refuseAdmission=false;r=await ob.onboardService({service:'fleetgate',mcpConfig:cfg,wait:false});
  assert.strictEqual(r.ok,true);assert.strictEqual(r.admission.protocol,1);assert.strictEqual(st.posts.length,before);
 });
+
+// ── the pane rules (Aaron 2026-11-18): one marked block in AGENTS.md and CLAUDE.md, replaced in place, never doubled ─
+test('installPaneRules writes one marked block into AGENTS.md and CLAUDE.md, keeps what was there, and is idempotent', () => {
+  const { installPaneRules, PANE_RULES } = require('../onboard.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dp-rules-'));
+  fs.writeFileSync(path.join(dir, 'CLAUDE.md'), '# My project\n\nKeep this line.\n');
+  let r = installPaneRules(dir);
+  assert.deepStrictEqual(r.map(x => [path.basename(x.file), x.changed, !!x.created]), [['AGENTS.md', true, true], ['CLAUDE.md', true, false]]);
+  const claude = fs.readFileSync(path.join(dir, 'CLAUDE.md'), 'utf8'), agents = fs.readFileSync(path.join(dir, 'AGENTS.md'), 'utf8');
+  assert.ok(claude.startsWith('# My project\n\nKeep this line.\n'), 'existing text kept');
+  assert.ok(claude.includes(PANE_RULES) && agents.includes(PANE_RULES));
+  assert.strictEqual((claude.match(/demipass-pane-rules:begin/g) || []).length, 1);
+  r = installPaneRules(dir);
+  assert.ok(r.every(x => x.changed === false), 'a second run changes nothing');
+  assert.strictEqual(fs.readFileSync(path.join(dir, 'CLAUDE.md'), 'utf8'), claude);
+  // an older block (another version's text) is replaced in place, text after it kept
+  fs.writeFileSync(path.join(dir, 'AGENTS.md'), 'before\n<!-- demipass-pane-rules:begin -->\nold rules\n<!-- demipass-pane-rules:end -->\nafter\n');
+  r = installPaneRules(dir, { files: ['AGENTS.md'] });
+  const a2 = fs.readFileSync(path.join(dir, 'AGENTS.md'), 'utf8');
+  assert.ok(r[0].changed && a2.startsWith('before\n') && a2.endsWith('after\n') && !a2.includes('old rules') && a2.includes(PANE_RULES));
+  assert.strictEqual((a2.match(/demipass-pane-rules:begin/g) || []).length, 1);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('the demipass MCP server sends the pane rules as its instructions at initialize', async () => {
+  const { spawn } = require('child_process');
+  const p = spawn(process.execPath, [path.join(__dirname, '..', 'mcp-server.js')], { env: { ...process.env, DEMIPASS_TOKEN: SESSION, DEMIPASS_URL: 'http://127.0.0.1:9' }, stdio: ['pipe', 'pipe', 'pipe'] });
+  let out = ''; p.stdout.on('data', d => { out += d; });
+  p.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }) + '\n');
+  await new Promise(ok => { const t = setInterval(() => { if (out.includes('\n')) { clearInterval(t); ok(); } }, 20); setTimeout(() => { clearInterval(t); ok(); }, 5000); });
+  p.kill();
+  const r = JSON.parse(out.split('\n')[0]);
+  assert.ok(String(r.result.instructions).includes('never asked in chat'), JSON.stringify(r).slice(0, 300));
+  assert.ok(!JSON.stringify(r).includes(SESSION), 'no session in the reply');
+});
+
+test('installPaneRules: never the home directory, never through a symlink twice, never over a directory, no temp file left', () => {
+  const { installPaneRules, PANE_RULES } = require('../onboard.js');
+  const r0 = installPaneRules(os.homedir());
+  assert.ok(r0.length === 1 && r0[0].skipped && !fs.existsSync(path.join(os.homedir(), 'AGENTS.md.tmp-' + process.pid)), 'home is skipped');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dp-rules2-'));
+  fs.writeFileSync(path.join(dir, 'CLAUDE.md'), 'shared\n'); fs.symlinkSync('CLAUDE.md', path.join(dir, 'AGENTS.md'));
+  const r = installPaneRules(dir);
+  assert.ok(fs.lstatSync(path.join(dir, 'AGENTS.md')).isSymbolicLink(), 'the symlink survives');
+  const c = fs.readFileSync(path.join(dir, 'CLAUDE.md'), 'utf8');
+  assert.strictEqual((c.match(/demipass-pane-rules:begin/g) || []).length, 1, 'the shared target is written once');
+  assert.ok(r.some(x => x.same_as) && c.startsWith('shared\n') && c.includes(PANE_RULES));
+  const d3 = fs.mkdtempSync(path.join(os.tmpdir(), 'dp-rules4-')), outside = path.join(d3, 'elsewhere.md');
+  fs.writeFileSync(outside, 'home file\n'); const d4 = fs.mkdtempSync(path.join(os.tmpdir(), 'dp-rules5-'));
+  fs.symlinkSync(outside, path.join(d4, 'CLAUDE.md'));
+  const r3 = installPaneRules(d4);
+  assert.ok(r3.find(x => x.skipped === 'a symlink out of the project'), JSON.stringify(r3));
+  assert.strictEqual(fs.readFileSync(outside, 'utf8'), 'home file\n', 'a symlink out of the project is not followed');
+  assert.ok(fs.existsSync(path.join(d4, 'AGENTS.md')));
+  fs.rmSync(d3, { recursive: true, force: true }); fs.rmSync(d4, { recursive: true, force: true });
+  const d2 = fs.mkdtempSync(path.join(os.tmpdir(), 'dp-rules3-'));
+  fs.mkdirSync(path.join(d2, 'CLAUDE.md'));
+  const r2 = installPaneRules(d2);
+  assert.ok(r2.find(x => /CLAUDE\.md$/.test(x.file)).skipped && fs.existsSync(path.join(d2, 'AGENTS.md')));
+  assert.ok(!fs.readdirSync(d2).some(f => f.includes('.tmp-')), 'no temp file left');
+  fs.rmSync(dir, { recursive: true, force: true }); fs.rmSync(d2, { recursive: true, force: true });
+});
