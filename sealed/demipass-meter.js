@@ -118,6 +118,7 @@ class DemiPassMeter {
       v.charge.margin_pct !== 0 ||
       v.charge.action !== "release" ||
       v.charge.dd !== 2 ||
+      v.charge.max_total_dd !== 2 ||
       v.charge.cost_dd !== 2
     )
       throw Error("payment receipt mismatch");

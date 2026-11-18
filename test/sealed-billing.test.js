@@ -45,7 +45,7 @@ test('lost successful charge response holds first caller; restart recovers signe
  assert.equal(f.server.state.charges,1);assert.equal(out.charge.max_total_dd,2);
 });
 test('tampered, unsigned or wrong-key recovery cannot authorize disclosure',async t=>{
- for(const mode of ['signature','unsigned','key','payer','amount'])await t.test(mode,async t=>{
+ for(const mode of ['signature','unsigned','key','payer','amount','ceiling','missing_ceiling'])await t.test(mode,async t=>{
   const f=await httpFixture(t),m=f.coordinator.meter,charge=m.charge.bind(m);
   m.charge=async(...args)=>{await charge(...args);throw Error('lost response');};
   await assert.rejects(f.coordinator.release(f.req,token));
@@ -54,6 +54,8 @@ test('tampered, unsigned or wrong-key recovery cannot authorize disclosure',asyn
   if(mode==='key')row.idempotency_key='another-charge-key';
   if(mode==='payer')row.payer='another-wallet';
   if(mode==='amount')row.dd=3;
+  if(mode==='ceiling')row.max_total_dd=3;
+  if(mode==='missing_ceiling')delete row.max_total_dd;
   if(mode==='unsigned') {const call=m.call.bind(m);m.call=async(...args)=>{const r=await call(...args);if(args[0].includes('/charges?'))delete r.received[0].sig;return r;};}
   const before=fs.readFileSync(f.coordinator.journal.file);
   await assert.rejects(f.coordinator.release(f.req,token));

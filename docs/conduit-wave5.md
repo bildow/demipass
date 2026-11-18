@@ -26,10 +26,13 @@ one transaction. The ceiling is per immutable charge, not a new budget grant.
 A dry run reserves nothing. Token and daily caps remain independent constraints.
 
 The tenant's exact-key lookup now includes original receipt/signature. The SDK
-checks pinned issuer, service, key, action, cost, zero margin and total from signed
-bytes. It disregards unsigned projection fields for recovery. Coordinator checks
-payer; another wallet cannot recover the package. A fresh charge also attests the
-ceiling. On explicit replay a renewed token may receive the original token's
+checks pinned issuer, service, key, action, cost, zero margin, total and the exact
+`max_total_dd: 2` ceiling from signed bytes on BOTH fresh charge and lookup recovery.
+It disregards unsigned projection fields for recovery. Coordinator checks payer;
+another wallet cannot recover the package. Missing or different signed ceilings,
+including legacy receipts without this field, hold for manual reconciliation;
+they never authorize a replacement debit or reconstruction. On explicit replay a
+renewed token may receive the original token's
 receipt for the same payer. This does not mint new authority.
 
 Encrypted fulfillment is fsynced before debit; paid state is fsynced before
