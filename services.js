@@ -16,6 +16,7 @@
  * a person's phone) also throws, with err.pending === true and err.body.approval_id.
  */
 
+const { assertPublicRoute, publicLookup } = require('./public-route');
 const https = require('https');
 const http = require('http');
 const crypto = require('crypto');
@@ -37,13 +38,13 @@ class ServiceError extends Error {
 
 function call(baseUrl, token, method, path, body, timeoutMs) {
   return new Promise((resolve, reject) => {
-    const u = new URL(baseUrl + path);
+    const u = assertPublicRoute(baseUrl + path);
     const t = u.protocol === 'https:' ? https : http;
     const payload = body === undefined ? null : JSON.stringify(body);
     const headers = { Accept: 'application/json', 'X-DemiPass-Agent': 'demipass-sdk/services' };
     if (token) headers.Authorization = `Bearer ${token}`;
     if (payload) { headers['Content-Type'] = 'application/json'; headers['Content-Length'] = Buffer.byteLength(payload); }
-    const req = t.request({ method, hostname: u.hostname, port: u.port || (u.protocol === 'https:' ? 443 : 80), path: u.pathname + u.search, headers, timeout: timeoutMs }, (res) => {
+    const req = t.request({ method, hostname: u.hostname, lookup: publicLookup, port: u.port || (u.protocol === 'https:' ? 443 : 80), path: u.pathname + u.search, headers, timeout: timeoutMs }, (res) => {
       const chunks = [];
       res.on('data', (c) => chunks.push(c));
       res.on('end', () => {

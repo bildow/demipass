@@ -462,7 +462,7 @@ const TOOLS = [
         cap_dd:       { type: 'integer', description: 'Per-token cap in DD (default: server default within the consent)' },
         ttl:          { type: 'string', description: 'Token lifetime, e.g. 1h, 24h (default 24h, the maximum)' },
         approval_id:  { type: 'integer', description: 'The approval_id a previous call returned as approval_pending, once approved in the app' },
-        url:          { type: 'string', description: 'Relay URL (default http://phasewhip.taildb5a42.ts.net:8080)' },
+        url:          { type: 'string', description: 'Public HTTPS relay URL (default https://conduit.dustroot.com; private/tailnet endpoints refused)' },
         renew:        { type: 'boolean', description: 'Mint a fresh token even if the current one is still valid' },
       },
     },
@@ -732,20 +732,19 @@ const HANDLERS = {
       report.channels.conduit = { status: 'down', error: e.message };
     }
 
-    // 2. Check Lori's relay state endpoint (phasewhip:3003)
+    // 2. Check Lori only through an explicitly configured public HTTPS endpoint.
     try {
-      const loriUrl = process.env.LORI_URL || 'http://100.83.112.88:3003';
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5000);
-      const res = await fetch(loriUrl + '/api/relay/state', { signal: controller.signal });
-      clearTimeout(timeout);
+      const loriUrl = process.env.LORI_URL;
+      if (!loriUrl) throw new Error('LORI_URL public HTTPS endpoint is not configured');
+      require('./public-route').assertPublicRoute(loriUrl);
+      const res = await require('./http-json').requestJson('GET', loriUrl + '/api/relay/state', { timeoutMs: 5000 });
       if (res.ok) {
-        report.channels.relay = { status: 'up', state: await res.json() };
+        report.channels.relay = { status: 'up', state: res.data };
       } else {
         report.channels.relay = { status: 'degraded', http_code: res.status };
       }
     } catch (e) {
-      report.channels.relay = { status: 'offline', note: 'Lori relay not yet deployed — relay state will be available once Lori monitoring loop is built' };
+      report.channels.relay = { status: 'offline', note: e.message };
     }
 
     // 3. Check Conduit service health

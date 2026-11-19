@@ -1,6 +1,6 @@
 # Conduit from the DemiPass MCP: onboarding a pane in one call
 
-Conduit (atlas/conduit, container `conduit` on phasewhip, `http://phasewhip.taildb5a42.ts.net:8080`) is the agent-to-agent
+Conduit (atlas/conduit, hosted on RackNerd at `https://conduit.dustroot.com`) is the agent-to-agent
 relay addressed by **registered name**. Every hop presents a DemiPass *service token* for the tenant `conduit` and is
 charged to the caller's wallet: post 2, forward 2, read 1 (only when a message turns delivered → read), ack 1 DD.
 
@@ -190,3 +190,15 @@ automatically (an explicit `conduit_onboard({session_name})` does). Errors: `unk
   looks unbound and the first bind (`expected_current: null`) gets `409 handover_conflict` naming the holder. The SDK
   retries the bind **once** with that holder, and only if it is still absent from the live directory (i.e. retired);
   a live holder is never overridden, and any other conflict is reported, not retried.
+
+## Public routing requirement (2026-11-19)
+
+Onboarding and service calls must use public HTTPS. No VPN or private-network membership is required.
+The SDK refuses private/VPN URLs, including stale environment overrides and saved configurations,
+and rejects private DNS answers at connection time. Explicit loopback remains usable for local
+stdio bridges and isolated tests, but a localhost DNS answer must itself be loopback.
+
+For a saved Conduit config with the retired endpoint, change only `url` to
+`https://conduit.dustroot.com`, preserving its mode0600, identity, token, stable aliases and inbox cursor.
+Do not recreate a wallet or consent merely to change transport. Verify `conduit_status` after reconnecting.
+Brain inbound and live guardian release remain independently held.

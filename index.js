@@ -21,6 +21,7 @@
  *   const result = await demipass.execute({ token, action: 'inject_env' });
  */
 
+const { assertPublicRoute, publicLookup } = require('./public-route');
 const https = require('https');
 const http = require('http');
 const { URL } = require('url');
@@ -54,13 +55,13 @@ function _request(method, path, body, query) {
       if (qs) url += `?${qs}`;
     }
 
-    const parsed = new URL(url);
+    const parsed = assertPublicRoute(url);
     const transport = parsed.protocol === 'https:' ? https : http;
     const payload = body ? JSON.stringify(body) : null;
 
     const opts = {
       method,
-      hostname: parsed.hostname,
+      hostname: parsed.hostname, lookup: publicLookup,
       port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
       path: parsed.pathname + parsed.search,
       headers: {
@@ -735,7 +736,7 @@ async function rotateBlind({ ref, target_host, target_user, reason } = {}) {
 // fallbacks for a machine that has no file yet (a CONDUIT_TOKEN that is not a DemiPass service token for conduit —
 // the pre-rebuild bearers — is ignored, with the reason reported by conduitStatus()).
 
-const CONDUIT_DEFAULT_URL = 'http://phasewhip.taildb5a42.ts.net:8080';
+const CONDUIT_DEFAULT_URL = 'https://conduit.dustroot.com';
 const CONDUIT_RENEW_BEFORE_MS = 5 * 60 * 1000;
 
 let conduitPane = null;
@@ -1019,12 +1020,12 @@ async function _conduitToken({ force } = {}) {
 }
 
 function _conduitHttp(method, path, body, token, baseUrl) {
-  const url = new URL(path, (baseUrl || conduitConfig().url) + '/');
+  const url = assertPublicRoute(new URL(path, (baseUrl || conduitConfig().url) + '/'));
   const proto = url.protocol === 'https:' ? https : http;
   const postData = body ? JSON.stringify(body) : null;
   return new Promise((resolve, reject) => {
     const opts = {
-      hostname: url.hostname, port: url.port || (url.protocol === 'https:' ? 443 : 80),
+      hostname: url.hostname, lookup: publicLookup, port: url.port || (url.protocol === 'https:' ? 443 : 80),
       path: url.pathname + url.search, method,
       headers: { 'Accept': 'application/json', 'Content-Type': 'application/json', 'X-DemiPass-Agent': AGENT_HEADER },
       timeout: 15000,

@@ -17,7 +17,7 @@ const tenants = {
   pricey: { slug: 'pricey', name: 'Pricey', endpoint: 'https://p.example', mcp_server: null, actions: [{ action: 'x', open: true, price_dd: 999999, max_price_dd: 999999 }] },
   fleetgate: { slug: 'fleetgate', name: 'FLEETGATE', endpoint: 'https://repo.example/-/fleetgate/door', mcp_server: 'demipass#fleetgate-mcp',
     actions: [{ action: 'submit', open: true, price_dd: 696, max_price_dd: 696 }, { action: 'sign-charter', open: false, price_dd: 12 }] },
-  conduit: { slug: 'conduit', name: 'Conduit', endpoint: 'http://phasewhip.example.ts.net:8080', mcp_server: 'demipass#demipass-mcp', actions: [{ action: 'post', open: true, price_dd: 3 }] },
+  conduit: { slug: 'conduit', name: 'Conduit', endpoint: 'https://conduit.example.com', mcp_server: 'demipass#demipass-mcp', actions: [{ action: 'post', open: true, price_dd: 3 }] },
   bare: { slug: 'bare', name: 'Bare', endpoint: null, mcp_server: null, actions: [] },
 };
 const srv = http.createServer((req, res) => {
@@ -279,4 +279,16 @@ test('onboarding refuses to attach a pane or agent until "Write agent instructio
   assert.ok(rr.find(x => /CLAUDE\.md$/.test(x.file) && x.changed), 'asked for: written');
   for (const x of [d, g, path.dirname(cfg)]) fs.rmSync(x, { recursive: true, force: true });
   delete st.rulesEnabled;
+});
+
+// A stale registry entry must fail before consent, token minting or MCP attachment.
+test('private service endpoint refuses onboarding before any authorization mutation', async () => {
+  const old = tenants.conduit.endpoint, n = st.posts.length;
+  tenants.conduit.endpoint = 'https://phasewhip.example.ts.net:8080';
+  try {
+    const r = await ob.onboardService({ service: 'conduit', mcpConfig: cfg, wait: false });
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.status, 'private_service_route');
+    assert.strictEqual(st.posts.length, n);
+  } finally { tenants.conduit.endpoint = old; }
 });

@@ -3,17 +3,18 @@
 // every bin (#17 review: fetch and AbortSignal.timeout are missing before Node 18). A redirect is an error, as with
 // fetch's redirect: 'error'; past timeoutMs the request is cut and the error is named TimeoutError.
 const http = require('http');
+const { assertPublicRoute, publicLookup } = require('./public-route');
 const https = require('https');
 
-function requestJson(method, url, { headers = {}, body, timeoutMs = 15000 } = {}) {
-  const u = new URL(url);
+async function requestJson(method, url, { headers = {}, body, timeoutMs = 15000 } = {}) {
+  const u = assertPublicRoute(url);
   const mod = u.protocol === 'https:' ? https : u.protocol === 'http:' ? http : null;
   if (!mod) return Promise.reject(new Error(`unsupported URL: ${u.protocol}`));
   const payload = body === undefined ? null : Buffer.from(JSON.stringify(body));
   return new Promise((resolve, reject) => {
     let done = false;
     const finish = (f, v) => { if (!done) { done = true; clearTimeout(timer); f(v); } };
-    const req = mod.request(u, { method, headers: { ...headers, ...(payload ? { 'content-type': 'application/json', 'content-length': payload.length } : {}) } }, (res) => {
+    const req = mod.request(u, { method, lookup: publicLookup, headers: { ...headers, ...(payload ? { 'content-type': 'application/json', 'content-length': payload.length } : {}) } }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400) { res.resume(); return finish(reject, Object.assign(new Error(`redirected (${res.statusCode}) — not followed`), { name: 'RedirectError', status: res.statusCode })); }
       const chunks = [];
       res.on('data', (c) => chunks.push(c));
