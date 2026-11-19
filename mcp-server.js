@@ -29,6 +29,16 @@ demipass.configure({
 // ---------------------------------------------------------------------------
 
 const TOOLS = [
+  {"name": "conduit_guarded_prepare", "description": "Guarded prepare: seal a plaintext for the configured recipient through an explicitly operator-configured endpoint (local, no network). Disabled without the private launch permit. Never charges. No caller paths, tokens or trust in arguments.", "inputSchema": {"type": "object", "properties": {"plaintext": {"type": "string"}, "public_text": {"type": "string"}, "padding": {"type": "string"}}, "additionalProperties": false}},
+  {"name": "conduit_guarded_grant", "description": "Guarded grant: bind a sealed envelope and capsule into a release grant through the operator-configured endpoint (local, no network). Disabled without the private launch permit. Never charges. No caller paths, tokens or trust in arguments.", "inputSchema": {"type": "object", "properties": {"envelope": {"type": "object"}, "capsule": {"type": "object"}}, "additionalProperties": false}},
+  {"name": "conduit_guarded_release", "description": "Guarded release: present a grant with guardian approvals to the coordinator for decryption and acknowledgment. The only guarded tool that contacts the network and may charge, exactly 2 DD per paid release; a replay of a paid request_id returns the same result and charges nothing. Preserve the original request ID on uncertainty. Disabled without the private launch permit.", "inputSchema": {"type": "object", "properties": {"request_id": {"type": "string"}, "approvals": {"type": "object"}, "padding": {"type": "string"}}, "additionalProperties": false}},
+  {"name": "conduit_guarded_dispute", "description": "Guarded dispute: file a complaint about a paid release with the coordinator (network). Never charges. Preserve the original request ID. Disabled without the private launch permit.", "inputSchema": {"type": "object", "properties": {"request_id": {"type": "string"}, "complaint": {"type": "object"}}, "additionalProperties": false}},
+
+{
+  name: 'conduit_sealed_readiness',
+  description: 'Read-only local readiness for Brain, Claude and Codex: checks pinned participant keys, source inventory, signed guardian enrollment/status and retained checkpoint. Missing or unknown evidence holds. Never charges, enrolls, installs, advances a checkpoint or enables release; even valid signatures do not prove independent custody. Configuration is launcher-owned, not supplied in tool arguments.',
+  inputSchema: { type: 'object', additionalProperties: false, properties: {} }
+},
 {
   "name": "conduit_sealed_identity",
   "description": "Opt-in local E2EE identity for this mailbox. Returns public keys only. Pin public keys with peers out of band; no automatic trust or guardian enrollment.",
@@ -669,7 +679,12 @@ const HANDLERS = {
     if (!args || !args.service) return { ok: true, services: await ob.listServices() };
     return await ob.onboardService({ service: args.service, capDd: args.daily_cap_dd, approvalId: args.approval_id, wait: false });
   },
+  async conduit_guarded_prepare(args) { return await demipass.conduitGuardedPrepare(args); },
+  async conduit_guarded_grant(args) { return await demipass.conduitGuardedGrant(args); },
+  async conduit_guarded_release(args) { return await demipass.conduitGuardedRelease(args); },
+  async conduit_guarded_dispute(args) { return await demipass.conduitGuardedDispute(args); },
   async conduit_sealed_identity(args) { return await demipass.conduitSealedIdentity(args); },
+  async conduit_sealed_readiness(args) { return demipass.conduitSealedReadiness(args); },
   async conduit_sealed_prepare(args) { return await demipass.conduitSealedPrepare(args); },
   async conduit_sealed_send(args) { return await demipass.conduitSealedSend(args); },
   async conduit_sealed_capsule(args) { return await demipass.conduitSealedCapsule(args); },

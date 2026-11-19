@@ -1373,6 +1373,11 @@ function conduitSealedClient() {
   return new (require('./sealed/client').Client)({mailbox:cfg.stable_address || cfg.name,directory:process.env.DEMIPASS_SEALED_DIRECTORY});
 }
 async function conduitSealedIdentity(){return conduitSealedClient().initialize();}
+function conduitGuardedPrepare(args) { return require('./sealed/endpoint-mcp').invoke('prepare',args); }
+function conduitGuardedGrant(args) { return require('./sealed/endpoint-mcp').invoke('grant',args); }
+function conduitGuardedRelease(args) { return require('./sealed/endpoint-mcp').invoke('release',args); }
+function conduitGuardedDispute(args) { return require('./sealed/endpoint-mcp').invoke('dispute',args); }
+function conduitSealedReadiness(args = {}) { return require('./sealed/readiness').localReadiness(args); }
 async function conduitSealedPrepare(args){
   if(args.policy || args.fixture)throw new Error('MCP guardian enrollment/release is disabled until independent custodians are selected');
   return conduitSealedClient().prepare(args);
@@ -1514,6 +1519,8 @@ module.exports = {
   conduitUnbind,
   conduitSend,
   conduitSealedIdentity,
+  conduitSealedReadiness,
+  conduitGuardedPrepare, conduitGuardedGrant, conduitGuardedRelease, conduitGuardedDispute,
   conduitSealedPrepare,
   conduitSealedSend,
   conduitSealedOpen,

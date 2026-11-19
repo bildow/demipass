@@ -90,10 +90,11 @@ class Guardian {
     recipient,
     journal,
     fixture = false,
+    authorization,
     admission,
     now = Date.now,
   }) {
-    p.policyForUse(policy, { fixture });
+    p.policyForUse(policy, { fixture, authorization });
     this.policy = structuredClone(policy);
     this.checkStatus = requireGate(admission, this.policy);
     this.id = id;
@@ -214,10 +215,11 @@ class Coordinator {
     meter,
     guardians,
     fixture = false,
+    authorization,
     admission,
     now = Date.now,
   }) {
-    p.policyForUse(policy, { fixture });
+    p.policyForUse(policy, { fixture, authorization });
     this.policy = structuredClone(policy);
     this.checkStatus = requireGate(admission, this.policy);
     this.sender = sender;

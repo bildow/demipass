@@ -1,4 +1,10 @@
 "use strict";
+const { timingSafeEqual } = require("node:crypto");
+// Constant-time bearer comparison (#41 review L3): a length mismatch is a mismatch, compared on equal-length buffers.
+function sameSecret(a, b) {
+  const x = Buffer.from(String(a || ""), "utf8"), y = Buffer.from(String(b || ""), "utf8");
+  return x.length === y.length && timingSafeEqual(x, y);
+}
 const http = require("node:http"),
   https = require("node:https");
 function request(
@@ -67,19 +73,22 @@ function request(
     req.end(raw);
   });
 }
-function serve(handler, { token, port = 0, fixture = false } = {}) {
-  if (!fixture) throw Error("live guardian release disabled");
+function serve(handler, { token, port = 0, fixture = false, tls, host = "127.0.0.1", authorization, policy } = {}) {
+  if (!fixture) {
+    require("./runtime-authorization").assertAuthorization(authorization, policy);
+    if (!tls || typeof tls.key !== "string" || typeof tls.cert !== "string") throw Error("TLS required");
+  } else if (tls || host !== "127.0.0.1") throw Error("fixture must stay loopback");
   if (typeof token !== "string" || token.length < 32)
     throw Error("private service credential required");
   let active = 0;
-  const server = http.createServer((req, res) => {
+  const handle = (req, res) => {
     const answer = (status, obj) => {
       res.writeHead(status, { "content-type": "application/json" });
       res.end(JSON.stringify(obj));
     };
     if (req.method !== "POST" || req.url !== "/release")
       return answer(404, { error: "not_found" });
-    if (req.headers.authorization !== "Bearer " + token)
+    if (!sameSecret(req.headers.authorization, "Bearer " + token))
       return answer(403, { error: "unauthorized" });
     if (active >= 32) return answer(429, { error: "busy" });
     active++;
@@ -129,16 +138,17 @@ function serve(handler, { token, port = 0, fixture = false } = {}) {
         releaseSlot();
       }
     });
-  });
+  };
+  const server = fixture ? http.createServer(handle) : https.createServer({key:tls.key, cert:tls.cert, minVersion:"TLSv1.3"}, handle);
   server.requestTimeout = 15000;
   server.headersTimeout = 10000;
   server.setTimeout(20000, (s) => s.destroy());
   return new Promise((resolve, reject) => {
     server.once("error", reject);
-    server.listen(port, "127.0.0.1", () =>
+    server.listen(port, host, () =>
       resolve({
         server,
-        url: "http://127.0.0.1:" + server.address().port,
+        url: (fixture ? "http://" : "https://") + (host.includes(":") ? "["+host+"]" : host) + ":" + server.address().port,
         close: async () => {
           server.closeAllConnections();
           await new Promise((r) => server.close(r));

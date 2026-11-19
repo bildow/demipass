@@ -119,6 +119,7 @@ class Client {
     defer_capsule = true,
     policy = null,
     fixture = false,
+    authorization,
   }) {
     // Caller must obtain recipient from a trusted channel; never learn keys from relay ciphertext.
     if (typeof defer_capsule !== "boolean")
@@ -130,6 +131,7 @@ class Client {
       publicText: public_text,
       policy,
       fixture,
+      authorization,
     });
     const id = packet.envelope.header.id;
     writeNew(this.file("capsules", id), packet.capsule);

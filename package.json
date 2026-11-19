@@ -70,7 +70,10 @@
     "docs/conduit-wave2.md",
     "docs/conduit-wave3.md",
     "docs/conduit-wave4.md",
-    "docs/conduit-wave5.md"
+    "docs/conduit-wave5.md",
+    "docs/conduit-wave6.md",
+    "docs/conduit-wave6-runtime.md",
+    "docs/conduit-goose.md"
   ],
   "dependencies": {
     "hpke-js": "1.8.1",

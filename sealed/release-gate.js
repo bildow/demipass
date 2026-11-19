@@ -1,10 +1,10 @@
 "use strict";
-// Local fixture adapter for the production enforcement boundary. Never live authority.
+// Persistent status enforcement. Reviewed use additionally requires a local operator permit.
 const p = require("./crypto"), { evaluate, validateCheckpoint } = require("./revocation");
 const state = new WeakMap();
 class ReleaseGate {
-  constructor({ policy, trusted, journal, feed, expected_checkpoint, fixture = false, now = Date.now }) {
-    p.policyForUse(policy, { fixture });
+  constructor({ policy, trusted, journal, feed, expected_checkpoint, fixture = false, authorization, now = Date.now }) {
+    p.policyForUse(policy, { fixture, authorization });
     if (typeof feed !== "function" || typeof now !== "function" ||
         (expected_checkpoint !== "new" && (typeof expected_checkpoint !== "string" ||
          !/^[a-f0-9]{64}$/.test(expected_checkpoint)))) throw Error("release gate configuration required");
@@ -13,7 +13,7 @@ class ReleaseGate {
     if (prior !== undefined) validateCheckpoint(prior);
     const actual = prior === undefined ? "new" : p.hash(prior);
     if (actual !== expected_checkpoint) throw Error("release checkpoint requires reconciliation");
-    state.set(this, { ...pins, journal, feed, now, expected: actual, failed: false });
+    state.set(this, { ...pins, journal, feed, now, expected: actual, failed: false, authorization });
   }
   assertPolicy(policy) {
     const s = state.get(this);
@@ -22,6 +22,7 @@ class ReleaseGate {
   check() {
     const s = state.get(this);
     if (s.failed) throw Error("release gate persistence uncertain; restart and reconcile");
+    if (s.authorization) require("./runtime-authorization").assertAuthorization(s.authorization, s.policy);
     const packet = s.feed();
     // Feed cannot override pins, policy, prior state or checking time.
     p.fields(packet, ["evidence", "snapshots"]);

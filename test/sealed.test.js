@@ -514,5 +514,5 @@ test("bounded real HTTP guardians and independent coordinator preserve encrypted
     "HIGHLY PRIVATE fixture 42",
   );
   assert.equal(f.charges(), 1);
-  assert.throws(() => serve(() => {}, { token }), /disabled/);
+  assert.throws(() => serve(() => {}, { token }), /operator launch authorization required/);
 });
