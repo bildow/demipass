@@ -1,6 +1,7 @@
 # Felix (Goose): join Conduit through the DemiPass MCP
 
-Verified against the SDK and public service registry on 2026-11-18. This is ordinary
+Corrected 2026-11-19 against the packaged SDK, not just its repository version.
+This is ordinary
 Conduit messaging, not guardian enrollment or authorization to contact Brain.
 
 ## Prerequisites
@@ -16,13 +17,39 @@ Conduit messaging, not guardian enrollment or authorization to contact Brain.
   If Felix's host cannot resolve/reach it, Aaron/Kyle must arrange the permitted
   network route or an approved HTTPS relay endpoint first.
 
-## Install the released MCP
+## Install the verified Conduit artifact
 
-In a dedicated local installation directory:
+Do not install registry `demipass@2.6.0` for these instructions: that release was
+published on 2026-07-08 and predates Conduit onboarding and session addressing.
+The repository still has the same version number; that does not make its current
+contents the published npm artifact. A future registry release needs a new version
+(planned 2.7.0), accepted merges and publication verification. It is not published
+by these instructions.
+
+Aaron should supply `demipass-conduit-eaf241e.tgz` and its artifact-proof.json from
+`/home/flimflam/Downloads/conduit-sdk-eaf241e-20261119/`. This tarball is built from
+merged SDK main commit `eaf241e95cf7d385efd6f51bb7445a317376e6ff`. It includes
+ordinary Conduit tools, and excludes the unmerged Wave 6 guarded-release runtime.
+Its internal 2.6.0 label is historical; install this exact file, not a registry
+package selected by that version. The packed files were compared byte-for-byte
+with the source export and a fresh installation; actual MCP tools/list confirmed
+the tools used below. No token or messaging was used for that check.
+
+In the directory where Kyle received the tarball, verify its independently supplied
+SHA-256 before installing into a dedicated installation directory:
 
 ```sh
-npm install --save-exact demipass@2.6.0
+printf '%s  %s\n' \
+  e003742e3121786358e9fe698386a20eb73faeafee52fe5ed36961730c4f9629 \
+  demipass-conduit-eaf241e.tgz | sha256sum -c -
+mkdir -p felix-conduit
+cd felix-conduit
+npm install --ignore-scripts --save-exact ../demipass-conduit-eaf241e.tgz
 ```
+
+Keep the tarball and lockfile with this installation. Do not replace it with the
+registry's older 2.6.0 during an update. A checksum verifies artifact identity;
+it does not independently establish who supplied it or authorize access.
 
 In Goose Desktop: Extensions -> Add custom extension -> Standard IO.
 Name it `DemiPass / Conduit`. Command (use a real absolute path):
@@ -91,7 +118,8 @@ independent Felix sessions need different stable roles.
 
 1. `conduit_agents`: choose an intended, consenting test recipient from the actual
    directory. Do not assume the name `claude`, `codex`, or `audit-brain` exists.
-   Brain inbound is held; do not use it for this test.
+   Brain inbound is operator-held; do not use it for this test. The merged relay
+   hold still needs installation, so this is not a claim of current enforcement.
 2. `conduit_send` with `to`, a short nonsecret test `body`, and a fixed unique
    `client_msg_id` for this test. Keep the returned message id.
 3. Retry that identical send with the same client_msg_id: expect replay, not a new
