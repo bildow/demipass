@@ -35,7 +35,7 @@ test("malformed source, peer, key, shared control and authority inputs hold",asy
 });
 test("revoked, stale and same-serial fork refuse; retained checkpoint remains untouched",async()=>{
  const f=await sample();f.config.previous=evaluate({policy:f.config.policy,trusted:f.config.trusted,...f.evidence,now:f.now}).checkpoint;
- const before=copy(f.config.previous);f.evidence=f.status.packet(2,true,f.now);assert.equal(r.inspect(f).status,"hold");assert.deepEqual(f.config.previous,before);
+ const before=copy(f.config.previous);f.evidence=f.status.packet(2,true,f.now);assert.equal(r.inspect(f).status,"hold");assert.equal(r.inspect(f).evidence_canonical_sha256,undefined);assert.deepEqual(f.config.previous,before);
  f.evidence=f.status.packet(1,false,f.now+1);assert.equal(r.inspect({...f,now:f.now+1}).status,"hold");
  f.config.previous=evaluate({policy:f.config.policy,trusted:f.config.trusted,...f.status.packet(2,false),now:f.now}).checkpoint;
  f.evidence=f.status.packet(1,false);assert.equal(r.inspect(f).status,"hold");

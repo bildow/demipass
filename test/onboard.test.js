@@ -248,7 +248,13 @@ test('onboarding refuses to attach a pane or agent until "Write agent instructio
   const { onboardService, installPaneRulesWithPermission, installPaneRules, PANE_RULES_SHA256 } = require('../onboard.js');
   const cfg = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'dp-perm-')), 'mcp.json');
   st.rulesEnabled = false; st.consents = [{ id: 1, service: 'fleetgate', daily_cap_dd: 5000, status: 'active' }];
-  let r = await onboardService({ service: 'fleetgate', wait: false, mcpConfig: cfg, log: () => {} });
+  // Supply the fixture identity explicitly: an absent config otherwise falls back
+  // to the developer's real credentials, and fails before this gate in clean CI.
+  const previousToken = process.env.DEMIPASS_TOKEN;
+  process.env.DEMIPASS_TOKEN = SESSION;
+  let r;
+  try { r = await onboardService({ service: 'fleetgate', wait: false, mcpConfig: cfg, log: () => {} }); }
+  finally { if (previousToken === undefined) delete process.env.DEMIPASS_TOKEN; else process.env.DEMIPASS_TOKEN = previousToken; }
   assert.strictEqual(r.ok, false); assert.strictEqual(r.status, 'needs_permission'); assert.match(r.error, /Write agent instruction files/);
   assert.ok(!fs.existsSync(cfg), 'nothing attached without the permission');
   r = await installPaneRulesWithPermission(fs.mkdtempSync(path.join(os.tmpdir(), 'dp-perm2-')), SESSION);
