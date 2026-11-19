@@ -10,7 +10,7 @@ test('refuse private, tailnet, disguised IP and plaintext remote service endpoin
     'https://100.64.0.2', 'https://100.127.255.254', 'https://1683198040',
     'https://0x64537058', 'https://[fd7a:115c:a1e0::1]',
     'https://[::ffff:100.83.112.88]', 'https://10.225.75.1',
-    'https://192.168.0.205', 'https://phasewhip', 'https://user:pass@example.com']) {
+    'https://192.168.0.205', 'https://[fec0::1]', 'https://[febf::1]', 'https://[64:ff9b::6453:7058]', 'https://[2002:6453:7058::1]', 'https://198.18.0.1', 'https://phasewhip', 'https://user:pass@example.com']) {
     assert.throws(() => assertPublicRoute(u), { code: 'PRIVATE_SERVICE_ROUTE' }, u);
   }
 });
