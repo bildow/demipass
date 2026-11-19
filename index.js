@@ -535,9 +535,15 @@ async function spendAskClose({ spendAskId, spend_ask_id } = {}) {
 async function fleetJoin({ owner, handle, note } = {}) {
   if (!owner || !String(owner).trim()) throw new Error('fleetJoin() needs owner: the person\'s DemiPass username or email');
   const body = { to: String(owner).trim(), as: 'join', ...(handle ? { handle: String(handle).trim().toLowerCase() } : {}), ...(note ? { note: String(note).slice(0, 200) } : {}) };
-  const r = await _request('POST', '/api/network/requests', body);
+  let r;
+  try { r = await _request('POST', '/api/network/requests', body); }
+  catch (e) {
+    // "you already asked": the waiting request is the answer, not an error to retry (#42 review L1).
+    if (e.status === 409 && e.body && e.body.request && e.body.request.id) r = { request: e.body.request, already: true };
+    else throw e;
+  }
   const req = r.request || r;
-  return { ok: true, status: 'pending', request_id: req.id, to: req.to || body.to, handle: req.handle || body.handle || null, expires_at: req.expires_at || null,
+  return { ok: true, status: 'pending', ...(r.already ? { already_asked: true } : {}), request_id: req.id, to: req.to || body.to, handle: req.handle || body.handle || null, expires_at: req.expires_at || null,
     next: `${req.to || body.to} accepts the request in their DemiPass app (a card on the vault home; their phone is told). Call demipass_fleet_join_follow to see when; then retry what needed a person (e.g. conduit_onboard). Do not ask again in a loop: the request waits up to 14 days.` };
 }
 async function fleetJoinFollow({ withdraw, request_id, requestId } = {}) {
