@@ -1,5 +1,5 @@
 "use strict";
-const path=require('node:path'),{spawn}=require('node:child_process'),p=require('./crypto');
+const path=require('node:path'),{spawn}=require('node:child_process');
 // Paths/credentials/activation are only read by the child from private local files.
 function invoke(operation,args={}){
  const fields={prepare:['plaintext','public_text','padding'],grant:['envelope','capsule'],release:['request_id','approvals','padding'],dispute:['request_id','complaint']};

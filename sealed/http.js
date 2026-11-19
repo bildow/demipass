@@ -1,4 +1,10 @@
 "use strict";
+const { timingSafeEqual } = require("node:crypto");
+// Constant-time bearer comparison (#41 review L3): a length mismatch is a mismatch, compared on equal-length buffers.
+function sameSecret(a, b) {
+  const x = Buffer.from(String(a || ""), "utf8"), y = Buffer.from(String(b || ""), "utf8");
+  return x.length === y.length && timingSafeEqual(x, y);
+}
 const http = require("node:http"),
   https = require("node:https");
 function request(
@@ -82,7 +88,7 @@ function serve(handler, { token, port = 0, fixture = false, tls, host = "127.0.0
     };
     if (req.method !== "POST" || req.url !== "/release")
       return answer(404, { error: "not_found" });
-    if (req.headers.authorization !== "Bearer " + token)
+    if (!sameSecret(req.headers.authorization, "Bearer " + token))
       return answer(403, { error: "unauthorized" });
     if (active >= 32) return answer(429, { error: "busy" });
     active++;

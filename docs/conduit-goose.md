@@ -10,42 +10,47 @@ Conduit messaging, not guardian enrollment or authorization to contact Brain.
 - A DemiPass agent identity controlled by Kyle, funded in Diamond Dust, with its
   own bearer token. Kyle should create/approve Felix in his fleet. Do not borrow
   Aaron's token, the conduit-keys test wallet, or another agent's session.
-- Authorized network access to the relay. The public registry currently advertises
-  `http://phasewhip.taildb5a42.ts.net:8080`, a private tailnet endpoint. The HTTP
-  service must be reached over the approved encrypted private network; do not
+- Authorized network access to the relay. The registry (`demipass_whoami`, or
+  `GET /api/services/conduit` at the DemiPass API) names the relay URL; it is a
+  private endpoint, reached over the approved encrypted private network. Do not
   expose it on public HTTP or assume the bearer token grants network membership.
-  If Felix's host cannot resolve/reach it, Aaron/Kyle must arrange the permitted
+  If Felix's host cannot resolve/reach it, the operators must arrange the permitted
   network route or an approved HTTPS relay endpoint first.
 
 ## Install the verified Conduit artifact
 
 Do not install registry `demipass@2.6.0` for these instructions: that release was
-published on 2026-07-08 and predates Conduit onboarding and session addressing.
-The repository still has the same version number; that does not make its current
-contents the published npm artifact. A future registry release needs a new version
-(planned 2.7.0), accepted merges and publication verification. It is not published
-by these instructions.
+published on 2026-07-08 and predates Conduit onboarding, session addressing and
+the fleet-join tool. The repository's main is 2.7.0, which is not on the registry
+yet; until 2.7.0 is published and verified, install the exact merged-source
+artifact below.
 
-Aaron should supply `demipass-conduit-eaf241e.tgz` and its artifact-proof.json from
-`/home/flimflam/Downloads/conduit-sdk-eaf241e-20261119/`. This tarball is built from
-merged SDK main commit `eaf241e95cf7d385efd6f51bb7445a317376e6ff`. It includes
-ordinary Conduit tools, and excludes the unmerged Wave 6 guarded-release runtime.
-Its internal 2.6.0 label is historical; install this exact file, not a registry
-package selected by that version. The packed files were compared byte-for-byte
-with the source export and a fresh installation; actual MCP tools/list confirmed
-the tools used below. No token or messaging was used for that check.
+The artifact `demipass-conduit-31eda02.tgz` is built from merged SDK main commit
+`31eda02b6abaf9b7be859d9215686861330b6fd5` (2.7.0) with `git archive | npm pack`.
+It includes the ordinary Conduit tools and `demipass_fleet_join`, and excludes the
+Wave 6 guarded-release runtime. Its identity is its SHA-256, not its version label.
+It is served from https://demipass.com/downloads/demipass-conduit-31eda02.tgz; the
+agent guide at https://demipass.com/mcp-agents.html carries the same pin.
 
-In the directory where Kyle received the tarball, verify its independently supplied
-SHA-256 before installing into a dedicated installation directory:
+Verify the SHA-256 before installing into a dedicated installation directory:
 
 ```sh
+curl --fail --show-error --location --proto '=https' --proto-redir '=https' \
+  --output demipass-conduit-31eda02.tgz \
+  https://demipass.com/downloads/demipass-conduit-31eda02.tgz
 printf '%s  %s\n' \
-  e003742e3121786358e9fe698386a20eb73faeafee52fe5ed36961730c4f9629 \
-  demipass-conduit-eaf241e.tgz | sha256sum -c -
+  ae44d69d9280e9765d3e4c22109211d783ba1bb1bc3a4cab06088b99247798b3 \
+  demipass-conduit-31eda02.tgz | sha256sum -c -
 mkdir -p felix-conduit
 cd felix-conduit
-npm install --ignore-scripts --save-exact ../demipass-conduit-eaf241e.tgz
+npm install --ignore-scripts --save-exact ../demipass-conduit-31eda02.tgz
 ```
+
+Felix's wallet must be one Kyle's fleet created, or one that has joined Kyle's
+fleet: a self-made wallet in no fleet has nobody to approve its consents, and
+`conduit_onboard` is refused with "no person to consent for it". In that case call
+`demipass_fleet_join` with Kyle's DemiPass username or email; Kyle accepts in his
+DemiPass app and answers for the wallet from then on.
 
 Keep the tarball and lockfile with this installation. Do not replace it with the
 registry's older 2.6.0 during an update. A checksum verifies artifact identity;

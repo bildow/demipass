@@ -3,6 +3,7 @@
 set -eu
 # Apply before redirection: inherited 022 must still create a private 0600 lock.
 umask 077
+[ "$(id -u)" -ne 0 ] || { echo 'refusing to run as root: a private, unprivileged instance directory is required' >&2; exit 2; }
 [ "$#" -eq 1 ] || { echo 'usage: endpoint.sh PRIVATE_INSTANCE_DIRECTORY' >&2; exit 2; }
 instance=$1
 [ -d "$instance" ] && [ ! -L "$instance" ] || exit 2
