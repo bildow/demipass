@@ -16,7 +16,7 @@ performed. Aaron retains actual custodian selection and final enablement.
 | A2 | Brain, Claude and Codex endpoint interoperability and refusal controls | Implemented local MCP fixture tests; not actual model sessions |
 | A3 | Custodian/issuer/endpoint selection and independent control evidence | Aaron; distinct labels/signatures alone never close it |
 | B0 | Brain inbound policy and tests in Tome; server refusal while missing | Operator-required hold; readiness records it, server enforcement not yet verified |
-| B1 | Production service and MCP guarded-request implementation | Still unbuilt; fixture-only runners remain explicitly disabled for live work |
+| B1 | Production service and MCP guarded-request implementation | Source implemented in docs/conduit-wave6-runtime.md; independent review and installation remain open |
 | B2 | Per-custodian installation, source/config receipts, restore/rollback | After A3 and independently accepted B1; not installed |
 | C1 | Preserved real encrypted transport/release/ack and failure matrix | After B2; current six-peer-path tests are local direct-mode fixtures |
 | C2 | Independent review of exact installed evidence and operator acceptance | After C1; Aaron closes the campaign |
@@ -115,8 +115,8 @@ applicant-provided shell command or source path is executed by this inspector.
 
 Every result has `live_guardian_release:false`, explicit deployment blockers and
 limits. CLI exit0 means the inspected evidence is current; exit2 means hold. It
-never means permission to start a live service. Production service implementation,
-guarded MCP integration and actual deployment/acceptance are deliberately listed
+never means permission to start a live service. Production service and guarded MCP source now have a separate runtime candidate;
+independent review and actual deployment/acceptance are deliberately listed
 as open, not hidden behind an apparently green readiness label.
 
 Aaron's 2026-11-18 requirement holds Brain inbound until its policy and tests are

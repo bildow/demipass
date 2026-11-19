@@ -193,8 +193,12 @@ function policyShape(policy) {
       throw Error("shared failure domain or guardian");
   return policy;
 }
-function policyForUse(policy, { fixture = false } = {}) {
+function policyForUse(policy, { fixture = false, authorization } = {}) {
   policyShape(policy);
+  if (!fixture && authorization) {
+    require("./runtime-authorization").assertAuthorization(authorization, policy);
+    return policy;
+  }
   // Labels or a self-asserted "reviewed" flag are NEVER a production enrollment verifier.
   if (!fixture || policy.assurance !== "fixture")
     throw Error(
@@ -306,6 +310,7 @@ async function seal({
   publicText = "",
   policy = null,
   fixture = false,
+  authorization,
 }) {
   validatePublic(sender.publicKey);
   validatePublic(recipient);
@@ -316,7 +321,7 @@ async function seal({
     throw Error("private content must be a string of at most 24576 bytes");
   if (typeof publicText !== "string" || Buffer.byteLength(publicText) > 1024)
     throw Error("public text exceeds 1024 bytes");
-  if (policy) policyForUse(policy, { fixture });
+  if (policy) policyForUse(policy, { fixture, authorization });
   const h = {
     id: c.randomUUID(),
     sender: sender.publicKey.mailbox,

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Fixture-only Linux runner. flock's descriptor stays open in the Node process.
+# Locked Linux runner; fixture or separately permitted TLS mode. flock's descriptor stays open in the Node process.
 set -eu
 # Apply before redirection: inherited 022 must still create a private 0600 lock.
 umask 077

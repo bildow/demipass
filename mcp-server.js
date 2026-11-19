@@ -29,6 +29,11 @@ demipass.configure({
 // ---------------------------------------------------------------------------
 
 const TOOLS = [
+  {"name": "conduit_guarded_prepare", "description": "Guarded prepare through an explicitly operator-configured endpoint. Disabled without private launch permit. No caller paths, tokens or trust. Release may charge exactly 2 DD; preserve original request ID on uncertainty. Guardian onboarding is separate.", "inputSchema": {"type": "object", "properties": {"plaintext": {"type": "string"}, "public_text": {"type": "string"}, "padding": {"type": "string"}}, "additionalProperties": false}},
+  {"name": "conduit_guarded_grant", "description": "Guarded grant through an explicitly operator-configured endpoint. Disabled without private launch permit. No caller paths, tokens or trust. Release may charge exactly 2 DD; preserve original request ID on uncertainty. Guardian onboarding is separate.", "inputSchema": {"type": "object", "properties": {"envelope": {"type": "object"}, "capsule": {"type": "object"}}, "additionalProperties": false}},
+  {"name": "conduit_guarded_release", "description": "Guarded release through an explicitly operator-configured endpoint. Disabled without private launch permit. No caller paths, tokens or trust. Release may charge exactly 2 DD; preserve original request ID on uncertainty. Guardian onboarding is separate.", "inputSchema": {"type": "object", "properties": {"request_id": {"type": "string"}, "approvals": {"type": "object"}, "padding": {"type": "string"}}, "additionalProperties": false}},
+  {"name": "conduit_guarded_dispute", "description": "Guarded dispute through an explicitly operator-configured endpoint. Disabled without private launch permit. No caller paths, tokens or trust. Release may charge exactly 2 DD; preserve original request ID on uncertainty. Guardian onboarding is separate.", "inputSchema": {"type": "object", "properties": {"request_id": {"type": "string"}, "complaint": {"type": "object"}}, "additionalProperties": false}},
+
 {
   name: 'conduit_sealed_readiness',
   description: 'Read-only local readiness for Brain, Claude and Codex: checks pinned participant keys, source inventory, signed guardian enrollment/status and retained checkpoint. Missing or unknown evidence holds. Never charges, enrolls, installs, advances a checkpoint or enables release; even valid signatures do not prove independent custody. Configuration is launcher-owned, not supplied in tool arguments.',
@@ -644,6 +649,10 @@ const HANDLERS = {
     if (!args || !args.service) return { ok: true, services: await ob.listServices() };
     return await ob.onboardService({ service: args.service, capDd: args.daily_cap_dd, approvalId: args.approval_id, wait: false });
   },
+  async conduit_guarded_prepare(args) { return await demipass.conduitGuardedPrepare(args); },
+  async conduit_guarded_grant(args) { return await demipass.conduitGuardedGrant(args); },
+  async conduit_guarded_release(args) { return await demipass.conduitGuardedRelease(args); },
+  async conduit_guarded_dispute(args) { return await demipass.conduitGuardedDispute(args); },
   async conduit_sealed_identity(args) { return await demipass.conduitSealedIdentity(args); },
   async conduit_sealed_readiness(args) { return demipass.conduitSealedReadiness(args); },
   async conduit_sealed_prepare(args) { return await demipass.conduitSealedPrepare(args); },
