@@ -86,7 +86,8 @@ function inspect({ config, evidence, actual_source_sha256, now = Date.now() }) {
   try {
     p.fields(evidence, ["evidence", "snapshots"]);
     const evaluated = evaluate({ policy: config.policy, trusted: config.trusted, previous: config.previous, ...evidence, now });
-    out.policy_sha256 = p.hash(config.policy); out.evidence_canonical_sha256 = p.hash(evidence);
+    out.policy_sha256 = p.hash(config.policy);
+    if (evaluated.verdict === "evidence_current") out.evidence_canonical_sha256 = p.hash(evidence);
     out.observed_checkpoint_sha256 = evaluated.checkpoint_hash;
     out.expires_at = evaluated.expires_at;
     check("guardian_evidence", evaluated.verdict === "evidence_current" ? "valid" : "invalid",
