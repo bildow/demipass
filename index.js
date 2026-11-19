@@ -529,6 +529,35 @@ async function spendAskClose({ spendAskId, spend_ask_id } = {}) {
   return _request('POST', `/api/billing/spend-asks/${encodeURIComponent(spendAskId || spend_ask_id)}/close`, {});
 }
 
+// Fleet membership by request (dustforge network_routes.js). An agent wallet that no fleet created has nobody to approve
+// its consents, grants or registrations; asking to join a person's fleet gives it one: they accept in their DemiPass
+// app and answer for it from then on (its spending still comes from its own wallet). Aaron 2026-11-19 (Kyle's Felix).
+async function fleetJoin({ owner, handle, note } = {}) {
+  if (!owner || !String(owner).trim()) throw new Error('fleetJoin() needs owner: the person\'s DemiPass username or email');
+  const body = { to: String(owner).trim(), as: 'join', ...(handle ? { handle: String(handle).trim().toLowerCase() } : {}), ...(note ? { note: String(note).slice(0, 200) } : {}) };
+  let r;
+  try { r = await _request('POST', '/api/network/requests', body); }
+  catch (e) {
+    // "you already asked": the waiting request is the answer, not an error to retry (#42 review L1).
+    if (e.status === 409 && e.body && e.body.request && e.body.request.id) r = { request: e.body.request, already: true };
+    else throw e;
+  }
+  const req = r.request || r;
+  return { ok: true, status: 'pending', ...(r.already ? { already_asked: true } : {}), request_id: req.id, to: req.to || body.to, handle: req.handle || body.handle || null, expires_at: req.expires_at || null,
+    next: `${req.to || body.to} accepts the request in their DemiPass app (a card on the vault home; their phone is told). Call demipass_fleet_join_follow to see when; then retry what needed a person (e.g. conduit_onboard). Do not ask again in a loop: the request waits up to 14 days.` };
+}
+async function fleetJoinFollow({ withdraw, request_id, requestId } = {}) {
+  const id = requestId || request_id;
+  if (withdraw) { if (!id) throw new Error('withdraw needs request_id'); return _request('POST', `/api/network/requests/${encodeURIComponent(id)}/withdraw`, {}); }
+  const n = await _request('GET', '/api/network');
+  const joins = (n.outgoing || []).filter(r => r.kind === 'join');
+  const member = n.member_of || null;
+  return { ok: true, member_of: member ? { fleet: member.slug, owner: member.owner, handle: member.handle } : null,
+    pending: joins.map(r => ({ request_id: r.id, to: r.to, handle: r.handle, created_at: r.created_at, expires_at: r.expires_at })),
+    answers_for_me: member ? member.owner : (joins.length ? null : 'this wallet itself (no fleet)'),
+    next: member ? `${member.owner} answers for this wallet: consents and grants go to their Requests.` : joins.length ? `waiting for ${joins[0].to} to accept (expires ${joins[0].expires_at}).` : 'no request waiting; call demipass_fleet_join with the owner\'s username or email.' };
+}
+
 // Get the ODT seed document
 async function genesisSeed() {
   return _request('GET', '/api/identity/genesis/seed');
@@ -1194,13 +1223,14 @@ async function conduitOnboard({ name, model_family, session_id, session_name, ow
     if (c.pending) {
       return { ok: false, status: 'approval_pending', step: 'consent', approval_id: c.pending.approval_id, expires_at: c.pending.expires_at,
         daily_cap_dd: cap, wallet: me.sub || null, steps,
-        next: `Approve "let a wallet pay conduit" (${cap} DD/day) in the DemiPass app, then call conduit_onboard again with approval_id=${c.pending.approval_id} and the same name/owns${url ? '/url' : ''}.` };
+        approver: c.pending.approver || null,
+        next: `${c.pending.approver ? `${c.pending.approver} approves` : 'Approve'} "let a wallet pay conduit" (${cap} DD/day) in ${c.pending.approver ? 'their' : 'the'} DemiPass app (Requests), then call conduit_onboard again with approval_id=${c.pending.approval_id} and the same name/owns${url ? '/url' : ''}.` };
     }
     consent = c.consent;
     steps.push({ step: 'consent', ok: true, consent_id: consent.id, daily_cap_dd: consent.daily_cap_dd, existing: c.existing, approval_id: c.existing ? undefined : (approval_id || null) });
   } catch (e) {
     return { ok: false, step: 'consent', status: e.status, error: (e.body && e.body.error) || e.message, steps,
-      hint: e.status === 403 ? 'an identity no fleet created has no person to consent for it: use a person session or a fleet-created silicon' : undefined };
+      hint: e.status === 403 && /no person/.test(String((e.body && e.body.error) || e.message)) ? ((e.body && e.body.fix) || 'this wallet has nobody to approve for it: ask to join a person\'s fleet with demipass_fleet_join (their username or email); they accept in their DemiPass app and answer for this wallet from then on') : undefined };
   }
 
   // 4. token
@@ -1457,7 +1487,7 @@ module.exports = {
   search,
   expiring,
   whoami,
-  spendAsk, spendAskGet, spendAskProgress, spendAskClose,
+  spendAsk, spendAskGet, spendAskProgress, spendAskClose, fleetJoin, fleetJoinFollow,
   // ODT Genesis
   genesisSeed,
   genesisSubmit,
