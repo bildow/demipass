@@ -69,15 +69,16 @@ test('actual MCP child -> locked endpoint -> TLS coordinator: signed fee, decryp
  const feed=path.join(f.dir,'feed.json'),payer=path.join(f.dir,'payer.json');writeNew(feed,f.feed());writeNew(payer,{token:'fixture-payer-token'});
  writeNew(path.join(instance,'config.json'),{format:'conduit-endpoint-runtime-v1',permit_file:ep.file,policy:f.policy,admission:{trusted:f.status.trusted,feed_file:feed,expected_checkpoint:'new'},sender:sender.publicKey,recipient:recipient.publicKey,coordinator:{url:server.url,token:transport},payer_token_file:payer,payer_wallet:'fixture-wallet',meter_issuer:meter.config.issuer,client_directory:directory});
  const call=(name,args)=>new Promise((resolve,reject)=>{
-  const child=require('node:child_process').spawn(process.execPath,[path.resolve(__dirname,'../mcp-server.js')],{env:{PATH:process.env.PATH,HOME:f.dir,NODE_EXTRA_CA_CERTS:cert,DEMIPASS_SEALED_RUNTIME_DIRECTORY:instance},stdio:['pipe','pipe','pipe']});let out='',err='';
-  const timer=setTimeout(()=>{child.kill('SIGKILL');reject(Error('test MCP deadline'));},10000);child.stdout.on('data',b=>out+=b);child.stderr.on('data',b=>err+=b);
-  child.on('close',code=>{clearTimeout(timer);try{assert.equal(code,0,err);const r=JSON.parse(out);if(r.error||r.result.isError)throw Error(out);resolve(JSON.parse(r.result.content[0].text));}catch(e){reject(e);}});
+  const child=require('node:child_process').spawn(process.execPath,[path.resolve(__dirname,'../mcp-server.js')],{env:{PATH:process.env.PATH,HOME:f.dir,NODE_EXTRA_CA_CERTS:cert,DEMIPASS_SEALED_RUNTIME_DIRECTORY:instance},stdio:['pipe','pipe','pipe']});const chunks=[];let err='';
+  const timer=setTimeout(()=>{child.kill('SIGKILL');reject(Error('test MCP deadline'));},10000);child.stdout.on('data',b=>chunks.push(b));child.stderr.on('data',b=>err+=b);
+  child.on('close',code=>{clearTimeout(timer);try{assert.equal(code,0,err);const out=Buffer.concat(chunks).toString('utf8'),r=JSON.parse(out);if(r.error||r.result.isError)throw Error(out);resolve(JSON.parse(r.result.content[0].text));}catch(e){reject(e);}});
   child.stdin.end(JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'conduit_guarded_'+name,arguments:args}})+'\n');
  });
- const prepared=await call('prepare',{plaintext:'MCP actual return',padding:'none'});const packet=JSON.parse(senderClient.transport(prepared.id).body);packet.capsule=senderClient.capsule(prepared.id);
+ const plaintext='MCP actual return — 雪 🪿 '.repeat(700);
+ const prepared=await call('prepare',{plaintext,padding:'none'});const packet=JSON.parse(senderClient.transport(prepared.id).body);packet.capsule=senderClient.capsule(prepared.id);
  const grant=await call('grant',packet);const approvals=Object.fromEntries(f.policy.guardians.slice(0,2).map((g,i)=>[g.id,approve(grant.grant,g.id,f.approvers[i])]));
  await assert.rejects(call('release',{request_id:grant.request_id,approvals:{}}));assert.equal(meter.state.charges,0);
- const result=await call('release',{request_id:grant.request_id,approvals});assert.equal(result.plaintext,'MCP actual return');assert.equal(result.charge.dd,2);assert.equal(result.ack.body.event,'decrypted');assert.equal(meter.state.charges,1);
+ const result=await call('release',{request_id:grant.request_id,approvals});assert.equal(result.plaintext,plaintext);assert.equal(result.charge.dd,2);assert.equal(result.ack.body.event,'decrypted');assert.equal(meter.state.charges,1);
  const replay=await call('release',{request_id:grant.request_id,approvals});assert.equal(replay.replayed,true);assert.equal(meter.state.charges,1);assert.equal(replay.charge.charge_id,result.charge.charge_id);
  const body={version:1,type:'conduit-release-dispute',envelope_hash:grant.request_id,grant_hash:p.hash(grant.grant.body),reason:'billing_mismatch'};
  const dispute=await call('dispute',{request_id:grant.request_id,complaint:{body,signature:p.sign(body,recipient.signPrivate)}});assert.equal(dispute.status,'manual_review_required');assert.equal(dispute.refund,'not_issued');assert.equal(meter.state.charges,1);

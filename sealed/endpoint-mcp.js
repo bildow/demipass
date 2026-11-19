@@ -9,14 +9,14 @@ function invoke(operation,args={}){
  const raw=JSON.stringify({...args,operation});if(Buffer.byteLength(raw)>98304)throw Error('request too large');
  return new Promise((resolve,reject)=>{
   const c=spawn('/bin/sh',[path.join(__dirname,'endpoint.sh'),dir],{stdio:['pipe','pipe','pipe']});
-  let output='',size=0,failed=false;
+  const output=[];let size=0,failed=false;
   const fail=()=>{failed=true;c.kill('SIGKILL');};
   const timer=setTimeout(fail,45000);
-  c.stdout.on('data',b=>{size+=b.length;if(size>131072)fail();else output+=b.toString('utf8');});
+  c.stdout.on('data',b=>{size+=b.length;if(size>131072)fail();else output.push(b);});
   c.stderr.on('data',()=>{});c.stdin.on('error',()=>{});
   c.on('error',()=>{clearTimeout(timer);reject(Error('guarded endpoint could not start'));});
   c.on('close',code=>{clearTimeout(timer);if(code!==0||failed)return reject(Error('guarded operation held or uncertain; preserve original request id and reconcile payment before retry'));
-   try{resolve(JSON.parse(output));}catch{reject(Error('invalid endpoint response; reconcile original request'));}});
+   try{resolve(JSON.parse(Buffer.concat(output).toString('utf8')));}catch{reject(Error('invalid endpoint response; reconcile original request'));}});
   c.stdin.end(raw);
  });
 }
