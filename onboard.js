@@ -139,6 +139,10 @@ async function onboardService({ service, capDd, approvalId, wait = true, waitMs 
   let t;
   try { t = await getJson(`${API}/api/services/${slug}`); }
   catch (e) { return { ok: false, error: e.status === 404 ? `no service "${slug}" (demipass-onboard --list)` : e.message }; }
+  if (t.endpoint) {
+    try { require('./public-route').assertPublicRoute(t.endpoint); }
+    catch (e) { return { ok: false, status: 'private_service_route', error: e.message }; }
+  }
   const token = sessionTokenAny(mcpConfig);
   if (!token) return { ok: false, error: 'no DemiPass session on this machine: sign in first (demipass_login, or set DEMIPASS_TOKEN)' };
   // The owner's permission to write agent instruction files comes before any pane or agent is attached (Aaron

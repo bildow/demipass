@@ -116,7 +116,7 @@ dpSrv.listen(0, '127.0.0.1', () => cdSrv.listen(0, '127.0.0.1', async () => {
     const s = await demipass.conduitStatus();
     assert.strictEqual(s.me.onboarded, false); assert.strictEqual(s.next, 'run conduit_onboard');
     assert.match(s.me.env_token_ignored, /not a DemiPass service token/);
-    assert.strictEqual(s.url, 'http://phasewhip.taildb5a42.ts.net:8080'); assert.strictEqual(s.url_source, 'default'); assert.strictEqual(dp.registryHits, 1);
+    assert.strictEqual(s.url, 'https://conduit.dustroot.com'); assert.strictEqual(s.url_source, 'default'); assert.strictEqual(dp.registryHits, 1);
   });
   await check('a send before onboarding fails on the missing consent, naming conduit_onboard', async () => {
     fs.writeFileSync(process.env.CONDUIT_CONFIG, JSON.stringify({ url: cdBase }));

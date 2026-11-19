@@ -13,6 +13,7 @@
 
 try { require('dotenv').config(); } catch {}
 
+const { assertPublicRoute, publicLookup } = require('./public-route');
 const BUOY_URL = process.env.BUOY_URL || process.env.DEMIPASS_URL || 'https://api.dustforge.com';
 const BUOY_TOKEN = process.env.BUOY_TOKEN || process.env.DEMIPASS_TOKEN || '';
 
@@ -76,11 +77,11 @@ const TOOLS = [
 // ── HTTP helper ──
 function apiRequest(method, path, body) {
   return new Promise((resolve, reject) => {
-    const url = new URL(path, BUOY_URL);
+    const url = assertPublicRoute(new URL(path, BUOY_URL));
     const mod = url.protocol === 'https:' ? require('https') : require('http');
     const data = body ? JSON.stringify(body) : null;
     const opts = {
-      hostname: url.hostname,
+      hostname: url.hostname, lookup: publicLookup,
       port: url.port || (url.protocol === 'https:' ? 443 : 80),
       path: url.pathname + url.search,
       method,

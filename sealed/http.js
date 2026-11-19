@@ -1,4 +1,5 @@
 "use strict";
+const { assertPublicRoute, publicLookup } = require("../public-route");
 const { timingSafeEqual } = require("node:crypto");
 // Constant-time bearer comparison (#41 review L3): a length mismatch is a mismatch, compared on equal-length buffers.
 function sameSecret(a, b) {
@@ -12,7 +13,7 @@ function request(
   body,
   { token, timeout = 10000, fixture = false, method = "POST" } = {},
 ) {
-  const u = new URL(url);
+  const u = assertPublicRoute(url);
   if (
     u.protocol !== "https:" &&
     !(
@@ -30,6 +31,7 @@ function request(
       u,
       {
         method,
+        lookup: publicLookup,
         headers: {
           "content-type": "application/json",
           ...(token ? { authorization: "Bearer " + token } : {}),
