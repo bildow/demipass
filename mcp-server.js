@@ -311,6 +311,34 @@ const TOOLS = [
     },
   },
   {
+    name: 'demipass_spend_ask',
+    description: 'DemiPass: ask the owner ONCE for a multi-step spend (e.g. provision an agent wallet 1000 DD + consent to a service 2 DD/day + one 2 DD charge): one card with every step and the total, approved on their phone with the PIN. Never ask a spend, cost or funding question in chat: file it here and follow it. First call → 202 {approval_id}; park, then call again with the same purpose and steps plus approval_id → the approved plan {spend_ask_id}. A consent step then passes spend_ask_id to the consent call (no second card); other steps keep their own gates and are recorded with demipass_spend_ask_follow.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        purpose: { type: 'string', description: 'What the spend is for (1-120 plain characters)' },
+        steps: { type: 'array', description: 'The steps, in order: [{kind: provision|consent|charge|grant|other, dd: whole DD, label, service?, daily_cap_dd? (consent), on_request_cap_dd? (consent), handle? (provision)}]',
+          items: { type: 'object', properties: { kind: { type: 'string' }, dd: { type: 'number' }, label: { type: 'string' }, service: { type: 'string' }, daily_cap_dd: { type: 'number' }, on_request_cap_dd: { type: 'number' }, handle: { type: 'string' } }, required: ['kind', 'dd', 'label'] } },
+        valid_days: { type: 'number', description: 'How long the approved plan lasts (default 7, max 30)' },
+        approval_id: { type: 'number', description: 'The approval the first call returned, once the owner approved it' },
+      },
+      required: ['purpose', 'steps'],
+    },
+  },
+  {
+    name: 'demipass_spend_ask_follow',
+    description: 'DemiPass: where a spend plan stands (its steps, which are covered or done), record progress on a step, or close the plan when the work is done. Without spend_ask_id: this wallet\'s plans.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        spend_ask_id: { type: 'number' },
+        step: { type: 'number', description: 'With note: record that this step (1-based) was done, e.g. "token request 7 filed"' },
+        note: { type: 'string' },
+        close: { type: 'boolean', description: 'true: close the plan (nothing more draws on it)' },
+      },
+    },
+  },
+  {
     name: 'demipass_genesis_seed',
     description: 'GENESIS: Get the ODT seed document. This is the Rorschach inkblot — the same document for everyone. Your refraction of it becomes your permanent origin fingerprint. Read the seed, then call demipass_genesis_submit with your refraction.',
     inputSchema: { type: 'object', properties: {} },
@@ -572,6 +600,14 @@ const HANDLERS = {
   async demipass_whoami() {
     return await demipass.whoami();
   },
+  async demipass_spend_ask(args) {
+    return await demipass.spendAsk({ purpose: args.purpose, steps: args.steps, validDays: args.valid_days, approvalId: args.approval_id });
+  },
+  async demipass_spend_ask_follow(args) {
+    if (args.close) return await demipass.spendAskClose({ spendAskId: args.spend_ask_id });
+    if (args.step) return await demipass.spendAskProgress({ spendAskId: args.spend_ask_id, step: args.step, note: args.note });
+    return await demipass.spendAskGet({ spendAskId: args.spend_ask_id });
+  },
   async demipass_genesis_seed() {
     return await demipass.genesisSeed();
   },
@@ -716,6 +752,10 @@ async function handleMessage(msg) {
       protocolVersion: '2024-11-05',
       capabilities: { tools: {} },
       serverInfo: { name: 'demipass', version: require('./package.json').version },
+      // Read by the agent runtime at session start (Claude Code shows it as the server's instructions): the one rule
+      // that stops money questions dying in chat (Aaron 2026-11-18). The same text goes into AGENTS.md / CLAUDE.md by
+      // demipass-onboard (onboard.js PANE_RULES) for runtimes that do not show server instructions.
+      instructions: require('./onboard.js').PANE_RULES,
     });
   }
 

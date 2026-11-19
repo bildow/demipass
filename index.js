@@ -510,6 +510,25 @@ async function whoami() {
   return _request('GET', '/api/identity/trust');
 }
 
+// ── Spend plans (dustforge#135): a multi-step spend asked once as ONE card the owner approves with the PIN ──────────
+// steps: [{kind: provision|consent|charge|grant|other, dd, label, service?, daily_cap_dd?, on_request_cap_dd?, handle?}]
+// First call → 202 {approval_id} (the card is on the phone); the same call with approvalId → the approved plan.
+async function spendAsk({ purpose, steps, validDays, valid_days, approvalId, approval_id } = {}) {
+  const body = { purpose, steps, ...(validDays || valid_days ? { valid_days: validDays || valid_days } : {}),
+    ...(approvalId || approval_id ? { approval_id: approvalId || approval_id } : {}) };
+  return _request('POST', '/api/billing/spend-asks', body);
+}
+async function spendAskGet({ spendAskId, spend_ask_id } = {}) {
+  const id = spendAskId || spend_ask_id;
+  return id ? _request('GET', `/api/billing/spend-asks/${encodeURIComponent(id)}`) : _request('GET', '/api/billing/spend-asks');
+}
+async function spendAskProgress({ spendAskId, spend_ask_id, step, note } = {}) {
+  return _request('POST', `/api/billing/spend-asks/${encodeURIComponent(spendAskId || spend_ask_id)}/progress`, { step, ...(note ? { note } : {}) });
+}
+async function spendAskClose({ spendAskId, spend_ask_id } = {}) {
+  return _request('POST', `/api/billing/spend-asks/${encodeURIComponent(spendAskId || spend_ask_id)}/close`, {});
+}
+
 // Get the ODT seed document
 async function genesisSeed() {
   return _request('GET', '/api/identity/genesis/seed');
@@ -1439,6 +1458,7 @@ module.exports = {
   search,
   expiring,
   whoami,
+  spendAsk, spendAskGet, spendAskProgress, spendAskClose,
   // ODT Genesis
   genesisSeed,
   genesisSubmit,

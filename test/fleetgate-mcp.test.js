@@ -17,6 +17,7 @@ function readBody(req) { return new Promise(ok => { let b = ''; req.on('data', c
 const dpSrv = http.createServer(async (req, res) => {
   const b = await readBody(req);
   if (req.headers.authorization !== 'Bearer ' + SESSION_A && req.headers.authorization !== 'Bearer ' + SESSION_B) return json(res, 401, { error: 'bad session' });
+  if (req.method === 'GET' && req.url === '/api/identity/pane-rules') return json(res, 200, { ok: true, enabled: state.rulesEnabled !== false, person: 'you', ...(state.rulesEnabled === false ? { next: 'Enable it in the DemiPass app (Settings → Agents).' } : {}) });
   if (req.method === 'GET' && req.url === '/api/services/consents') {
     if (state.delayConsentsMs) { const ms = state.delayConsentsMs; state.delayConsentsMs = 0; return setTimeout(() => json(res, 200, { ok: true, mine: state.consents, approved_by_me: [] }), ms); }
     return json(res, 200, { ok: true, mine: state.consents, approved_by_me: [] });
@@ -911,4 +912,13 @@ test('a wallet switch while the payment ask is in flight shows nothing of the fi
     const r = await call('fleetgate_follow', { review_id: 'review-waiting-41' });
     assert.strictEqual(r.status, 'wallet_changed', JSON.stringify(r)); assert.strictEqual(r.review_id, undefined); assert.strictEqual(r.payment, undefined);
   } finally { process.env.DEMIPASS_TOKEN = SESSION_A; state.consents = saved; mcp._reset(); }
+});
+
+
+test('fleetgate_onboard refuses until "Write agent instruction files" is enabled for the wallet (#40 review M2)', async () => {
+  mcp._reset(); const saved = state.consents; state.consents = []; state.rulesEnabled = false; const n = state.consentPosts.length;
+  const r = await call('fleetgate_onboard', {});
+  assert.strictEqual(r.ok, false); assert.strictEqual(r.status, 'needs_permission'); assert.match(r.error, /Write agent instruction files/);
+  assert.strictEqual(state.consentPosts.length, n, 'no consent filed without the permission');
+  delete state.rulesEnabled; state.consents = saved; mcp._reset();
 });
