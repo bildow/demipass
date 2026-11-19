@@ -334,6 +334,30 @@ const TOOLS = [
     },
   },
   {
+    name: 'demipass_fleet_join',
+    description: 'DemiPass: ask a person to take this wallet into their fleet as an agent, by their DemiPass username or email. Use it when a consent, grant or registration is refused with "no person to consent for it": this wallet is self-made and no fleet created it, so nobody can approve for it. They accept in their DemiPass app (their phone is told) and from then on answer for this wallet: its consents to pay services land in their Requests, approved with their PIN; what it spends still comes from this wallet. One request waits up to 14 days: file it once, then demipass_fleet_join_follow. A wallet with a PIN cannot ask (the owner invites it instead) — an agent wallet should have no PIN.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        owner: { type: 'string', description: 'The person\'s DemiPass username (e.g. "kyle") or email' },
+        handle: { type: 'string', description: 'Optional: the handle this wallet takes in their fleet (2-31 chars, lowercase letters, digits, hyphens); default: its username' },
+        note: { type: 'string', description: 'Optional: one line shown on their card' },
+      },
+      required: ['owner'],
+    },
+  },
+  {
+    name: 'demipass_fleet_join_follow',
+    description: 'DemiPass: where a fleet join request stands — accepted (member_of names the owner who now answers for this wallet), still waiting, or none. With withdraw=true and request_id: withdraw a waiting request. Never charges.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        request_id: { type: 'number' },
+        withdraw: { type: 'boolean' },
+      },
+    },
+  },
+  {
     name: 'demipass_genesis_seed',
     description: 'GENESIS: Get the ODT seed document. This is the Rorschach inkblot — the same document for everyone. Your refraction of it becomes your permanent origin fingerprint. Read the seed, then call demipass_genesis_submit with your refraction.',
     inputSchema: { type: 'object', properties: {} },
@@ -597,6 +621,12 @@ const HANDLERS = {
   },
   async demipass_spend_ask(args) {
     return await demipass.spendAsk({ purpose: args.purpose, steps: args.steps, validDays: args.valid_days, approvalId: args.approval_id });
+  },
+  async demipass_fleet_join(args) {
+    return await demipass.fleetJoin({ owner: args.owner, handle: args.handle, note: args.note });
+  },
+  async demipass_fleet_join_follow(args) {
+    return await demipass.fleetJoinFollow({ withdraw: args.withdraw, requestId: args.request_id });
   },
   async demipass_spend_ask_follow(args) {
     if (args.close) return await demipass.spendAskClose({ spendAskId: args.spend_ask_id });

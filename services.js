@@ -115,8 +115,9 @@ function services({ token, baseUrl = DEFAULT_BASE, timeoutMs = 15000 } = {}) {
         return { consent: { id: r.consent_id, service: r.service, daily_cap_dd: r.daily_cap_dd, status: 'active' }, existing: false, approval_id: approvalId || null };
       } catch (e) {
         if (!e.pending) throw e;
-        return { pending: { approval_id: e.body.approval_id, expires_at: e.body.expires_at || null, daily_cap_dd: dailyCapDd,
-          next: `Approve "let a wallet pay ${service}" (${dailyCapDd} DD/day) in the DemiPass app, then call again with approvalId=${e.body.approval_id}.` } };
+        const who = e.body.approver || e.body.owner || null;   // whose DemiPass app holds the card (the gateway names them)
+        return { pending: { approval_id: e.body.approval_id, expires_at: e.body.expires_at || null, daily_cap_dd: dailyCapDd, approver: who,
+          next: `${who ? `${who} approves` : 'Approve'} "let a wallet pay ${service}" (${dailyCapDd} DD/day) in ${who ? 'their' : 'the'} DemiPass app (Requests), then call again with approvalId=${e.body.approval_id}.` } };
       }
     },
     /** Caller-side onboarding in one call: ensureConsent, then mintToken. Resolves to { consent, token: {token, token_id,
