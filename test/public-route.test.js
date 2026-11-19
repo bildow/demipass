@@ -41,3 +41,15 @@ test('actual transport rejects a tailnet URL before a socket is made', async () 
   dp.configure({ baseUrl: 'https://100.64.0.2' });
   await assert.rejects(dp.whoami(), { code: 'PRIVATE_SERVICE_ROUTE' });
 });
+test('refused routes preserve the promise-returning transport contract', async () => {
+  const { requestJson } = require('../http-json');
+  let pending;
+  assert.doesNotThrow(() => { pending = requestJson('GET', 'https://100.64.0.2'); });
+  await assert.rejects(pending, { code: 'PRIVATE_SERVICE_ROUTE' });
+});
+test('public IPv6 and public mapped IPv4 stay public; non-global embedded addresses do not', () => {
+  for (const url of ['https://[2400::1]', 'https://[2600:9000::1]', 'https://[::ffff:808:808]'])
+    assert.doesNotThrow(() => assertPublicRoute(url));
+  for (const url of ['https://[64:ff9b::c0a8:101]', 'https://[::ffff:c0a8:101]', 'https://192.0.2.10', 'https://198.51.100.10', 'https://203.0.113.10'])
+    assert.throws(() => assertPublicRoute(url), { code: 'PRIVATE_SERVICE_ROUTE' });
+});

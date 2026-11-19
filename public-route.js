@@ -27,7 +27,8 @@ function privateAddress(host) {
       a === 203 && b === 0 && c === 113 || a >= 224;
   }
   if (net.isIP(host) === 6) {
-    // Only native global-unicast space; refuse local/deprecated ranges and
+    // After classifying mapped IPv4 above, allow only native global-unicast
+    // space; refuse local/deprecated ranges and
     // translation/tunnelling prefixes rather than interpreting embedded routes.
     const sides = host.split('::');
     const left = sides[0] ? sides[0].split(':').map(x => parseInt(x,16)) : [];

@@ -6,7 +6,7 @@ const http = require('http');
 const { assertPublicRoute, publicLookup } = require('./public-route');
 const https = require('https');
 
-function requestJson(method, url, { headers = {}, body, timeoutMs = 15000 } = {}) {
+async function requestJson(method, url, { headers = {}, body, timeoutMs = 15000 } = {}) {
   const u = assertPublicRoute(url);
   const mod = u.protocol === 'https:' ? https : u.protocol === 'http:' ? http : null;
   if (!mod) return Promise.reject(new Error(`unsupported URL: ${u.protocol}`));
