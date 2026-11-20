@@ -18,11 +18,32 @@ try { require('dotenv').config(); } catch {}
 const demipass = require('./index.js');
 // Explicit host adapter, not generic MCP logging. Claude must also enable this
 // server as a channel. Other hosts retain their ordinary request/response tools.
-const channelEnabled = process.env.CONDUIT_AUTO_INBOX === 'claude-channel';
+let channelEnabled = process.env.CONDUIT_AUTO_INBOX === 'claude-channel';
 const codexEnabled = process.env.CONDUIT_AUTO_INBOX === 'codex-tool-output';
 let inboxListener = null;
+let profileTimer = null;
+function receiverProfile() {
+  const cfg = demipass.conduitConfig();
+  if (!cfg.file_present || !cfg.pane_address || cfg.name !== cfg.pane_address) return null;
+  return require('./conduit-receiver-profile').load(cfg);
+}
+function notifyChannel(notification) {
+  return new Promise((resolve, reject) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...notification }) + '\n',
+    error => error ? reject(error) : resolve()));
+}
+function startProfileReceiver() {
+  if (inboxListener) return;
+  const profile = receiverProfile();
+  if (!profile || !profile.enabled || (profile.driver || (profile.runtime === 'claude' ? 'mcp' : 'standalone')) !== 'mcp' || profile.runtime === 'web-seat' || profile.runtime === 'claude' && !channelEnabled) return;
+  inboxListener = require('./conduit-receiver-runtime').createRuntime({ sdk: demipass, profile,
+    notifyClaude: channelEnabled ? notifyChannel : null,
+    onError: code => process.stderr.write(`[conduit listener] ${code}\n`),
+  });
+  inboxListener.start();
+}
 function startInboxListener() {
-  if ((!channelEnabled && !codexEnabled) || inboxListener) return;
+  startProfileReceiver();
+  if (receiverProfile() || (!channelEnabled && !codexEnabled) || inboxListener) return;
   const { InboxListener } = require('./conduit-listener');
   inboxListener = new InboxListener({
     config: () => demipass.conduitConfig(),
@@ -749,12 +770,13 @@ const HANDLERS = {
   async conduit_history(args) { return await demipass.conduitHistory(args); },
   async conduit_receipts(args) { return await demipass.conduitReceipts(args); },
   async conduit_status() {
+    const receiver = require('./conduit-receiver-profile').status(demipass.conduitConfig());
     return { ...await demipass.conduitStatus(), inbox_listener: {
-      enabled: channelEnabled || codexEnabled,
-      adapter: channelEnabled ? 'claude-channel' : codexEnabled ? 'codex-tool-output' : null,
+      enabled: Boolean(inboxListener) || channelEnabled || codexEnabled,
+      adapter: receiver.transport || (channelEnabled ? 'claude-channel' : codexEnabled ? 'codex-tool-output' : null),
       ...(inboxListener ? inboxListener.status() : { running: false }),
       live_pane_processing_proven: false,
-    } };
+    }, receiver };
   },
   async lori_checkin() {
     const report = { checked_at: new Date().toISOString(), channels: {} };
@@ -821,6 +843,8 @@ async function handleMessage(msg) {
   const { id, method, params } = msg;
 
   if (method === 'initialize') {
+    let profile; try { profile = receiverProfile(); } catch { /* Keep tools available; reception holds. */ }
+    if (profile?.enabled && profile.runtime === 'claude') channelEnabled = true;
     return jsonrpcResponse(id, {
       protocolVersion: '2024-11-05',
       capabilities: { tools: {}, ...(channelEnabled ? { experimental: { 'claude/channel': {} } } : {}) },
@@ -833,7 +857,10 @@ async function handleMessage(msg) {
   }
 
   if (method === 'notifications/initialized') {
-    startInboxListener();
+    try { startInboxListener(); } catch { process.stderr.write('[conduit listener] receiver_profile_held\n'); }
+    if (!profileTimer) profileTimer = setInterval(() => {
+      try { startProfileReceiver(); } catch { process.stderr.write('[conduit listener] receiver_profile_held\n'); }
+    }, 5000);
     return null; // no response needed for notifications
   }
 
@@ -897,7 +924,7 @@ process.stdin.on('data', (chunk) => {
 });
 
 // A one-shot client (echo … | node mcp-server.js) closes stdin while a call is still running: answer it first.
-process.stdin.on('end', () => { if (inboxListener) inboxListener.stop(); queue.then(() => process.exit(0)); });
+process.stdin.on('end', () => { clearInterval(profileTimer); if (inboxListener) inboxListener.stop(); queue.then(() => process.exit(0)); });
 
 // Suppress noisy errors when piped processes close
 process.stdout.on('error', () => process.exit(0));

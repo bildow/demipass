@@ -190,6 +190,8 @@ async function onboardService({ service, capDd, approvalId, wait = true, waitMs 
     if (!readiness.ok) return { ...readiness, service: slug, mcp, consent: { id: c.consent.id, daily_cap_dd: c.consent.daily_cap_dd } };
   }
   return { ok: true, service: slug, name: t.name, endpoint: t.endpoint || null, ...(readiness ? { admission: readiness.admission } : {}),
+    ...(slug === 'conduit' ? { receiver: { state: 'requires_pane_receiver_check', reception_verified: false,
+      next: 'Service consent and MCP tools do not establish automatic reception. Bind this pane with conduit_onboard, then configure and test its host receiver with conduit-receiver.' } } : {}),
     consent: { id: c.consent.id, daily_cap_dd: c.consent.daily_cap_dd, existing: Boolean(c.existing) }, mcp,
     ...(low ? { warning: `the daily consent (${c.consent.daily_cap_dd} DD) is below one ${slug} call (${intake} DD); call again with a higher daily_cap_dd (--cap) to file a replacement for approval` } : {}),
     next: mcp.attached ? (mcp.changed ? 'New panes have the tools. In a running pane: /mcp → reconnect.' : 'Already attached; nothing to restart.') : 'Consent is in place.' };
