@@ -583,6 +583,16 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: { since: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 500 } } },
   },
   {
+    name: 'conduit_runtimes',
+    description: 'CONDUIT: Local integration catalog for Claude Code, Codex, Goose, OpenClaw/Clawdbot/Moltbot, Hermes, OpenFang, ZeroClaw, nanobot, NullClaw, Manus, ChatGPT, Cowork, Zapier, agent SDKs and Brain. Planning only: not a certification or activation. No network or charge.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'conduit_receiver_plan',
+    description: 'CONDUIT: Plan onboarding for a named runtime and show host-specific blockers. Does not configure, launch, restart, spend, certify reception or enable Brain. Use before choosing an adapter; no network or charge.',
+    inputSchema: { type: 'object', properties: { runtime: { type: 'string', minLength: 1, maxLength: 80 } }, required: ['runtime'], additionalProperties: false },
+  },
+  {
     name: 'conduit_status',
     description: 'CONDUIT: Relay health (agents, threads, messages, prices) plus this machine\'s onboarding state: name, token expiry, consent, config file. Says `run conduit_onboard` when nothing is set up. Never charges.',
     inputSchema: { type: 'object', properties: {} },
@@ -748,6 +758,14 @@ const HANDLERS = {
   },
   async conduit_history(args) { return await demipass.conduitHistory(args); },
   async conduit_receipts(args) { return await demipass.conduitReceipts(args); },
+  async conduit_runtimes(args) {
+    if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).length) throw Error('runtime_plan_arguments_invalid');
+    return require('./conduit-runtime-catalog').catalog();
+  },
+  async conduit_receiver_plan(args) {
+    if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).some(k => k !== 'runtime')) throw Error('runtime_plan_arguments_invalid');
+    return require('./conduit-runtime-catalog').plan(args.runtime);
+  },
   async conduit_status() {
     const receiver = require('./conduit-receiver-profile').status(demipass.conduitConfig());
     return { ...await demipass.conduitStatus(), inbox_listener: {
