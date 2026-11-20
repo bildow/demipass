@@ -14,6 +14,16 @@ async function main(argv) {
   }
   const allowed = new Set(['family','session','config','runtime','socket','thread_id','endpoint','credential_file','policy_sha256','public_endpoint','enabled','listen_port','recipients_file','driver']);
   if (Object.keys(args).some(k => !allowed.has(k))) throw Error('receiver_arguments_invalid');
+  // These discovery commands must work before onboarding: never load SDK,
+  // credentials, profiles, or a host process, and never authorize activation.
+  if (command === 'catalog') {
+    if (Object.keys(args).length) throw Error('receiver_arguments_invalid');
+    return require('../conduit-runtime-catalog').catalog();
+  }
+  if (command === 'plan') {
+    if (Object.keys(args).some(k => k !== 'runtime')) throw Error('receiver_arguments_invalid');
+    return require('../conduit-runtime-catalog').plan(args.runtime);
+  }
   if (!args.family || !args.session) throw Error('receiver_family_and_full_session_required');
   process.env.CONDUIT_MODEL_FAMILY = args.family; process.env.CONDUIT_SESSION_ID = args.session;
   process.env.CONDUIT_REQUIRE_PANE = '1';
@@ -62,7 +72,7 @@ async function main(argv) {
     process.stdout.write(JSON.stringify({ state: 'listening', address: config.name, runtime: profile.runtime, reception_verified: false }) + '\n');
     return null;
   }
-  throw Error('usage: conduit-receiver configure|status|run|once|unit|serve-seat --family FAMILY --session UUID [receiver options]');
+  throw Error('usage: conduit-receiver catalog | plan --runtime NAME | configure|status|run|once|unit|serve-seat --family FAMILY --session UUID [receiver options]');
 }
 if (require.main === module) main(process.argv.slice(2)).then(value => { if (value) console.log(JSON.stringify(value, null, 2)); }).catch(() => {
   // Private JSON parsing and SDK failures can contain credentials: emit a fixed error.
