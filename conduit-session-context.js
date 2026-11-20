@@ -62,15 +62,16 @@ function record(input,runtime=nearestClaude(),home=os.homedir(),eventTick=Number
  } finally {fs.closeSync(fd);}
 }
 function recordLocked(input,runtime,home,eventTick) {
- if(!['SessionStart','UserPromptSubmit','PreToolUse'].includes(input.hook_event_name)||!UUID.test(input.session_id||''))throw Error('conduit_lifecycle_input_invalid');
  const file=fileFor(runtime,home),dir=path.dirname(file);fs.mkdirSync(dir,{recursive:true,mode:0o700});
  const st=fs.lstatSync(dir);if(!st.isDirectory()||st.uid!==process.getuid()||(st.mode&0o077))throw Error('conduit_context_directory_invalid');
  let prior;try{prior=readPrivate(file);}catch(e){if(e.code!=='ENOENT')throw e;}
  if(!Number.isSafeInteger(eventTick)||eventTick<1)throw Error('conduit_event_clock_invalid');
  if(prior?.event_tick>eventTick)throw Error('conduit_stale_lifecycle_event');
- // Invalidate the old identity first. Missing model/title evidence must not leave
- // the old conversation usable. A hook crash therefore holds rather than misroutes.
- if(prior?.session_id!==input.session_id||prior?.state!=='ready')writePrivate(file,{version:1,pid:runtime.pid,start_ticks:runtime.start_ticks,state:'held',event_tick:eventTick,session_id:input.session_id,source:'claude-lifecycle'});
+ // Invalidate on every current event, including same-session renames. A bad title,
+ // malformed event or hook crash must not leave background readers on the old role.
+ // Stale events were refused above and therefore cannot hold a newer session.
+ writePrivate(file,{version:1,pid:runtime.pid,start_ticks:runtime.start_ticks,state:'held',event_tick:eventTick,source:'claude-lifecycle'});
+ if(!input||!['SessionStart','UserPromptSubmit','PreToolUse'].includes(input.hook_event_name)||!UUID.test(input.session_id||''))throw Error('conduit_lifecycle_input_invalid');
  const same=prior?.session_id===input.session_id&&prior?.state==='ready';
  let family=same?prior.model_family:null;
  if(!family){

@@ -69,3 +69,19 @@ test('delayed older hook cannot restore a previous session',t=>run(t,`
  assert.throws(()=>originalRecord(input(SID),runtime,process.env.HOME,Number(runtime.start_ticks)+1),/stale_lifecycle/);
  assert.equal(sdk.conduitConfig().pane_address,'fable-'+NEXT);
 `));
+
+test('invalid current rename holds the old route for background readers too',t=>run(t,`
+ ctx.record(input(SID),runtime);
+ assert.throws(()=>ctx.record(input(SID,'!!!'),runtime));
+ assert.throws(()=>sdk.conduitConfig(),/identity is held/);
+ ctx.record(input(SID,'corrected name'),runtime);
+ assert.equal(ctx.load(runtime).session_name,'corrected name');
+`));
+
+test('malformed current lifecycle event cannot leave the old mailbox usable',t=>run(t,`
+ ctx.record(input(SID),runtime);
+ assert.throws(()=>ctx.record({...input(SID),session_id:'invalid'},runtime),/lifecycle_input_invalid/);
+ assert.throws(()=>sdk.conduitConfig(),/identity is held/);
+ ctx.record(input(SID),runtime);
+ assert.equal(sdk.conduitConfig().pane_address,'fable-'+SID);
+`));
