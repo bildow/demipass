@@ -32,15 +32,21 @@ function notifyChannel(notification) {
     error => error ? reject(error) : resolve()));
 }
 function startProfileReceiver() {
-  if (inboxListener) return;
-  const profile = receiverProfile();
-  if (!profile || !profile.enabled || (profile.driver || (profile.runtime === 'claude' ? 'mcp' : 'standalone')) !== 'mcp' || profile.runtime === 'web-seat' || profile.runtime === 'claude' && !channelEnabled) return;
-  inboxListener = require('./conduit-receiver-runtime').createRuntime({ sdk: demipass, profile,
+  receiverManager.tick();
+  inboxListener = receiverManager.listener;
+}
+const receiverManager = new (require('./conduit-receiver-manager').ReceiverManager)({
+  lease: () => require('./conduit-receiver-manager').acquire(demipass.conduitConfig()),
+  snapshot: () => {
+    const profile = receiverProfile();
+    if (!profile || !profile.enabled || (profile.driver || (profile.runtime === 'claude' ? 'mcp' : 'standalone')) !== 'mcp' || profile.runtime === 'web-seat' || profile.runtime === 'claude' && !channelEnabled) return null;
+    return { profile, generation: demipass.conduitConfig().lifecycle_generation || null };
+  },
+  create: ({ profile }) => require('./conduit-receiver-runtime').createRuntime({ sdk: demipass, profile,
     notifyClaude: channelEnabled ? notifyChannel : null,
     onError: code => process.stderr.write(`[conduit listener] ${code}\n`),
-  });
-  inboxListener.start();
-}
+  }),
+});
 function startInboxListener() {
   // Environment flags advertise host support; they never authorize a shared
   // mailbox or bypass the profile runtime's durable dispatch accounting.
@@ -840,6 +846,9 @@ async function handleMessage(msg) {
   const { id, method, params } = msg;
 
   if (method === 'initialize') {
+    // Lifecycle hook and MCP can start concurrently. Advertise the owner's
+    // opt-in now; reading starts only when the bound profile is ready.
+    try { if (process.env.CONDUIT_RUNTIME_PID && require('./conduit-startup').policy().claude_channels) channelEnabled = true; } catch { /* invalid policy holds */ }
     let profile; try { profile = receiverProfile(); } catch { /* Keep tools available; reception holds. */ }
     if (profile?.enabled && profile.runtime === 'claude') channelEnabled = true;
     return jsonrpcResponse(id, {

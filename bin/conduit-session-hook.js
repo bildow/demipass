@@ -13,7 +13,9 @@ async function main(input) {
  process.env.CONDUIT_REQUIRE_PANE='1';
  const sdk=require('../index');sdk.configure({baseUrl:'https://api.dustforge.com',bearerToken:require('../onboard').sessionToken()});
  let reconciled;
- try{reconciled=await sdk.conduitReconcileSession();}catch{reconciled={ok:false,reason:'session_route_held'};}
+ try{reconciled=await sdk.conduitReconcileSession();
+  if(reconciled.ok)require('../conduit-startup').provisionClaude(sdk.conduitConfig());
+ }catch{reconciled={ok:false,reason:'session_route_held'};}
  let modern=false;
  const dir=path.join(os.homedir(),'.config/demipass/runtime');
  try{for(const name of fs.readdirSync(dir)){
