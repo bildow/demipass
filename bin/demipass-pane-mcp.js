@@ -64,7 +64,7 @@ const procEnv = (pid, name) => {
 
 let source = 'unbound', runtime = null, unbound = null;
 if (role === 'demipass') {
-  for (const k of ['CONDUIT_MODEL_FAMILY', 'CONDUIT_SESSION_ID', 'CONDUIT_SESSION_NAME', 'CONDUIT_SESSION_NAME_SOURCE', 'CONDUIT_AUTOBIND']) delete process.env[k];
+  for (const k of ['CONDUIT_MODEL_FAMILY', 'CONDUIT_SESSION_ID', 'CONDUIT_SESSION_NAME', 'CONDUIT_SESSION_NAME_SOURCE', 'CONDUIT_AUTOBIND', 'CONDUIT_RUNTIME_PID', 'CONDUIT_RUNTIME_START']) delete process.env[k];
   process.env.CONDUIT_REQUIRE_PANE = '1';   // with Conduit disabled this keeps Conduit calls failing closed, nothing else
   const b = conduitOk ? readJson(path.join(home, '.config/demipass/pane-bindings.json')) : null;
   const bindings = (b && Array.isArray(b.bindings)) ? b.bindings : [];
@@ -73,6 +73,14 @@ if (role === 'demipass') {
     let pid = process.ppid;
     for (let hops = 0; pid > 1 && hops < 24; hops++) {
       let fields; try { const s = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); fields = s.slice(s.lastIndexOf(') ') + 2).trim().split(/\s+/); } catch { break; }
+      runtime = agentKind(pid);
+      if (runtime === 'claude') {
+        // Never use a static ancestor binding after a conversation switch.
+        process.env.CONDUIT_RUNTIME_PID = String(pid);
+        process.env.CONDUIT_RUNTIME_START = fields[19];
+        source = 'claude-lifecycle';
+        break;
+      }
       const match = bindings.find((x) => x.pid === pid && String(x.start_ticks) === fields[19]);
       if (match) {
         process.env.CONDUIT_MODEL_FAMILY = match.model_family;
@@ -110,5 +118,8 @@ fs.writeFileSync(path.join(runtimeDir, `pid-${process.pid}.json`), JSON.stringif
   model_family: process.env.CONDUIT_MODEL_FAMILY || null, session_id: process.env.CONDUIT_SESSION_ID || null,
   session_name: process.env.CONDUIT_SESSION_NAME || null,
   autobind: process.env.CONDUIT_AUTOBIND || null, runtime, unbound_reason: unbound, source, release: RELEASE,
+  runtime_pid: process.env.CONDUIT_RUNTIME_PID ? Number(process.env.CONDUIT_RUNTIME_PID) : null,
+  runtime_start: process.env.CONDUIT_RUNTIME_START || null,
+  child_start_ticks: fs.readFileSync('/proc/self/stat','utf8').split(') ').pop().trim().split(/\s+/)[19],
   at: new Date().toISOString() }) + '\n', { mode: 0o600 });
 require(path.join(home, '.local/share/demipass/releases', RELEASE, role === 'buoy' ? 'buoy-mcp.js' : 'mcp-server.js'));

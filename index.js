@@ -740,6 +740,13 @@ const CONDUIT_DEFAULT_URL = 'https://conduit.dustroot.com';
 const CONDUIT_RENEW_BEFORE_MS = 5 * 60 * 1000;
 
 let conduitPane = null;
+const conduitOperation = new (require('async_hooks').AsyncLocalStorage)();
+function _conduitLiveContext() {
+  const r = require('./conduit-session-context').fromEnvironment();
+  const pinned = conduitOperation.getStore();
+  if (pinned && pinned.generation !== (r?.generation || null)) throw new Error('Conduit session changed during operation; outcome may be uncertain, preserve request ID');
+  return r;
+}
 function conduitPaneAddress({ model_family, session_id } = {}) {
   if (!/^[a-z][a-z0-9]{0,14}$/.test(model_family || '') ||
       !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(session_id || ''))
@@ -761,6 +768,8 @@ let conduitPaneSource = null;
 // Precedence: a pane already selected in this process (explicit conduit_onboard, or an autobind once resolved) →
 // CONDUIT_MODEL_FAMILY / CONDUIT_SESSION_ID (an explicit launcher binding) → CONDUIT_AUTOBIND=claude → none.
 function _conduitPane() {
+  const live = _conduitLiveContext();
+  if (live) { conduitPaneSource = 'lifecycle'; conduitPaneError = null; return { model_family: live.model_family, session_id: live.session_id }; }
   if (conduitPane) return conduitPane;
   const env = _conduitEnvPane();
   if (env !== undefined) return env;
@@ -868,6 +877,7 @@ function _conduitAutobind() {
 // it marks with CONDUIT_SESSION_NAME_SOURCE=binding (#23 review): a variable merely inherited from a shell or another
 // pane does nothing. An autobound pane ignores it either way; its role handover must be an explicit conduit_onboard.
 function _conduitEnvSessionName() {
+  const live = _conduitLiveContext(); if (live) return live.session_name;
   if (process.env.CONDUIT_SESSION_NAME_SOURCE !== 'binding') return null;
   const pane = _conduitPane();
   return pane && conduitPaneSource !== 'autobind' ? (process.env.CONDUIT_SESSION_NAME || null) : null;
@@ -942,6 +952,8 @@ function conduitConfig() {
   };
   cfg.token_valid = !!token && (!expiresAt || Date.parse(expiresAt) - Date.now() > CONDUIT_RENEW_BEFORE_MS);
   cfg.onboarded = !!(cfg.name && cfg.token);
+  cfg.lifecycle_generation = _conduitLiveContext()?.generation || null;
+  cfg.current_session_name = _conduitLiveContext()?.session_name || null;
   cfg.pane_address = _conduitPane() ? conduitPaneAddress(_conduitPane()) : null;
   if (cfg.pane_address) cfg.pane_source = conduitPaneSource;
   else if (conduitPaneError) cfg.pane_error = conduitPaneError;
@@ -1020,6 +1032,7 @@ async function _conduitToken({ force } = {}) {
 }
 
 function _conduitHttp(method, path, body, token, baseUrl) {
+  const generation = _conduitLiveContext()?.generation || null;
   const url = assertPublicRoute(new URL(path, (baseUrl || conduitConfig().url) + '/'));
   const proto = url.protocol === 'https:' ? https : http;
   const postData = body ? JSON.stringify(body) : null;
@@ -1037,6 +1050,7 @@ function _conduitHttp(method, path, body, token, baseUrl) {
       let data = '';
       res.on('data', c => data += c);
       res.on('end', () => {
+        try { if ((_conduitLiveContext()?.generation || null) !== generation) throw Error('Conduit session changed during request; outcome uncertain, preserve request ID'); } catch (e) { return reject(e); }
         let parsed; try { parsed = data ? JSON.parse(data) : {}; } catch { parsed = { raw: data.slice(0, 300) }; }
         if (res.statusCode >= 400) {
           const err = new Error(`Conduit ${method} ${url.pathname} → ${res.statusCode} ${parsed.error || parsed.detail || parsed.raw || ''}`.trim());
@@ -1058,6 +1072,8 @@ async function _conduit(method, path, body, { noAutoOnboard = false } = {}) {
   // A pane identity that is configured but malformed never falls back to the shared legacy address (Codex #19 P2).
   if (!_conduitPane() && conduitPaneError) throw new Error(conduitPaneError + ' — refusing to message as the shared legacy address; fix the identity or call conduit_onboard with model_family and session_id');
   if (process.env.CONDUIT_REQUIRE_PANE === '1' && !_conduitPane()) throw new Error('Pane identity required: call conduit_onboard with model_family and full session_id before messaging (panes with no automatic address, e.g. Codex, always need this)');
+  const live = _conduitLiveContext();
+  if (live && (conduitConfig().name !== conduitPaneAddress(live) || (conduitConfig().stable_address || null) !== (live.session_name ? conduitSessionAlias(live.session_name) : null))) throw new Error('Conduit current-session route reconciliation required; old role is not usable');
   // Existing clients with a verified launcher identity/name migrate on first use. Never auto-reclaim a rotated role.
   // An autobound pane never takes a role from the environment (it may be inherited from another pane): roles for those
   // are taken only by an explicit conduit_onboard({session_name}).
@@ -1178,8 +1194,9 @@ async function conduitOnboard({ name, model_family, session_id, session_name, ow
     conduitPaneAddress(proposed);
     // An explicit identity outranks autobind: only a pane already in use by this process (or set by the launcher's
     // explicit binding) blocks it. A pending autobind is not consulted, so a transcript is never read here.
+    const live = _conduitLiveContext();
     const env = _conduitEnvPane();
-    const current = conduitPane || env;
+    const current = live || conduitPane || env;
     if (current && conduitPaneAddress(current) !== conduitPaneAddress(proposed)) throw new Error('this MCP process is bound to another pane; use a separate process');
     if (!conduitPane) conduitPaneSource = env ? 'env' : 'onboard';
     conduitPane = proposed; conduitPaneError = null;
@@ -1190,7 +1207,9 @@ async function conduitOnboard({ name, model_family, session_id, session_name, ow
   const steps = [];
   const fs = require('fs');
   const prior = _conduitReadFile() || {};
-  const stableLabel = session_name !== undefined ? session_name : (prior.session_name || _conduitEnvSessionName() || undefined);
+  const liveContext = _conduitLiveContext();
+  if (liveContext && session_name !== undefined && session_name !== liveContext.session_name) throw new Error('session_name must match the current Claude session title');
+  const stableLabel = liveContext ? (liveContext.session_name || undefined) : session_name !== undefined ? session_name : (prior.session_name || _conduitEnvSessionName() || undefined);
   let stableAlias = null;
   if (stableLabel !== undefined && stableLabel !== null) {
     if (!pane) return { ok:false, step:'stable_address', error:'session_name requires a model_family and session_id', ...(conduitPaneError ? { pane_error: conduitPaneError } : {}) };
@@ -1352,6 +1371,37 @@ async function conduitOnboard({ name, model_family, session_id, session_name, ow
     note: 'Every conduit_* call re-reads this file and mints a new token from the DemiPass session when this one runs out; no restart needed. Panes started before this file existed keep working through it too.' };
 }
 
+/** Local lifecycle reconciler. Not exposed as an MCP tool. Never takes an occupied
+ * role from another session; preserves the old mailbox on an unrelated resume. */
+async function conduitReconcileSession() {
+  const live = _conduitLiveContext(); if (!live) throw Error('verified Claude lifecycle required');
+  const prior = _conduitReadFile() || {};
+  const alias = live.session_name ? conduitSessionAlias(live.session_name) : null;
+  if (prior.name === conduitPaneAddress(live) && (prior.stable_address || null) === alias && prior.onboarded_at) return {ok:true,unchanged:true,name:prior.name,stable_address:alias};
+  const {url} = await _conduitResolveUrl(), token = await _conduitToken();
+  const directory = await _conduitHttp('GET','/agents',null,token,url);
+  const agents = directory.agents || directory;
+  if (!Array.isArray(agents)) throw Error('invalid directory during lifecycle reconciliation');
+  const target = agents.find(a=>a.route?.alias===alias);
+  if (target && target.route.current !== conduitPaneAddress(live)) throw Error('current title belongs to another session; no automatic takeover');
+  if (prior.stable_address && prior.stable_address !== alias) {
+    const old = agents.find(a=>a.route?.alias===prior.stable_address);
+    if (!old || old.route.current !== conduitPaneAddress(live)) throw Error('old role custody unconfirmed; hold');
+    // Persist intent before any remote rename; a crash leaves inspectable intent.
+    const journal = _conduitConfigFile()+'.rename.json';
+    require('./conduit-receiver-profile').writePrivate(journal,{state:'pending',from:prior.stable_address,to:alias,session_id:live.session_id,generation:live.generation,at:new Date().toISOString()});
+    const card = await _conduitHttp('GET','/readme?format=json',null,token,url);
+    if (card.address_policy?.conditional_unbind !== 1) throw Error('relay conditional rename gate not installed; old route preserved');
+    await _conduitHttp('DELETE','/addresses/'+encodeURIComponent(prior.stable_address)+'?expected_current='+encodeURIComponent(conduitPaneAddress(live))+'&expected_generation='+encodeURIComponent(old.route.generation),null,token,url);
+    const {session_name:_s,stable_address:_a,...rest}=prior;
+    _conduitWriteFile(rest);
+  }
+  const result = await conduitOnboard({}, {automatic:true});
+  if (!result.ok) throw Error('Conduit lifecycle registration held: '+(result.code||result.step||'unknown'));
+  require('./conduit-receiver-profile').writePrivate(_conduitConfigFile()+'.rename.json',{state:'complete',session_id:live.session_id,stable_address:alias,generation:live.generation,at:new Date().toISOString()});
+  return {ok:true,name:result.name,stable_address:result.stable_address||null};
+}
+
 /** Post a message by registered name (2 DD). `subject` owned by another agent is forwarded to its owner with a notice back. */
 async function conduitSend({ to, thread, subject, body, message, client_msg_id } = {}) {
   const text = body || message;
@@ -1454,7 +1504,7 @@ async function conduitStatus() {
   const out = { url: resolved.url, url_source: resolved.source, me: { onboarded: cfg.onboarded, name: cfg.name || null, session_name:cfg.session_name, stable_address:cfg.stable_address, wallet: cfg.wallet, token_id: cfg.token_id, token_expires_at: cfg.expires_at,
     token_valid: cfg.token_valid, cap_dd: cfg.cap_dd, consent_id: cfg.consent_id, daily_cap_dd: cfg.daily_cap_dd, config_file: cfg.file, config_present: cfg.file_present } };
   if (cfg.env_token_ignored) out.me.env_token_ignored = cfg.env_token_ignored;
-  if (cfg.pane_address) { out.me.pane_address = cfg.pane_address; out.me.pane_source = cfg.pane_source; }
+  if (cfg.pane_address) { out.me.pane_address = cfg.pane_address; out.me.pane_source = cfg.pane_source; out.me.current_session_name = cfg.current_session_name; out.me.lifecycle_generation = cfg.lifecycle_generation; }
   if (cfg.pane_error) out.me.pane_error = cfg.pane_error;
   try { out.health = await _conduitHttp('GET', '/health', null, null, resolved.url); } catch (e) { out.health = { ok: false, error: e.message }; }
   if (!cfg.onboarded) out.next = 'run conduit_onboard';
@@ -1511,6 +1561,8 @@ module.exports = {
   verifyServiceReceipt: require('./services').verifyReceipt,
   // Conduit (agent relay by name; docs/conduit.md)
   conduitPaneAddress,
+  conduitSessionAlias,
+  conduitReconcileSession,
   _conduitClaudeFamily,
   conduitHistory,
   conduitReceipts,
@@ -1534,3 +1586,14 @@ module.exports = {
   conduitThreads,
   conduitStatus,
 };
+
+// Pin lifecycle identity across each async public operation, including token renewal
+// and local config writes. A resume cannot deliver an old reply into the new session.
+for (const [name, fn] of Object.entries(module.exports)) {
+  if (name.startsWith('conduit') && typeof fn === 'function' && fn.constructor.name === 'AsyncFunction') {
+    module.exports[name] = function(...args) {
+      const generation = _conduitLiveContext()?.generation || null;
+      return conduitOperation.run({generation}, () => fn.apply(this,args));
+    };
+  }
+}

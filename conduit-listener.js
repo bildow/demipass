@@ -20,7 +20,7 @@ class InboxListener {
         || !c.wallet || !c.file_present) throw Error('inbox_not_onboarded');
     // Token renewal is allowed; address, wallet, config or destination changes
     // require a new listener. Never redirect a running pane's inbound stream.
-    return JSON.stringify([c.file, c.name, c.wallet, c.url]);
+    return JSON.stringify([c.file, c.name, c.wallet, c.url, c.lifecycle_generation || null]);
   }
 
   async poll() {
