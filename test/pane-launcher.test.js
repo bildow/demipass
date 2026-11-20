@@ -103,20 +103,19 @@ test('a malformed ~/.mcp.json is reported without quoting any of it', () => {
   } finally { fs.writeFileSync(f, saved); }
 });
 
-test('an explicit binding wins over autobind (pid + start time of the nearest agent)', () => {
+test('Claude static binding is superseded by a start-time-bound lifecycle context', () => {
   const { out, receipt } = chain(['claude+bind', 'launcher'], { CHAIN_MCP_SID: INNER });
-  assert.deepStrictEqual([out.family, out.session, out.autobind, out.require_pane, out.has_token], ['opus', OUTER, null, '1', true]);
-  assert.strictEqual(out.sname, 'audit | brain', 'the binding\'s stable role is passed on'); assert.strictEqual(out.ssrc, 'binding'); assert.strictEqual(receipt.session_name, 'audit | brain');
-  assert.strictEqual(receipt.source, 'pane-binding-process-start-checked'); assert.strictEqual(receipt.release, SHA);
-  assert.ok(!JSON.stringify(receipt).includes(TOKEN), 'credential in the receipt');
-  const st = fs.statSync(path.join(home, '.config/demipass/runtime', `pid-${out.pid}.json`)); assert.strictEqual(st.mode & 0o777, 0o600);
+  assert.deepStrictEqual([out.family,out.session,out.autobind,out.sname,out.ssrc],[null,null,null,null,null]);
+  assert.strictEqual(receipt.source,'claude-lifecycle');
+  assert.ok(receipt.runtime_pid > 1); assert.match(receipt.runtime_start,/^\d+$/);
+  assert.match(receipt.child_start_ticks,/^\d+$/); assert.strictEqual(receipt.release,SHA);
+  assert.ok(!JSON.stringify(receipt).includes(TOKEN));
 });
-
-test('an unbound Claude Code parent sets CONDUIT_AUTOBIND=claude and no family (also through a non-agent hop)', () => {
-  for (const hops of [['claude', 'launcher'], ['claude', 'node', 'launcher']]) {
-    const { out, receipt } = chain(hops, { CHAIN_MCP_SID: INNER });
-    assert.deepStrictEqual([out.family, out.session, out.autobind, out.require_pane], [null, null, 'claude', '1'], hops.join('>'));
-    assert.strictEqual(receipt.source, 'autobind-claude-session'); assert.strictEqual(receipt.runtime, 'claude');
+test('Claude lifecycle selection works through a non-agent hop without inherited identity', () => {
+  for (const hops of [['claude','launcher'],['claude','node','launcher']]) {
+    const {out,receipt}=chain(hops,{CHAIN_MCP_SID:INNER});
+    assert.deepStrictEqual([out.family,out.session,out.autobind,out.require_pane],[null,null,null,'1']);
+    assert.strictEqual(receipt.source,'claude-lifecycle'); assert.strictEqual(receipt.runtime,'claude');
   }
 });
 
@@ -128,12 +127,12 @@ test('a nested agent gets nothing from its parent pane: Codex inside a bound pan
 
 test('a nested Claude inside a bound pane autobinds to its own session only, never the parent\'s binding', () => {
   const { out } = chain(['claude+bind', 'claude', 'launcher'], { CHAIN_MCP_SID: INNER });
-  assert.deepStrictEqual([out.family, out.session, out.autobind, out.sname], [null, null, 'claude', null], 'nor its stable role');
+  assert.deepStrictEqual([out.family, out.session, out.autobind, out.sname], [null, null, null, null], 'nor its stable role');
 });
 
 test('a session id the Claude process itself inherited is not autobound', () => {
   const { out, receipt } = chain(['claude', 'launcher'], { CLAUDE_CODE_SESSION_ID: OUTER });
-  assert.strictEqual(out.autobind, null); assert.strictEqual(receipt.unbound_reason, 'claude_session_id_inherited');
+  assert.strictEqual(out.autobind, null); assert.strictEqual(receipt.source, 'claude-lifecycle');
 });
 
 test('inherited CONDUIT_* identity variables are discarded', () => {
