@@ -75,7 +75,7 @@ test('foreground process-group SIGINT reaches the child once; wrapper stays unti
  const exit=new Promise(r=>child.once('exit',r));child.kill('SIGTERM');await exit;
 });
 
-test('recovery helper preserves exact UUID and title and refuses duplicate or stale process evidence',t=>{
+test('recovery helper preserves exact UUID and title and refuses stale process evidence',t=>{
  const h=home(t),fake=path.join(h,'claude'),script=path.join(h,'test.js');fs.symlinkSync(process.execPath,fake);
  const root=path.resolve('.');fs.writeFileSync(script,`const fs=require('fs'),path=require('path'),assert=require('assert/strict');
  const {recovery}=require(${JSON.stringify(root+'/bin/conduit-claude-resume')});

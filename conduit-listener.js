@@ -76,6 +76,7 @@ class InboxListener {
       const code = /^inbox_[a-z_]+$/.test(err.message || '') ? err.message : 'inbox_poll_failed';
       this.lastError = code;
       if (['inbox_binding_changed', 'inbox_session_limit', 'inbox_delivery_uncertain',
+        'inbox_wrong_recipient', 'inbox_invalid_message',
         'inbox_adapter_binding_invalid', 'inbox_adapter_socket_invalid'].includes(code)) this.stop();
       this.onError(code);
     } finally { this.busy = false; }

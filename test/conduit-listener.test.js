@@ -92,6 +92,12 @@ test('bounded session memory holds without acknowledging or skipping mail', asyn
   await f.listener.poll(); assert.equal(f.sent.length, 1); assert.equal(f.listener.since, 0);
   assert.equal(f.listener.stopped, true); assert.deepEqual(f.errors, ['inbox_session_limit']);
 });
+test('a wrong recipient holds visibly instead of spinning or consuming later mail',async()=>{
+ const f=fixture();f.setMessages([{...message(),to:'other'},message(2)]);
+ await f.listener.poll();await f.listener.poll();assert.equal(f.sent.length,0);assert.equal(f.calls.length,1);
+ assert.equal(f.listener.status().stopped,true);assert.equal(f.listener.status().last_error,'inbox_wrong_recipient');
+ assert.equal(f.listener.since,0);
+});
 test('stop during a poll prevents subsequent delivery', async () => {
   let release, entered;
   const ready = new Promise(r => { entered = r; });
