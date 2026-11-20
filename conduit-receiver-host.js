@@ -36,7 +36,11 @@ function createReceiverHost({ address, wallet, policySha256, credentialFile, dir
         try { record = readPrivate(file); }
         catch (e) {
           if (e.code !== 'ENOENT') throw e;
-          const initial = { ...value, state: 'uncertain', admitted_at: new Date().toISOString() };
+          // The relay retains message history. Host receipts need only bounded
+          // identity/hash metadata; persisting the full event exceeded the private
+          // receipt reader limit for legitimate large messages on restart.
+          const initial = { protocol: identity.protocol, address, message_id: value.message_id,
+            content_sha256: value.content_sha256, state: 'uncertain', admitted_at: new Date().toISOString() };
           let fd;
           try {
             fd = fs.openSync(file, 'wx', 0o600); fs.writeFileSync(fd, JSON.stringify(initial)); fs.fsyncSync(fd);
