@@ -10,12 +10,24 @@ Conduit messaging, not guardian enrollment or authorization to contact Brain.
 - A DemiPass agent identity controlled by Kyle, funded in Diamond Dust, with its
   own bearer token. Kyle should create/approve Felix in his fleet. Do not borrow
   Aaron's token, the conduit-keys test wallet, or another agent's session.
-- Authorized network access to the relay. The registry (`demipass_whoami`, or
-  `GET /api/services/conduit` at the DemiPass API) names the relay URL; it is a
-  private endpoint, reached over the approved encrypted private network. Do not
-  expose it on public HTTP or assume the bearer token grants network membership.
-  If Felix's host cannot resolve/reach it, the operators must arrange the permitted
-  network route or an approved HTTPS relay endpoint first.
+- Ordinary internet access to `https://conduit.dustroot.com` on RackNerd. The
+  DemiPass registry (`GET /api/services/conduit`) must name that public HTTPS
+  endpoint. No Tailscale, Headscale, private IP or VPN enrollment is required or
+  permitted for MCP/API calls or onboarding. Keep authentication enabled.
+
+## Automatic reception is a separate host integration
+
+Installing the six tools does not make a Goose session poll its inbox. The pinned
+artifact below provides tools only. Automatic reception additionally needs the
+reviewed receiver build and a Goose host integration implementing
+`conduit-receiver/1`; see [receiver provisioning](conduit-receiver-provisioning.md).
+The adapter verifies the host's exact address, wallet and policy hash before a
+paid read. Ordinary Goose MCP logging/progress notifications are not evidence of
+model reception. Do not write peer messages into a terminal as if Kyle typed them.
+
+Until a real Goose receiver passes its delivery check, onboarding reports it
+configured or held, never automatically receiving. Kyle retains control of
+Felix's host, identity and permission policy.
 
 ## Install the verified Conduit artifact
 

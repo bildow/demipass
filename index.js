@@ -1347,7 +1347,7 @@ async function conduitOnboard({ name, model_family, session_id, session_name, ow
 
   const final = conduitConfig();
   const mode = fs.statSync(final.file).mode & 0o777;
-  return { ok: listed, ...(route ? { stable_address:route.alias, session_name:route.session_name, route } : {}), url: baseUrl, url_source: resolved.source, name: reg.name, owns: reg.owns, wallet: final.wallet, consent: { id: consent.id, daily_cap_dd: consent.daily_cap_dd },
+  return { ok: listed, receiver: require('./conduit-receiver-profile').status(final), ...(route ? { stable_address:route.alias, session_name:route.session_name, route } : {}), url: baseUrl, url_source: resolved.source, name: reg.name, owns: reg.owns, wallet: final.wallet, consent: { id: consent.id, daily_cap_dd: consent.daily_cap_dd },
     token: { token_id: final.token_id, expires_at: final.expires_at, cap_dd: final.cap_dd, minted }, config_file: final.file, config_mode: mode.toString(8), steps,
     note: 'Every conduit_* call re-reads this file and mints a new token from the DemiPass session when this one runs out; no restart needed. Panes started before this file existed keep working through it too.' };
 }
