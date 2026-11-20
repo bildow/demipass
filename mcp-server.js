@@ -22,6 +22,7 @@ let channelEnabled = process.env.CONDUIT_AUTO_INBOX === 'claude-channel';
 const codexEnabled = process.env.CONDUIT_AUTO_INBOX === 'codex-tool-output';
 let inboxListener = null;
 let profileTimer = null;
+let receiverHold = null;
 function receiverProfile() {
   const cfg = demipass.conduitConfig();
   if (!cfg.file_present || !cfg.pane_address || cfg.name !== cfg.pane_address) return null;
@@ -32,8 +33,11 @@ function notifyChannel(notification) {
     error => error ? reject(error) : resolve()));
 }
 function startProfileReceiver() {
-  receiverManager.tick();
-  inboxListener = receiverManager.listener;
+  let reason=null;
+  try { receiverManager.tick();reason=receiverManager.holdReason; }
+  catch(e) { reason=/^(receiver_already_owned|receiver_owner_invalid)$/.test(e.message||'')?e.message:'receiver_profile_held'; }
+  if(reason && reason!==receiverHold)process.stderr.write(`[conduit listener] ${reason}\n`);
+  receiverHold=reason;inboxListener=receiverManager.listener;
 }
 const receiverManager = new (require('./conduit-receiver-manager').ReceiverManager)({
   lease: () => require('./conduit-receiver-manager').acquire(demipass.conduitConfig()),
@@ -778,6 +782,7 @@ const HANDLERS = {
       enabled: Boolean(inboxListener) || channelEnabled || codexEnabled,
       adapter: receiver.transport || (channelEnabled ? 'claude-channel' : codexEnabled ? 'codex-tool-output' : null),
       ...(inboxListener ? inboxListener.status() : { running: false }),
+      hold_reason: receiverHold,
       live_pane_processing_proven: false,
     }, receiver };
   },

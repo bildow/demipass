@@ -7,8 +7,13 @@ const { policy, claudeArgs } = require('../conduit-startup');
 const [binary, ...args] = process.argv.slice(2);
 if (!binary || !require('path').isAbsolute(binary)) throw Error('absolute_claude_binary_required');
 let child;
-try { child = spawn(binary, claudeArgs(args, policy().claude_channels), { stdio: 'inherit' }); }
+let enabled=false;
+try { enabled=policy().claude_channels; } catch { console.error('Conduit startup policy invalid; launching Claude without automatic channel activation.'); }
+try { child = spawn(binary, claudeArgs(args, enabled), { stdio: 'inherit' }); }
 catch { process.exit(1); }
-for (const signal of ['SIGINT','SIGTERM','SIGHUP']) process.on(signal, () => child.kill(signal));
+// Terminal signals already reach both members of the foreground group. Sending
+// SIGINT twice turns a turn interruption into an unintended Claude exit.
+for (const signal of ['SIGINT','SIGHUP']) process.on(signal, () => {});
+process.on('SIGTERM', () => child.kill('SIGTERM'));
 child.on('error', () => { process.exitCode = 1; });
 child.on('exit', (code, signal) => { process.exitCode = code ?? (signal === 'SIGINT' ? 130 : 1); });

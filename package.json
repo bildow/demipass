@@ -98,7 +98,8 @@
     "docs/conduit-runtime-onboarding.md",
     "conduit-startup.js",
     "conduit-receiver-manager.js",
-    "bin/conduit-claude-start.js"
+    "bin/conduit-claude-start.js",
+    "bin/conduit-claude-resume.js"
   ],
   "dependencies": {
     "hpke-js": "1.8.1",

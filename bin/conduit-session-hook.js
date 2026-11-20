@@ -13,9 +13,9 @@ async function main(input) {
  process.env.CONDUIT_REQUIRE_PANE='1';
  const sdk=require('../index');sdk.configure({baseUrl:'https://api.dustforge.com',bearerToken:require('../onboard').sessionToken()});
  let reconciled;
- try{reconciled=await sdk.conduitReconcileSession();
-  if(reconciled.ok)require('../conduit-startup').provisionClaude(sdk.conduitConfig());
- }catch{reconciled={ok:false,reason:'session_route_held'};}
+ try{reconciled=await sdk.conduitReconcileSession();}catch{reconciled={ok:false,reason:'session_route_held'};}
+ let startupHeld=false;
+ if(reconciled.ok)try{require('../conduit-startup').provisionClaude(sdk.conduitConfig());}catch{startupHeld=true;}
  let modern=false;
  const dir=path.join(os.homedir(),'.config/demipass/runtime');
  try{for(const name of fs.readdirSync(dir)){
@@ -25,7 +25,7 @@ async function main(input) {
   try{const p=context.processInfo(r.pid);if(p.start_ticks===r.child_start_ticks)modern=true;}catch{}
  }}catch{}
  if(input.hook_event_name==='PreToolUse'&&/conduit_/.test(input.tool_name||'')&&(!modern||!reconciled.ok))return{hookSpecificOutput:{hookEventName:'PreToolUse',permissionDecision:'deny',permissionDecisionReason:'Conduit current-session binding is not ready. Reconnect DemiPass with /mcp to load the lifecycle-aware launcher; do not use an old pane address. No message sent by this check.'}};
- if(changed||!modern||!reconciled.ok)return{hookSpecificOutput:{hookEventName:input.hook_event_name,additionalContext:`Conduit identity: ${value.model_family}-${value.session_id}; current session name: ${value.session_name||'(unnamed)'}. Route ${reconciled.ok?'reconciled':'held'}. ${modern?'Lifecycle-aware MCP present.':'Reconnect DemiPass via /mcp once; the previous MCP must not send/read under an old identity.'} This does not prove automatic reception.`}};
+ if(changed||!modern||!reconciled.ok||startupHeld)return{hookSpecificOutput:{hookEventName:input.hook_event_name,additionalContext:`Conduit identity: ${value.model_family}-${value.session_id}; current session name: ${value.session_name||'(unnamed)'}. Route ${reconciled.ok?'reconciled':'held'}. ${startupHeld?'Automatic receiver provisioning held; inspect the owner policy/profile. ':''}${modern?'Lifecycle-aware MCP present.':'Reconnect DemiPass via /mcp once; the previous MCP must not send/read under an old identity.'} This does not prove automatic reception.`}};
  return null;
 }
 if(require.main===module){let raw='';process.stdin.on('data',b=>{raw+=b;if(raw.length>1048576)process.exit(2);});process.stdin.on('end',async()=>{

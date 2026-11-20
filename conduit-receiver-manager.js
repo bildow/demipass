@@ -14,8 +14,9 @@ function acquire(config) {
 // Re-arm only after the previous poll has settled. An uncertain delivery or
 // resource-limit stop is sticky; it is never converted into an automatic retry.
 class ReceiverManager {
-  constructor({ snapshot, create, lease = () => () => {} }) { this.snapshot = snapshot; this.create = create; this.lease = lease; this.release = null; this.listener = null; this.key = null; }
+  constructor({ snapshot, create, lease = () => () => {} }) { this.snapshot = snapshot; this.create = create; this.lease = lease; this.release = null; this.listener = null; this.key = null; this.holdReason = null; }
   tick() {
+    this.holdReason = null;
     let next;
     try { next = this.snapshot(); }
     catch (e) { if (this.listener) this.listener.stop(); throw e; }
@@ -23,9 +24,9 @@ class ReceiverManager {
     if (this.listener) {
       const state = this.listener.status();
       if (key !== this.key) this.listener.stop();
-      if (this.listener.status().poll_in_flight) return;
+      if (this.listener.status().poll_in_flight) { if(key!==this.key)this.holdReason='receiver_previous_poll_draining';return; }
       if (key === this.key && !state.stopped) return;
-      if (state.stopped && state.last_error && state.last_error !== 'inbox_binding_changed') return;
+      if (state.stopped && state.last_error && state.last_error !== 'inbox_binding_changed') { this.holdReason=state.last_error;return; }
       this.listener.stop(); this.listener = null; this.key = null;
       if (this.release) { this.release(); this.release = null; }
     }

@@ -20,10 +20,14 @@ test('real launcher preserves resume/name/model/permissions and does not auto-an
   const run=a=>JSON.parse(execFileSync(process.execPath,[path.resolve('bin/conduit-claude-start.js'),fake,...a],{env:{HOME:h,PATH:process.env.PATH},encoding:'utf8'}));
   assert.deepEqual(run(args),args);
   profiles.writePrivate(f,{version:1,claude_channels:true});
-  assert.deepEqual(run(args),['--dangerously-load-development-channels','server:demipass',...args]);
+  assert.deepEqual(run(args),[...args,'--dangerously-load-development-channels','server:demipass']);
+  assert.deepEqual(run(['fix the bug']),['fix the bug','--dangerously-load-development-channels','server:demipass']);
+  assert.deepEqual(run(['--','fix the bug']),['--dangerously-load-development-channels','server:demipass','--','fix the bug']);
+  assert.deepEqual(run(['--dangerously-load-development-channels=server:demipass']),['--dangerously-load-development-channels','server:demipass']);
   assert.deepEqual(run(['--help']),['--help']);assert.deepEqual(run(['mcp','list']),['mcp','list']);
   assert.deepEqual(run(['-p','a prompt']),['-p','a prompt']);
   assert.deepEqual(run(run(args)),run(args));
+  fs.writeFileSync(f,'broken');assert.deepEqual(run(args),args);
 });
 test('automatic provisioning only creates a missing Claude profile; explicit disable and other runtimes survive',t=>{
   const h=home(t), config={file:path.join(h,'pane.json'),file_present:true,pane_address:'opus-test',name:'opus-test',wallet:'w',url:'https://conduit.dustroot.com'};
@@ -59,4 +63,27 @@ test('inherited mailbox requires authenticated current route lineage; claimed ad
  const sdk={conduitAgents:async()=>({agents:[{name:'current',route:{current:'current',addresses:['old','current']}}]})};
  assert.equal(await validateRecipient(sdk,{to:'old'},cfg),true);assert.equal(await validateRecipient(sdk,{to:'foreign'},cfg),false);
  sdk.conduitAgents=async()=>({agents:[{name:'current',route:{current:'other',addresses:['old']}}]});assert.equal(await validateRecipient(sdk,{to:'old'},cfg),false);
+});
+
+test('foreground process-group SIGINT reaches the child once; wrapper stays until child exits',async t=>{
+ const h=home(t),{spawn}=require('child_process'),fake=path.join(h,'fake-claude');
+ fs.writeFileSync(fake,'#!/usr/bin/env node\nprocess.on("SIGINT",()=>console.log("INT"));process.on("SIGTERM",()=>process.exit(0));console.log("READY");setInterval(()=>{},1000);',{mode:0o700});
+ const child=spawn(process.execPath,[path.resolve('bin/conduit-claude-start.js'),fake],{detached:true,env:{HOME:h,PATH:process.env.PATH},stdio:['ignore','pipe','pipe']});
+ t.after(()=>{try{process.kill(-child.pid,'SIGKILL');}catch{}});let out='';child.stdout.on('data',x=>out+=x);
+ const until=Date.now()+3000;while(!out.includes('READY')&&Date.now()<until)await new Promise(r=>setTimeout(r,10));assert.match(out,/READY/);
+ process.kill(-child.pid,'SIGINT');await new Promise(r=>setTimeout(r,100));assert.equal(out.match(/INT/g)?.length,1);assert.equal(child.exitCode,null);
+ const exit=new Promise(r=>child.once('exit',r));child.kill('SIGTERM');await exit;
+});
+
+test('recovery helper preserves exact UUID and title and refuses duplicate or stale process evidence',t=>{
+ const h=home(t),fake=path.join(h,'claude'),script=path.join(h,'test.js');fs.symlinkSync(process.execPath,fake);
+ const root=path.resolve('.');fs.writeFileSync(script,`const fs=require('fs'),path=require('path'),assert=require('assert/strict');
+ const {recovery}=require(${JSON.stringify(root+'/bin/conduit-claude-resume')});
+ const {processInfo}=require(${JSON.stringify(root+'/conduit-session-context')});const live=processInfo(process.pid);
+ const dir=path.join(process.env.HOME,'.claude/sessions');fs.mkdirSync(dir,{recursive:true,mode:0o700});
+ const file=path.join(dir,process.pid+'.json'),r={pid:process.pid,procStart:live.start_ticks,sessionId:'11111111-1111-4111-8111-111111111111',name:'exact name'};
+ fs.writeFileSync(file,JSON.stringify(r));assert.deepEqual(recovery(process.pid).args,['--resume',r.sessionId,'--name','exact name']);
+ fs.writeFileSync(file,JSON.stringify({...r,procStart:'0'}));assert.throws(()=>recovery(process.pid));
+ console.log('PASS');`);
+ assert.match(execFileSync(fake,[script],{env:{HOME:h,PATH:process.env.PATH},encoding:'utf8',timeout:5000}),/PASS/);
 });
