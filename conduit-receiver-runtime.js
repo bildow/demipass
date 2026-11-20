@@ -19,19 +19,24 @@ async function durableDelivery(config, profile, notification, send) {
   try { existing = profiles.readPrivate(file); } catch (e) { if (e.code !== 'ENOENT') throw Error('inbox_delivery_uncertain'); }
   if (existing) {
     if (existing.profile_sha256 !== profiles.digest(profile) || existing.content_sha256 !== hash) throw Error('inbox_delivery_uncertain');
-    if (existing.state === 'accepted') return existing.result;
+    if (existing.state === 'accepted' || existing.state === 'refused') return existing.result;
     throw Error('inbox_delivery_uncertain');
   }
   // Exclusive creation acts as cross-process admission; an incomplete record
   // after a crash is unreadable and therefore holds.
+  const refused = ['agent','goose','web-ui'].includes(profile.runtime)
+    && event.message.payload_type && event.message.payload_type !== 'text';
+  const refusal = { scope: 'refused_not_submitted', reason: 'sealed_content_not_supported', message_id: id };
   let fd;
   try {
     fd = fs.openSync(file, 'wx', 0o600);
-    fs.writeFileSync(fd, JSON.stringify({ profile_sha256: profiles.digest(profile), state: 'uncertain', message_id: id, content_sha256: hash, at: new Date().toISOString() }));
+    fs.writeFileSync(fd, JSON.stringify({ profile_sha256: profiles.digest(profile), state: refused ? 'refused' : 'uncertain',
+      ...(refused ? { result: refusal } : {}), message_id: id, content_sha256: hash, at: new Date().toISOString() }));
     fs.fsyncSync(fd);
   } catch { throw Error('inbox_delivery_uncertain'); }
   finally { if (fd !== undefined) fs.closeSync(fd); }
   const d = fs.openSync(dir, 'r'); try { fs.fsyncSync(d); } finally { fs.closeSync(d); }
+  if (refused) return refusal; // No host submission and no acknowledgment; later mail can proceed.
   try {
     const result = await send();
     profiles.writePrivate(file, { profile_sha256: profiles.digest(profile), state: 'accepted', message_id: id, content_sha256: hash, result, at: new Date().toISOString() });

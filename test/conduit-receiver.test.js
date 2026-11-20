@@ -35,7 +35,7 @@ test('profiles: per-pane binding, private permissions, idempotence and explicit 
 });
 test('invalid profiles, symlinks, VPN routes and web-seat push refuse without orphan credential', t => {
   const { config, dir } = setup(t);
-  for (const endpoint of ['http://100.83.112.88:8181','https://private.ts.net/receiver'])
+  for (const endpoint of ['http://100.83.112.88:8181','https://private.ts.net/receiver','http://8.8.8.8:8080/receiver'])
     assert.throws(() => profiles.provision(config, { runtime: 'agent', endpoint, policy_sha256: 'a'.repeat(64) }));
   assert.equal(fs.existsSync(profiles.fileFor(config) + '.credential.json'), false);
   assert.throws(() => profiles.provision(config, { runtime: 'web-seat', public_endpoint: 'https://conduit.dustroot.com/seats/one', enabled: true }));
@@ -58,6 +58,16 @@ test('failed dispatch remains uncertain across retries; concurrent callers dispa
   await assert.rejects(durableDelivery(s.config,s.profile,s.notification(),fail));assert.equal(calls,1);
   s.event.message.id='m2'; const results=await Promise.allSettled([1,2].map(()=>durableDelivery(s.config,s.profile,s.notification(),async()=>{calls++;return{};})));
   assert.equal(calls,2);assert(results.some(x=>x.status==='fulfilled'));
+});
+test('sealed callback refusal is durable, never submitted, and does not block later text', async t => {
+ const s=setup(t);let calls=0;const send=async()=>{calls++;return {scope:'context_received'};};
+ s.event.message.payload_type='conduit-sealed-v1';
+ for(let i=0;i<2;i++)assert.equal((await durableDelivery(s.config,s.profile,s.notification(),send)).scope,'refused_not_submitted');
+ assert.equal(calls,0);
+ s.event.message={...s.event.message,id:'m2',seq:2,payload_type:'text'};
+ assert.equal((await durableDelivery(s.config,s.profile,s.notification(),send)).scope,'context_received');
+ assert.equal(calls,1);
+ await durableDelivery(s.config,s.profile,s.notification(),send);assert.equal(calls,1);
 });
 test('real HTTP receiver: authenticated context callback, replay, changed content, wrong policy and sealed refusal', async t => {
   const s=setup(t);let received=[];
