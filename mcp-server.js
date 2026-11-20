@@ -42,30 +42,9 @@ function startProfileReceiver() {
   inboxListener.start();
 }
 function startInboxListener() {
+  // Environment flags advertise host support; they never authorize a shared
+  // mailbox or bypass the profile runtime's durable dispatch accounting.
   startProfileReceiver();
-  if (receiverProfile() || (!channelEnabled && !codexEnabled) || inboxListener) return;
-  const { InboxListener } = require('./conduit-listener');
-  inboxListener = new InboxListener({
-    config: () => demipass.conduitConfig(),
-    beforePoll: () => {
-      if (codexEnabled) require('./conduit-codex-adapter').validateCodexBinding({
-        socketPath: process.env.CONDUIT_CODEX_SOCKET, threadId: process.env.CONDUIT_CODEX_THREAD,
-        address: demipass.conduitConfig().name,
-      });
-    },
-    inbox: args => demipass.conduitInbox(args),
-    notify: notification => codexEnabled ? require('./conduit-codex-adapter').deliverCodex({
-      socketPath: process.env.CONDUIT_CODEX_SOCKET,
-      threadId: process.env.CONDUIT_CODEX_THREAD,
-      address: demipass.conduitConfig().name,
-      notification,
-    }) : new Promise((resolve, reject) => {
-      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...notification }) + '\n',
-        error => error ? reject(error) : resolve());
-    }),
-    onError: code => process.stderr.write(`[conduit listener] ${code}\n`),
-  });
-  inboxListener.start();
 }
 
 // Configure SDK with env vars

@@ -114,12 +114,13 @@ test('invalid host adapter holds before a possibly billable inbox read', async (
 test('real MCP subprocess advertises channel only with explicit opt-in, then polls without a tool call', { timeout: 10000 }, async () => {
   const http = require('node:http'), fs = require('node:fs'), os = require('node:os'), path = require('node:path');
   const { spawn } = require('node:child_process');
+  const sid='11111111-1111-4111-8111-111111111111',name='fable-'+sid;
   let requests = 0;
   const relay = http.createServer((req, res) => {
     requests++;
     assert.equal(req.method, 'GET'); assert.match(req.url, /^\/inbox\?/);
     res.setHeader('content-type', 'application/json');
-    res.end(JSON.stringify({ agent: 'claude-test', messages: [message()], next_since: 1 }));
+    res.end(JSON.stringify({ agent: name, messages: [message()], next_since: 1 }));
   });
   await new Promise(r => relay.listen(0, '127.0.0.1', r));
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'conduit-listener-'));
@@ -128,10 +129,18 @@ test('real MCP subprocess advertises channel only with explicit opt-in, then pol
     expires_at: '2099-01-01T00:00:00Z', url: `http://127.0.0.1:${relay.address().port}` }), { mode: 0o600 });
   let child;
   try {
-    for (const enabled of [false, true]) {
+    for (const [enabled,provisioned] of [[false,false],[true,false],[true,true]]) {
+      const paneDir=path.join(tmp,'conduit-panes');fs.mkdirSync(paneDir,{recursive:true,mode:0o700});
+      const paneFile=path.join(paneDir,name+'.json');
+      if(provisioned){
+        const relayUrl=`http://127.0.0.1:${relay.address().port}`;
+        fs.writeFileSync(paneFile,JSON.stringify({name,wallet:'wallet-a',token:'fixture-only',expires_at:'2099-01-01T00:00:00Z',url:relayUrl}),{mode:0o600});
+        fs.writeFileSync(paneFile+'.receiver.json',JSON.stringify({version:1,runtime:'claude',address:name,wallet:'wallet-a',relay:relayUrl,enabled:true}),{mode:0o600});
+      }
+
       child = spawn(process.execPath, [path.join(__dirname, '..', 'mcp-server.js')], {
         env: { PATH: process.env.PATH, HOME: tmp, CONDUIT_CONFIG: config,
-          CONDUIT_AUTO_INBOX: enabled ? 'claude-channel' : '' }, stdio: ['pipe', 'pipe', 'pipe'],
+          CONDUIT_AUTO_INBOX: enabled ? 'claude-channel' : '', ...(provisioned?{CONDUIT_MODEL_FAMILY:'fable',CONDUIT_SESSION_ID:sid}:{}) }, stdio: ['pipe', 'pipe', 'pipe'],
       });
       let buffer = '';
       const messages = [];
@@ -155,10 +164,11 @@ test('real MCP subprocess advertises channel only with explicit opt-in, then pol
       const init = await waitFor(m => m.id === 1);
       assert.equal(Boolean(init.result.capabilities.experimental?.['claude/channel']), enabled);
       child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
-      if (enabled) {
+      if (provisioned) {
         const event = await waitFor(m => m.method === 'notifications/claude/channel');
         assert.equal(JSON.parse(event.params.content).message.id, 'msg_1');
       }
+      if(!provisioned){await new Promise(r=>setTimeout(r,150));assert.equal(requests,0);assert(!messages.some(m=>m.method==='notifications/claude/channel'));}
       const exit = new Promise(r => child.once('exit', r)); child.stdin.end(); await exit; child = null;
     }
     assert.equal(requests, 1);
