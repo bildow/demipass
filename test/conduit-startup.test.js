@@ -51,3 +51,12 @@ test('process-held mailbox lease excludes another receiver and releases without 
   const release=acquire(c);try{assert.throws(()=>acquire(c),/already_owned/);}finally{release();}
   acquire(c)();assert(fs.existsSync(profiles.fileFor(c)+'.owner.lock'));
 });
+
+test('inherited mailbox requires authenticated current route lineage; claimed addressee cannot authorize it',async()=>{
+ const {validateRecipient}=require('../conduit-receiver-runtime');const cfg={name:'current'};
+ assert.equal(await validateRecipient({}, {to:'current'},cfg),true);
+ assert.equal(await validateRecipient({}, {to:'foreign',addressed_to:'current'},cfg),false);
+ const sdk={conduitAgents:async()=>({agents:[{name:'current',route:{current:'current',addresses:['old','current']}}]})};
+ assert.equal(await validateRecipient(sdk,{to:'old'},cfg),true);assert.equal(await validateRecipient(sdk,{to:'foreign'},cfg),false);
+ sdk.conduitAgents=async()=>({agents:[{name:'current',route:{current:'other',addresses:['old']}}]});assert.equal(await validateRecipient(sdk,{to:'old'},cfg),false);
+});

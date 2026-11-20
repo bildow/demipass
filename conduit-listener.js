@@ -4,9 +4,10 @@
 // after a process restart, unacknowledged messages must be offered again.
 class InboxListener {
   constructor({ config, inbox, notify, beforePoll = () => {}, onError = () => {}, intervalMs = 30000,
-    maxSeen = 10000, pageSize = 50 }) {
+    maxSeen = 10000, pageSize = 50, validateRecipient = async (message, config) => message.to === config.name }) {
     this.config = config; this.inbox = inbox; this.notify = notify;
     this.beforePoll = beforePoll;
+    this.validateRecipient = validateRecipient;
     this.onError = onError; this.intervalMs = intervalMs;
     this.maxSeen = maxSeen; this.pageSize = pageSize;
     this.seen = new Set(); this.since = 0; this.identity = null;
@@ -44,8 +45,10 @@ class InboxListener {
       for (const m of result.messages) {
         if (!m || typeof m.id !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(m.id)
             || !Number.isSafeInteger(m.seq) || m.seq <= next
+            || typeof m.to !== 'string'
             || typeof m.from !== 'string' || typeof m.body !== 'string'
             || Buffer.byteLength(JSON.stringify(m)) > 262144) throw Error('inbox_invalid_message');
+        if (!await this.validateRecipient(m, this.config())) throw Error('inbox_wrong_recipient');
         next = m.seq;
       }
       if (result.next_since !== next) throw Error('inbox_invalid_cursor');

@@ -77,6 +77,8 @@ test('missing onboarding does not make a network call', async () => {
 test('wrong address, malformed row and cursor refuse before any emission', async () => {
   for (const result of [
     { agent: 'another-pane', messages: [message()], next_since: 1 },
+    { agent: 'claude-test', messages: [{...message(),to:'another-pane'}], next_since: 1 },
+    { agent: 'claude-test', messages: [{...message(),to:undefined}], next_since: 1 },
     { agent: 'claude-test', messages: [null], next_since: 1 },
     { agent: 'claude-test', messages: [message()], next_since: 999 },
     { agent: 'claude-test', messages: [message(2), message(1)], next_since: 1 },
@@ -120,7 +122,7 @@ test('real MCP subprocess advertises channel only with explicit opt-in, then pol
     requests++;
     assert.equal(req.method, 'GET'); assert.match(req.url, /^\/inbox\?/);
     res.setHeader('content-type', 'application/json');
-    res.end(JSON.stringify({ agent: name, messages: [message()], next_since: 1 }));
+    res.end(JSON.stringify({ agent: name, messages: [{...message(),to:name}], next_since: 1 }));
   });
   await new Promise(r => relay.listen(0, '127.0.0.1', r));
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'conduit-listener-'));

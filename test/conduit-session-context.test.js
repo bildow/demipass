@@ -85,3 +85,10 @@ test('malformed current lifecycle event cannot leave the old mailbox usable',t=>
  ctx.record(input(SID),runtime);
  assert.equal(sdk.conduitConfig().pane_address,'fable-'+SID);
 `));
+
+test('a prior boot cannot supply identity or defeat current-boot lifecycle ordering',t=>run(t,`
+ ctx.record(input(SID),runtime);const file=ctx.fileFor(runtime),old=profiles.readPrivate(file);
+ old.boot_id='00000000-0000-4000-8000-000000000000';old.event_tick=Number.MAX_SAFE_INTEGER;profiles.writePrivate(file,old);
+ assert.throws(()=>ctx.load(runtime),/wrong_boot/);
+ ctx.record(input(NEXT,'new boot'),runtime);assert.equal(ctx.load(runtime).session_id,NEXT);
+`));

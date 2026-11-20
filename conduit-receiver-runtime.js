@@ -4,6 +4,18 @@ const profiles = require('./conduit-receiver-profile');
 const { InboxListener } = require('./conduit-listener');
 const codex = require('./conduit-codex-adapter');
 const httpAdapter = require('./conduit-http-adapter');
+async function validateRecipient(sdk, message, config) {
+  if (message.to === config.name) return true;
+  // Inherited backlog is admitted only through authenticated route lineage,
+  // never through message-supplied addressed_to or display names.
+  if (!message.to || !sdk.conduitAgents) return false;
+  const response = await sdk.conduitAgents();
+  const rows = Array.isArray(response) ? response : response?.agents;
+  if (!Array.isArray(rows)) return false;
+  const row = rows.find(r => r.name === config.name);
+  return row?.route?.current === config.name && Array.isArray(row.route.addresses)
+    && row.route.addresses.includes(message.to);
+}
 
 // Retain admission uncertainty across MCP/daemon restarts. Only a known
 // pre-submission failure is retryable; no restart blindly re-dispatches work.
@@ -60,6 +72,7 @@ function createRuntime({ sdk, profile, notifyClaude, onError = () => {} }) {
   };
   const listener = new InboxListener({
     config: current,
+    validateRecipient: (message, cfg) => validateRecipient(sdk, message, cfg),
     beforePoll: async () => {
       current();
       if (profile.runtime === 'claude') { if (!notifyClaude) throw Error('inbox_adapter_binding_invalid'); }
@@ -80,4 +93,4 @@ function createRuntime({ sdk, profile, notifyClaude, onError = () => {} }) {
   });
   return listener;
 }
-module.exports = { createRuntime, durableDelivery };
+module.exports = { createRuntime, durableDelivery, validateRecipient };
