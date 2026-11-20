@@ -147,3 +147,15 @@ test('MCP invalid profile never falls through to legacy auto-inbox; tools remain
  const deadline=Date.now()+3000;while(!out.includes('"id":2')&&Date.now()<deadline)await new Promise(r=>setTimeout(r,20));
  assert(out.includes('"id":2'));assert(err.includes('receiver_profile_held'));assert(!err.includes('inbox_adapter_socket_invalid'));
 });
+
+test('large accepted callback replays after host restart using bounded receipt metadata',async t=>{
+ const s=setup(t);let calls=0;s.event.message.body='x'.repeat(120000);
+ const options={address:s.config.name,wallet:s.config.wallet,policySha256:s.policy,credentialFile:s.credential,directory:s.dir,onMessage:async()=>{calls++;return true;}};
+ s.profile.endpoint=await listen(t,createReceiverHost(options));
+ assert.equal((await adapter.deliver(s.profile,s.notification())).scope,'context_received');
+ const file=path.join(s.dir,profiles.digest([s.config.name,s.event.message.id])+'.json');
+ assert(fs.statSync(file).size<65536);assert.equal(profiles.readPrivate(file).event,undefined);
+ s.profile.endpoint=await listen(t,createReceiverHost(options));
+ assert.equal((await adapter.deliver(s.profile,s.notification())).scope,'context_received');assert.equal(calls,1);
+ s.event.message.body+='changed';await assert.rejects(adapter.deliver(s.profile,s.notification()),/uncertain/);assert.equal(calls,1);
+});
