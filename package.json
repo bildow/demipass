@@ -13,7 +13,7 @@
   "scripts": {
     "mcp": "node mcp-server.js",
     "buoy": "node buoy-mcp.js",
-    "test": "npm run test:runtime-catalog && npm run test:session && npm run test:receiver && npm run test:listener && node --test test/public-route.test.js && node test/use-token-flow.test.js && node test/services.test.js && node test/conduit.test.js && node --test test/fleetgate-mcp.test.js test/fleetgate-admission.test.js && node --test test/onboard.test.js test/pane-autobind.test.js test/pane-launcher.test.js && npm run test:sealed",
+    "test": "npm run test:startup && npm run test:runtime-catalog && npm run test:session && npm run test:receiver && npm run test:listener && node --test test/public-route.test.js && node test/use-token-flow.test.js && node test/services.test.js && node test/conduit.test.js && node --test test/fleetgate-mcp.test.js test/fleetgate-admission.test.js && node --test test/onboard.test.js test/pane-autobind.test.js test/pane-launcher.test.js && npm run test:sealed",
     "test:extension": "node --test extension/test/*.test.js",
     "test:extension:e2e": "node extension/test/e2e/smoke.js",
     "test:extension:e2e:all": "node extension/test/e2e/smoke.js --browser=chromium,chrome,brave,firefox,zen",
@@ -24,7 +24,8 @@
     "test:listener": "node --test test/conduit-listener.test.js test/conduit-codex-adapter.test.js",
     "test:receiver": "node --test test/conduit-receiver*.test.js",
     "test:session": "node --test test/conduit-session-context.test.js",
-    "test:runtime-catalog": "node --test test/conduit-runtime-catalog.test.js"
+    "test:runtime-catalog": "node --test test/conduit-runtime-catalog.test.js",
+    "test:startup": "node --test test/conduit-startup.test.js"
   },
   "keywords": [
     "secrets",
@@ -94,7 +95,11 @@
     "bin/conduit-session-hook.js",
     "docs/conduit-session-rebind.md",
     "conduit-runtime-catalog.js",
-    "docs/conduit-runtime-onboarding.md"
+    "docs/conduit-runtime-onboarding.md",
+    "conduit-startup.js",
+    "conduit-receiver-manager.js",
+    "bin/conduit-claude-start.js",
+    "bin/conduit-claude-resume.js"
   ],
   "dependencies": {
     "hpke-js": "1.8.1",

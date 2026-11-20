@@ -53,7 +53,7 @@ test('uncertain native admission stops automatic retries; message remains unackn
     const errors = [];
     const listener = new InboxListener({
       config: () => ({ name: address, wallet: 'w', file: '/fixture', file_present: true, url: 'https://conduit.dustroot.com' }),
-      inbox: async () => ({ agent: address, messages: [{ id: 'msg_1', seq: 1, from: 'peer', body: 'hello' }], next_since: 1 }),
+      inbox: async () => ({ agent: address, messages: [{ id: 'msg_1', seq: 1, from: 'peer', to: address, body: 'hello' }], next_since: 1 }),
       notify: event => deliverCodex({ socketPath, threadId, address, notification: event, timeoutMs: 100 }),
       onError: e => errors.push(e),
     });

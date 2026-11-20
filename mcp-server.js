@@ -22,6 +22,7 @@ let channelEnabled = process.env.CONDUIT_AUTO_INBOX === 'claude-channel';
 const codexEnabled = process.env.CONDUIT_AUTO_INBOX === 'codex-tool-output';
 let inboxListener = null;
 let profileTimer = null;
+let receiverHold = null;
 function receiverProfile() {
   const cfg = demipass.conduitConfig();
   if (!cfg.file_present || !cfg.pane_address || cfg.name !== cfg.pane_address) return null;
@@ -32,15 +33,24 @@ function notifyChannel(notification) {
     error => error ? reject(error) : resolve()));
 }
 function startProfileReceiver() {
-  if (inboxListener) return;
-  const profile = receiverProfile();
-  if (!profile || !profile.enabled || (profile.driver || (profile.runtime === 'claude' ? 'mcp' : 'standalone')) !== 'mcp' || profile.runtime === 'web-seat' || profile.runtime === 'claude' && !channelEnabled) return;
-  inboxListener = require('./conduit-receiver-runtime').createRuntime({ sdk: demipass, profile,
+  let reason=null;
+  try { receiverManager.tick();reason=receiverManager.holdReason; }
+  catch(e) { reason=/^(receiver_already_owned|receiver_owner_invalid)$/.test(e.message||'')?e.message:'receiver_profile_held'; }
+  if(reason && reason!==receiverHold)process.stderr.write(`[conduit listener] ${reason}\n`);
+  receiverHold=reason;inboxListener=receiverManager.listener;
+}
+const receiverManager = new (require('./conduit-receiver-manager').ReceiverManager)({
+  lease: () => require('./conduit-receiver-manager').acquire(demipass.conduitConfig()),
+  snapshot: () => {
+    const profile = receiverProfile();
+    if (!profile || !profile.enabled || (profile.driver || (profile.runtime === 'claude' ? 'mcp' : 'standalone')) !== 'mcp' || profile.runtime === 'web-seat' || profile.runtime === 'claude' && !channelEnabled) return null;
+    return { profile, generation: demipass.conduitConfig().lifecycle_generation || null };
+  },
+  create: ({ profile }) => require('./conduit-receiver-runtime').createRuntime({ sdk: demipass, profile,
     notifyClaude: channelEnabled ? notifyChannel : null,
     onError: code => process.stderr.write(`[conduit listener] ${code}\n`),
-  });
-  inboxListener.start();
-}
+  }),
+});
 function startInboxListener() {
   // Environment flags advertise host support; they never authorize a shared
   // mailbox or bypass the profile runtime's durable dispatch accounting.
@@ -772,6 +782,7 @@ const HANDLERS = {
       enabled: Boolean(inboxListener) || channelEnabled || codexEnabled,
       adapter: receiver.transport || (channelEnabled ? 'claude-channel' : codexEnabled ? 'codex-tool-output' : null),
       ...(inboxListener ? inboxListener.status() : { running: false }),
+      hold_reason: receiverHold,
       live_pane_processing_proven: false,
     }, receiver };
   },
@@ -840,6 +851,9 @@ async function handleMessage(msg) {
   const { id, method, params } = msg;
 
   if (method === 'initialize') {
+    // Lifecycle hook and MCP can start concurrently. Advertise the owner's
+    // opt-in now; reading starts only when the bound profile is ready.
+    try { if (process.env.CONDUIT_RUNTIME_PID && require('./conduit-startup').policy().claude_channels) channelEnabled = true; } catch { /* invalid policy holds */ }
     let profile; try { profile = receiverProfile(); } catch { /* Keep tools available; reception holds. */ }
     if (profile?.enabled && profile.runtime === 'claude') channelEnabled = true;
     return jsonrpcResponse(id, {

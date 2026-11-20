@@ -4,6 +4,18 @@ const profiles = require('./conduit-receiver-profile');
 const { InboxListener } = require('./conduit-listener');
 const codex = require('./conduit-codex-adapter');
 const httpAdapter = require('./conduit-http-adapter');
+async function validateRecipient(sdk, message, config, directory = () => sdk.conduitAgents()) {
+  if (message.to === config.name) return true;
+  // Inherited backlog is admitted only through authenticated route lineage,
+  // never through message-supplied addressed_to or display names.
+  if (!message.to || !sdk.conduitAgents) return false;
+  const response = await directory();
+  const rows = Array.isArray(response) ? response : response?.agents;
+  if (!Array.isArray(rows)) return false;
+  const row = rows.find(r => r.name === config.name);
+  return row?.route?.current === config.name && Array.isArray(row.route.addresses)
+    && row.route.addresses.includes(message.to);
+}
 
 // Retain admission uncertainty across MCP/daemon restarts. Only a known
 // pre-submission failure is retryable; no restart blindly re-dispatches work.
@@ -53,6 +65,7 @@ function createRuntime({ sdk, profile, notifyClaude, onError = () => {} }) {
   if (!profile.enabled) throw Error('receiver_disabled');
   if (profile.runtime === 'web-seat') throw Error('receiver_web_seat_has_no_push_contract');
   const pinned = profiles.digest(profile);
+  let directoryPromise;
   const current = () => {
     const cfg = sdk.conduitConfig(), now = profiles.load(cfg);
     if (!now || profiles.digest(now) !== pinned) throw Error('inbox_binding_changed');
@@ -60,7 +73,10 @@ function createRuntime({ sdk, profile, notifyClaude, onError = () => {} }) {
   };
   const listener = new InboxListener({
     config: current,
+    validateRecipient: (message, cfg) => validateRecipient(sdk, message, cfg,
+      () => directoryPromise ||= sdk.conduitAgents()),
     beforePoll: async () => {
+      directoryPromise = null;
       current();
       if (profile.runtime === 'claude') { if (!notifyClaude) throw Error('inbox_adapter_binding_invalid'); }
       else if (profile.runtime === 'codex') codex.validateCodexBinding({ socketPath: profile.socket, threadId: profile.thread_id, address: profile.address });
@@ -80,4 +96,4 @@ function createRuntime({ sdk, profile, notifyClaude, onError = () => {} }) {
   });
   return listener;
 }
-module.exports = { createRuntime, durableDelivery };
+module.exports = { createRuntime, durableDelivery, validateRecipient };

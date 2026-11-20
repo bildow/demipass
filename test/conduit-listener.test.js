@@ -77,6 +77,8 @@ test('missing onboarding does not make a network call', async () => {
 test('wrong address, malformed row and cursor refuse before any emission', async () => {
   for (const result of [
     { agent: 'another-pane', messages: [message()], next_since: 1 },
+    { agent: 'claude-test', messages: [{...message(),to:'another-pane'}], next_since: 1 },
+    { agent: 'claude-test', messages: [{...message(),to:undefined}], next_since: 1 },
     { agent: 'claude-test', messages: [null], next_since: 1 },
     { agent: 'claude-test', messages: [message()], next_since: 999 },
     { agent: 'claude-test', messages: [message(2), message(1)], next_since: 1 },
@@ -89,6 +91,12 @@ test('bounded session memory holds without acknowledging or skipping mail', asyn
   const f = fixture({ maxSeen: 1 }); f.setMessages([message(1), message(2)]);
   await f.listener.poll(); assert.equal(f.sent.length, 1); assert.equal(f.listener.since, 0);
   assert.equal(f.listener.stopped, true); assert.deepEqual(f.errors, ['inbox_session_limit']);
+});
+test('a wrong recipient holds visibly instead of spinning or consuming later mail',async()=>{
+ const f=fixture();f.setMessages([{...message(),to:'other'},message(2)]);
+ await f.listener.poll();await f.listener.poll();assert.equal(f.sent.length,0);assert.equal(f.calls.length,1);
+ assert.equal(f.listener.status().stopped,true);assert.equal(f.listener.status().last_error,'inbox_wrong_recipient');
+ assert.equal(f.listener.since,0);
 });
 test('stop during a poll prevents subsequent delivery', async () => {
   let release, entered;
@@ -120,7 +128,7 @@ test('real MCP subprocess advertises channel only with explicit opt-in, then pol
     requests++;
     assert.equal(req.method, 'GET'); assert.match(req.url, /^\/inbox\?/);
     res.setHeader('content-type', 'application/json');
-    res.end(JSON.stringify({ agent: name, messages: [message()], next_since: 1 }));
+    res.end(JSON.stringify({ agent: name, messages: [{...message(),to:name}], next_since: 1 }));
   });
   await new Promise(r => relay.listen(0, '127.0.0.1', r));
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'conduit-listener-'));
